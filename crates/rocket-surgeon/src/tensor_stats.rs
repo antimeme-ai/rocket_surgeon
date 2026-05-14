@@ -22,6 +22,7 @@ pub struct Pass1Result {
     abs_max: f64,
     sparse_count: u64,
     nan_count: u64,
+    inf_count: u64,
     l2_accum: f64,
     l2_scale: f64,
 }
@@ -79,22 +80,27 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
     let mut abs_max: f64 = 0.0;
     let mut sparse_count: u64 = 0;
     let mut nan_count: u64 = 0;
+    let mut inf_count: u64 = 0;
     let mut l2_accum: f64 = 0.0;
     let mut l2_scale: f64 = 0.0;
 
     for &x in values {
         n += 1;
 
-        // NaN guard — count but skip all accumulators so they stay clean
-        if x.is_nan() {
-            nan_count += 1;
+        // Non-finite guard — count but skip all accumulators so they stay clean
+        if !x.is_finite() {
+            if x.is_nan() {
+                nan_count += 1;
+            } else {
+                inf_count += 1;
+            }
             continue;
         }
 
         // Welford update
-        let non_nan = n - nan_count;
+        let finite = n - nan_count - inf_count;
         let delta = x - mean;
-        mean += delta / non_nan as f64;
+        mean += delta / finite as f64;
         let delta2 = x - mean;
         m2 += delta * delta2;
 
@@ -138,6 +144,7 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
         abs_max,
         sparse_count,
         nan_count,
+        inf_count,
         l2_accum,
         l2_scale,
     }
@@ -156,8 +163,8 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
     let mut heap: BinaryHeap<std::cmp::Reverse<TopKHeapEntry>> = BinaryHeap::with_capacity(k + 1);
 
     for (i, &x) in values.iter().enumerate() {
-        // Skip NaNs — they were counted in pass 1
-        if x.is_nan() {
+        // Skip non-finite values — they were counted in pass 1
+        if !x.is_finite() {
             continue;
         }
 
@@ -219,21 +226,22 @@ pub fn merge_pass1(a: &Pass1Result, b: &Pass1Result) -> Pass1Result {
         return a.clone();
     }
 
-    let a_non_nan = a.n - a.nan_count;
-    let b_non_nan = b.n - b.nan_count;
-    let total_non_nan = a_non_nan + b_non_nan;
+    let a_finite = a.n - a.nan_count - a.inf_count;
+    let b_finite = b.n - b.nan_count - b.inf_count;
+    let total_finite = a_finite + b_finite;
 
     let n = a.n + b.n;
     let nan_count = a.nan_count + b.nan_count;
+    let inf_count = a.inf_count + b.inf_count;
 
     // Chan/Golub/LeVeque parallel Welford merge
-    let (mean, m2) = if total_non_nan == 0 {
+    let (mean, m2) = if total_finite == 0 {
         (0.0, 0.0)
     } else {
         let delta = b.mean - a.mean;
-        let mean = delta.mul_add(b_non_nan as f64 / total_non_nan as f64, a.mean);
+        let mean = delta.mul_add(b_finite as f64 / total_finite as f64, a.mean);
         let m2 = (delta * delta).mul_add(
-            a_non_nan as f64 * b_non_nan as f64 / total_non_nan as f64,
+            a_finite as f64 * b_finite as f64 / total_finite as f64,
             a.m2 + b.m2,
         );
         (mean, m2)
@@ -268,6 +276,7 @@ pub fn merge_pass1(a: &Pass1Result, b: &Pass1Result) -> Pass1Result {
         abs_max,
         sparse_count,
         nan_count,
+        inf_count,
         l2_accum,
         l2_scale,
     }
@@ -405,10 +414,10 @@ pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats
     }
 
     let p1 = compute_pass1(&values);
-    let non_nan = p1.n - p1.nan_count;
+    let finite_count = p1.n - p1.nan_count - p1.inf_count;
 
-    if non_nan == 0 {
-        // All values are NaN (or empty after decode) — return zero stats
+    if finite_count == 0 {
+        // All values are non-finite (or empty after decode) — return zero stats
         let empty_stats = TensorStats {
             mean: 0.0,
             std: 0.0,
@@ -426,14 +435,14 @@ pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats
         return (empty_stats, vec![]);
     }
 
-    let variance = if non_nan > 1 {
-        p1.m2 / non_nan as f64
+    let variance = if finite_count > 1 {
+        p1.m2 / finite_count as f64
     } else {
         0.0
     };
     let std_dev = variance.sqrt();
-    let sparsity = if non_nan > 0 {
-        p1.sparse_count as f64 / non_nan as f64
+    let sparsity = if finite_count > 0 {
+        p1.sparse_count as f64 / finite_count as f64
     } else {
         1.0
     };
@@ -443,7 +452,7 @@ pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats
         0.0
     };
 
-    let k = DEFAULT_TOP_K.min(non_nan as usize);
+    let k = DEFAULT_TOP_K.min(finite_count as usize);
     let p2 = compute_pass2(&values, p1.min, p1.max, k);
 
     let histogram = Histogram {
@@ -654,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn f16_accumulates_in_f32() {
+    fn f16_decodes_correctly() {
         let f16_vals: Vec<half::f16> = vec![
             half::f16::from_f32(1.0),
             half::f16::from_f32(2.0),
@@ -843,5 +852,41 @@ mod tests {
         assert!(approx_eq(stats.std, 0.0, 1e-10));
         assert!(approx_eq(stats.sparsity, 1.0, 1e-10));
         assert!(top_k.is_empty());
+    }
+
+    #[test]
+    fn inf_values_do_not_corrupt_stats() {
+        let values: Vec<f32> = vec![1.0, f32::INFINITY, 2.0, f32::NEG_INFINITY, 3.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, top_k) = compute_summary(&data, DType::Float32, &[5]);
+        // Only 3 finite values: [1, 2, 3]
+        assert!(approx_eq(stats.mean, 2.0, 1e-6), "mean={}", stats.mean);
+        assert!(approx_eq(stats.min, 1.0, 1e-6), "min={}", stats.min);
+        assert!(approx_eq(stats.max, 3.0, 1e-6), "max={}", stats.max);
+        assert!(
+            approx_eq(stats.l2_norm, (14.0_f64).sqrt(), 1e-6),
+            "l2={}",
+            stats.l2_norm
+        );
+        assert_eq!(top_k.len(), 3);
+        // Verify stats are JSON-serializable (no NaN/Inf)
+        assert!(stats.mean.is_finite());
+        assert!(stats.std.is_finite());
+        assert!(stats.min.is_finite());
+        assert!(stats.max.is_finite());
+        assert!(stats.l2_norm.is_finite());
+    }
+
+    #[test]
+    fn pass1_handles_infinity() {
+        let values = vec![1.0, f64::INFINITY, 2.0, f64::NEG_INFINITY, 3.0];
+        let r = compute_pass1(&values);
+        assert_eq!(r.inf_count, 2);
+        assert_eq!(r.nan_count, 0);
+        let finite = r.n - r.nan_count - r.inf_count;
+        assert_eq!(finite, 3);
+        assert!(approx_eq(r.mean, 2.0, 1e-10));
+        assert!(approx_eq(r.min, 1.0, 1e-10));
+        assert!(approx_eq(r.max, 3.0, 1e-10));
     }
 }

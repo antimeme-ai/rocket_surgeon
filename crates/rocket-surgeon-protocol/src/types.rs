@@ -107,6 +107,7 @@ pub struct TensorSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TensorStats {
     pub mean: f64,
+    /// Population standard deviation (ddof=0). Matches `NumPy` default, differs from `PyTorch` default (ddof=1).
     pub std: f64,
     pub min: f64,
     pub max: f64,
