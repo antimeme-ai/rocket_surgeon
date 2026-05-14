@@ -12,11 +12,9 @@ name = "rocket_surgeon"
 crate-type = ["cdylib"]
 
 [dependencies]
-rocket-surgeon-protocol.workspace = true
-rocket-surgeon-probes.workspace = true
+blake3.workspace = true
 pyo3.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
