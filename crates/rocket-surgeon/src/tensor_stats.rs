@@ -211,7 +211,6 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
     }
 }
 
-#[allow(dead_code)]
 pub fn merge_pass1(a: &Pass1Result, b: &Pass1Result) -> Pass1Result {
     if a.n == 0 {
         return b.clone();
@@ -741,7 +740,9 @@ mod tests {
     #[test]
     fn welford_merge_numerical_stability() {
         // Values clustered around 1e8 with small noise.
-        // Naive summation would lose precision; Welford + merge should be stable.
+        // Welford avoids naive cancellation; however, the merge step's
+        // floating-point non-associativity at high base/std ratio (~3.5e8)
+        // causes ~1.5e-6 relative precision loss, hence 1e-5 tolerance headroom.
         let base = 1e8;
         let full: Vec<f64> = (0..1000)
             .map(|i| f64::from(i).mul_add(0.001, base))
@@ -754,8 +755,43 @@ mod tests {
         let full_std = (full_result.m2 / full_result.n as f64).sqrt();
         let merged_std = (merged.m2 / merged.n as f64).sqrt();
         assert!(
-            approx_eq(merged_std, full_std, full_std * 1e-4),
+            approx_eq(merged_std, full_std, full_std * 1e-5),
             "merged_std={merged_std}, full_std={full_std}"
         );
+    }
+
+    #[test]
+    fn welford_merge_with_nan() {
+        // Left half has a NaN, right half is clean
+        let left = vec![1.0, f64::NAN, 3.0];
+        let right = vec![4.0, 5.0, 6.0];
+        let full_clean = vec![1.0, 3.0, 4.0, 5.0, 6.0]; // 5 non-NaN values
+
+        let left_result = compute_pass1(&left);
+        let right_result = compute_pass1(&right);
+        let merged = merge_pass1(&left_result, &right_result);
+        let full_result = compute_pass1(&full_clean);
+
+        assert_eq!(merged.nan_count, 1);
+        assert_eq!(merged.n - merged.nan_count, 5);
+        assert!(approx_eq(merged.mean, full_result.mean, 1e-10));
+        assert!(approx_eq(merged.m2, full_result.m2, 1e-6));
+    }
+
+    #[test]
+    fn welford_merge_empty_partition() {
+        let empty = compute_pass1(&[]);
+        let values = vec![1.0, 2.0, 3.0];
+        let real = compute_pass1(&values);
+
+        // merge(empty, real) == real
+        let merged_lr = merge_pass1(&empty, &real);
+        assert!(approx_eq(merged_lr.mean, real.mean, 1e-10));
+        assert_eq!(merged_lr.n, real.n);
+
+        // merge(real, empty) == real
+        let merged_rl = merge_pass1(&real, &empty);
+        assert!(approx_eq(merged_rl.mean, real.mean, 1e-10));
+        assert_eq!(merged_rl.n, real.n);
     }
 }
