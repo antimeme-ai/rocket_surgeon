@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rocket-surgeon",
+    "crates/rocket-surgeon-tui",
+    "crates/rocket-surgeon-protocol",
+    "crates/rocket-surgeon-probes",
+    "crates/rocket-surgeon-python",
+    "xtask",
+]
+
+[workspace.package]
+authors = ["Patrick Beam <pbeam@asu.edu>"]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+# Internal
+rocket-surgeon-protocol = { path = "crates/rocket-surgeon-protocol" }
+rocket-surgeon-probes = { path = "crates/rocket-surgeon-probes" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Python bridge
+pyo3 = { version = "0.24", features = ["extension-module"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Tensor serialization
+safetensors = "0.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+elided_lifetimes_in_paths = "warn"
+unused_lifetimes = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Pedantic — too noisy for our codebase
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+# Nursery — too noisy
+option_if_let_else = "allow"
+missing_const_for_fn = "allow"
+cognitive_complexity = "allow"
+struct_field_names = "allow"
+
+# Restriction lints worth enforcing
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_self_imports = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+redundant_type_annotations = "warn"
+use_self = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+bare_urls = "warn"
+
+[profile.release]
+lto = true
+
+[profile.dev]
+# Fast incremental builds
+opt-level = 0

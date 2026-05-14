@@ -1,0 +1,22 @@
+[package]
+name = "rocket-surgeon-python"
+description = "PyO3 Python extension module for rocket-surgeon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "rocket_surgeon"
+crate-type = ["cdylib"]
+
+[dependencies]
+rocket-surgeon-protocol.workspace = true
+rocket-surgeon-probes.workspace = true
+pyo3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
