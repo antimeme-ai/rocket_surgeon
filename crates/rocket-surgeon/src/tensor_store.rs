@@ -90,15 +90,11 @@ impl TensorStore {
         // Byte budget: evict while already over limit (before accounting for the
         // new entry) so we reclaim space without over-evicting small inserts.
         let data_len = data.len();
-        while self.entries.len() >= self.max_entries
-            || (self.current_bytes + data_len > self.max_bytes && !self.entries.is_empty())
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_entries
+                || self.current_bytes + data_len > self.max_bytes)
         {
             self.evict_oldest();
-            // After reclaiming one entry for byte pressure, stop — the caller is
-            // allowed to temporarily exceed the byte cap by one entry.
-            if self.entries.len() < self.max_entries {
-                break;
-            }
         }
 
         let now = Instant::now();
@@ -182,15 +178,16 @@ impl TensorStore {
     }
 
     pub fn slice(&mut self, tensor_id: &str, offset: u64, len: u64) -> Result<Vec<u8>, StoreError> {
-        let entry = self
-            .entries
-            .get_mut(tensor_id)
-            .ok_or_else(|| StoreError::NotFound(tensor_id.to_owned()))?;
+        if !self.entries.contains_key(tensor_id) {
+            return Err(StoreError::NotFound(tensor_id.to_owned()));
+        }
 
+        self.touch_access_order(tensor_id);
+        let entry = self.entries.get_mut(tensor_id).unwrap();
         entry.last_access = Instant::now();
 
         let data_len = entry.data.len() as u64;
-        if offset + len > data_len {
+        if offset.checked_add(len).is_none_or(|end| end > data_len) {
             return Err(StoreError::SliceOutOfBounds {
                 offset,
                 len,
@@ -319,16 +316,41 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp)]
     fn summarize_caches_result() {
         let mut store = TensorStore::new();
         let values: Vec<f32> = vec![1.0, 2.0, 3.0];
         let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let handle = store.insert(data, vec![3], DType::Float32, "cpu".into());
 
-        let s1 = store.summarize(&handle.tensor_id).unwrap();
-        let s2 = store.summarize(&handle.tensor_id).unwrap();
-        assert_eq!(s1.stats.mean, s2.stats.mean);
+        // First call computes and caches
+        assert!(
+            store
+                .entries
+                .get(&handle.tensor_id)
+                .unwrap()
+                .summary
+                .is_none()
+        );
+        let _s1 = store.summarize(&handle.tensor_id).unwrap();
+        assert!(
+            store
+                .entries
+                .get(&handle.tensor_id)
+                .unwrap()
+                .summary
+                .is_some()
+        );
+
+        // Second call returns cached (summary field still Some)
+        let _s2 = store.summarize(&handle.tensor_id).unwrap();
+        assert!(
+            store
+                .entries
+                .get(&handle.tensor_id)
+                .unwrap()
+                .summary
+                .is_some()
+        );
     }
 
     #[test]
@@ -366,6 +388,15 @@ mod tests {
         assert!(matches!(err, StoreError::NotFound(_)));
     }
 
+    #[test]
+    fn slice_exact_bounds() {
+        let mut store = TensorStore::new();
+        let data = vec![42u8; 10];
+        let handle = store.insert(data, vec![10], DType::Uint8, "cpu".into());
+        let slice = store.slice(&handle.tensor_id, 0, 10).unwrap();
+        assert_eq!(slice, vec![42u8; 10]);
+    }
+
     // --- LRU eviction tests ---
 
     #[test]
@@ -385,13 +416,18 @@ mod tests {
     fn eviction_by_byte_limit() {
         let mut store = TensorStore::with_limits(usize::MAX, 10);
         let h1 = store.insert(vec![0u8; 5], vec![5], DType::Uint8, "cpu".into());
-        let _h2 = store.insert(vec![1u8; 5], vec![5], DType::Uint8, "cpu".into());
+        let h2 = store.insert(vec![1u8; 5], vec![5], DType::Uint8, "cpu".into());
         assert_eq!(store.len(), 2);
         assert_eq!(store.bytes_used(), 10);
 
-        let _h3 = store.insert(vec![2u8; 6], vec![6], DType::Uint8, "cpu".into());
+        // Inserting 6 bytes when budget is 10 — must evict both h1 and h2
+        // (5 + 6 = 11 still exceeds 10, so eviction continues until 0 + 6 <= 10).
+        let h3 = store.insert(vec![2u8; 6], vec![6], DType::Uint8, "cpu".into());
         assert!(!store.contains(&h1.tensor_id));
-        assert_eq!(store.bytes_used(), 11);
+        assert!(!store.contains(&h2.tensor_id));
+        assert!(store.contains(&h3.tensor_id));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.bytes_used(), 6);
     }
 
     #[test]
@@ -399,14 +435,17 @@ mod tests {
         let mut store = TensorStore::with_limits(3, usize::MAX);
         let h1 = store.insert(vec![1u8], vec![1], DType::Uint8, "cpu".into());
         let h2 = store.insert(vec![2u8], vec![1], DType::Uint8, "cpu".into());
-        let _h3 = store.insert(vec![3u8], vec![1], DType::Uint8, "cpu".into());
+        let h3 = store.insert(vec![3u8], vec![1], DType::Uint8, "cpu".into());
 
         // Access h1 to move it to back of LRU
         store.get(&h1.tensor_id);
 
         // Insert h4 — should evict h2 (now oldest), not h1
-        let _h4 = store.insert(vec![4u8], vec![1], DType::Uint8, "cpu".into());
-        assert!(store.contains(&h1.tensor_id));
-        assert!(!store.contains(&h2.tensor_id));
+        let h4 = store.insert(vec![4u8], vec![1], DType::Uint8, "cpu".into());
+        assert_eq!(store.len(), 3);
+        assert!(store.contains(&h1.tensor_id)); // recently accessed, preserved
+        assert!(!store.contains(&h2.tensor_id)); // oldest, evicted
+        assert!(store.contains(&h3.tensor_id)); // newer than h2, preserved
+        assert!(store.contains(&h4.tensor_id)); // just inserted
     }
 }
