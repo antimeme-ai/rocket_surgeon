@@ -343,8 +343,27 @@ pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats
     }
 
     let p1 = compute_pass1(&values);
-
     let non_nan = p1.n - p1.nan_count;
+
+    if non_nan == 0 {
+        // All values are NaN (or empty after decode) — return zero stats
+        let empty_stats = TensorStats {
+            mean: 0.0,
+            std: 0.0,
+            min: 0.0,
+            max: 0.0,
+            abs_max: 0.0,
+            sparsity: 1.0,
+            l2_norm: 0.0,
+            histogram: Histogram {
+                bins: NUM_HISTOGRAM_BINS as u32,
+                edges: vec![0.0; NUM_HISTOGRAM_BINS + 1],
+                counts: vec![0; NUM_HISTOGRAM_BINS],
+            },
+        };
+        return (empty_stats, vec![]);
+    }
+
     let variance = if non_nan > 1 {
         p1.m2 / non_nan as f64
     } else {
@@ -362,7 +381,7 @@ pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats
         0.0
     };
 
-    let k = DEFAULT_TOP_K.min(values.len());
+    let k = DEFAULT_TOP_K.min(non_nan as usize);
     let p2 = compute_pass2(&values, p1.min, p1.max, k);
 
     let histogram = Histogram {
@@ -612,6 +631,19 @@ mod tests {
         let (stats, _) = compute_summary(&data, DType::Bool, &[6]);
         assert!(approx_eq(stats.mean, 0.5, 1e-10));
         assert!(approx_eq(stats.sparsity, 0.5, 1e-10));
+    }
+
+    #[test]
+    fn all_nan_tensor_returns_zero_stats() {
+        let values: Vec<f32> = vec![f32::NAN, f32::NAN, f32::NAN];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, top_k) = compute_summary(&data, DType::Float32, &[3]);
+        assert!(approx_eq(stats.mean, 0.0, 1e-10));
+        assert!(approx_eq(stats.std, 0.0, 1e-10));
+        assert!(approx_eq(stats.min, 0.0, 1e-10));
+        assert!(approx_eq(stats.max, 0.0, 1e-10));
+        assert!(approx_eq(stats.sparsity, 1.0, 1e-10));
+        assert!(top_k.is_empty());
     }
 
     #[test]
