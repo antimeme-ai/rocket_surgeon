@@ -146,6 +146,10 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
 
 #[allow(dead_code)]
 fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pass2Result {
+    debug_assert!(
+        range_min <= range_max || range_min.is_nan(),
+        "compute_pass2: range_min must be <= range_max"
+    );
     let mut counts = [0u64; NUM_HISTOGRAM_BINS];
     let range = range_max - range_min;
 
@@ -335,6 +339,7 @@ mod tests {
         let r = compute_pass2(&values, 5.0, 5.0, 0);
         let total: u64 = r.counts.iter().sum();
         assert_eq!(total, 3);
+        assert_eq!(r.counts[NUM_HISTOGRAM_BINS / 2], 3);
     }
 
     #[test]
@@ -363,5 +368,14 @@ mod tests {
         let values = vec![1.0, 2.0, 3.0];
         let r = compute_pass2(&values, 1.0, 3.0, 100);
         assert_eq!(r.top_k.len(), 3);
+    }
+
+    #[test]
+    fn histogram_and_top_k_skip_nan() {
+        let values = vec![f64::NAN, 3.0, f64::NAN, -5.0];
+        let r = compute_pass2(&values, -5.0, 3.0, 2);
+        let total: u64 = r.counts.iter().sum();
+        assert_eq!(total, 2); // only 2 non-NaN values counted
+        assert_eq!(r.top_k.len(), 2); // NaN not in top-k
     }
 }
