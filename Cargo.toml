@@ -48,6 +48,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Hashing
 blake3 = "1"
 
+# Numeric
+half = { version = "2", features = ["num-traits"] }
+
 # Parsing
 winnow = "0.7"
 

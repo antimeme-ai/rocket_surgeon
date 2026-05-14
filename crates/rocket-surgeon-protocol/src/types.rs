@@ -144,6 +144,18 @@ pub enum DType {
     Bool,
 }
 
+impl DType {
+    #[must_use]
+    pub fn byte_size(self) -> usize {
+        match self {
+            Self::Float16 | Self::Bfloat16 | Self::Int16 => 2,
+            Self::Float32 | Self::Int32 => 4,
+            Self::Float64 | Self::Int64 => 8,
+            Self::Int8 | Self::Uint8 | Self::Bool => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardingInfo {
     pub mesh: String,
@@ -459,4 +471,23 @@ pub struct ResponseEnvelope<T> {
     pub state: SessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dtype_byte_size_all_variants() {
+        assert_eq!(DType::Float16.byte_size(), 2);
+        assert_eq!(DType::Bfloat16.byte_size(), 2);
+        assert_eq!(DType::Float32.byte_size(), 4);
+        assert_eq!(DType::Float64.byte_size(), 8);
+        assert_eq!(DType::Int8.byte_size(), 1);
+        assert_eq!(DType::Int16.byte_size(), 2);
+        assert_eq!(DType::Int32.byte_size(), 4);
+        assert_eq!(DType::Int64.byte_size(), 8);
+        assert_eq!(DType::Uint8.byte_size(), 1);
+        assert_eq!(DType::Bool.byte_size(), 1);
+    }
 }
