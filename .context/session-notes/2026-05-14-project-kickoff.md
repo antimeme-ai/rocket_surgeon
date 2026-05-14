@@ -1,6 +1,6 @@
 ---
 date: 2026-05-14
-summary: Project kickoff — repo scaffolding, full literature sweep across 6 domains
+summary: Project kickoff — repo scaffolding, full literature sweep across 13 domains
 ---
 
 # Session: 2026-05-14 — Project Kickoff
@@ -8,8 +8,17 @@ summary: Project kickoff — repo scaffolding, full literature sweep across 6 do
 ## What happened
 - Initialized git repo (local only, no remotes)
 - Set up JSMNTL directory structure mirroring ../evals/ patterns
-- Launched 6 parallel research agents covering the full landscape
-- Wrote 5 lit reviews from research results
+- Launched 13 parallel research agents across 3 waves covering the full landscape
+- Wrote 13 lit reviews from research results
+
+### Wave 1 (6 domains)
+traditional-debuggers, pytorch-hooks-internals, tui-frameworks, nnsight-transformerlens, pyvene-inseq-circuitsvis, transformer-surgery-papers
+
+### Wave 2 (5 domains)
+profilers, systems-observability, ml-framework-internals, gpu-compute-platforms, rtos-realtime-gpu
+
+### Wave 3 (2 domains)
+probes, llm-native-ux
 
 ## Literature Sweep: Cross-Cutting Synthesis
 
@@ -49,16 +58,33 @@ Every research thread converges on the same three-layer architecture:
 
 **Our unique angle**: the debugger metaphor (breakpoints, step, inspect, modify) applied to neural nets, with LLM-native interface as first-class, multi-GPU support, and MoE awareness.
 
+### Waves 2+3 Synthesis: What the Additional Research Changes
+
+**Probe model as unifying abstraction**: DTrace's `provider:module:function:name` naming maps directly to `model:layer:component:event`. Systems probes (eBPF, USDT, tracepoints) and neural network probes (linear probes, logit lens, SAE features) are the SAME pattern — observation points with composable hooks. Zero-cost-when-off via NOP placeholders.
+
+**LLM-native protocol design**: 5-7 composable primitives (step, inspect, intervene, probe, checkpoint, evaluate, status). State in every response. DAP/LSP-inspired capability negotiation at init. Strict JSON schemas. No system prompt dependency. The tool's interface IS the documentation.
+
+**GPU determinism is achievable**: single CUDA stream + cuBLAS deterministic mode + fixed batch composition + same GPU arch = bit-reproducible forward passes. Checkpoint + replay validated by both rr/TTD architecture and NVIDIA's cuda-checkpoint (though full GPU checkpoint too slow — lightweight activation-only checkpoints needed).
+
+**PREEMPT_RT for host-side control**: merged into mainline Linux 6.12, gives ~100µs latency for CPU-side debugger scheduling. Not hard real-time but sufficient for interactive stepping where operations complete at cudaDeviceSynchronize boundaries.
+
+**Instrumentation stack**: CUPTI (kernel launches, memory ops) → PyTorch hooks (tensor operations) → eBPF (driver-level syscalls) → Chrome Trace Format output. Multi-layer, each catches what the others miss.
+
+**Framework internals**: PyTorch dispatcher (DispatchKey interception) is the primary hook point. torch.compile/Dynamo/Inductor pipeline has specific interception stages (FX graph transformation before codegen). CUDA Graphs bypass normal API entry points — need graph-aware instrumentation.
+
 ## Open Questions
-- Language split: pure Rust? Rust core + Python orchestration? Need to decide.
-- Hook registration strategy for compiled/distributed models
-- Protocol design: extend DAP? Custom JSON-RPC? Something new?
-- How to handle MoE routing visualization in a TUI
-- SAE integration: bundle pre-trained SAEs or load externally?
+- Language split: pure Rust? Rust core + Python orchestration? (leaning Rust core + Python bindings via PyO3)
+- Hook registration strategy for compiled/distributed models (torch.compile silently drops hooks)
+- Protocol: extend DAP vs custom JSON-RPC? (leaning DAP extension — proven pattern, IDE ecosystem)
+- MoE routing visualization in TUI
+- SAE integration: bundle pre-trained or load externally?
+- eBPF vs CUPTI for primary GPU instrumentation (likely both, different layers)
+- Apple Silicon support: Metal backend immature, ANE undocumented — worth it for dev ergonomics?
 
 ## Next Steps (per JSMNTL)
-1. Written sub-plan for architecture
+1. **BEAD-0001**: Architecture plan synthesizing all 13 lit reviews
 2. ADR: language split decision
-3. ADR: protocol design decision
-4. TCK specs for core stepping semantics
-5. Reference implementations to quarantine (nnsight, TransformerLens, pyvene, circuitsvis)
+3. ADR: protocol design decision (DAP extension vs custom)
+4. ADR: probe model design
+5. TCK specs for core stepping semantics
+6. BEAD-0002: Clone reference implementations to quarantine
