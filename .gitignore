@@ -1,0 +1,43 @@
+quarantine/
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build artifacts / binaries
+*.so
+*.dylib
+*.dll
+*.exe
+*.o
+*.a
+*.lib
+*.bin
+*.wasm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.Spotlight-V100
+.Trashes
