@@ -1,14 +1,17 @@
+// All items are used by `compute_summary` (pub API for tensor_store), but
+// the binary crate has no caller yet — suppress dead-code until Task 7-8 wires
+// the tensor store.
+#![allow(dead_code)]
+
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-#[allow(dead_code)]
+use rocket_surgeon_protocol::types::{DType, Histogram, TensorStats, TopKEntry};
+
 const NUM_HISTOGRAM_BINS: usize = 64;
-#[allow(dead_code)]
 const SPARSITY_EPSILON: f64 = 1e-8;
-#[allow(dead_code)]
 const DEFAULT_TOP_K: usize = 10;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Pass1Result {
     n: u64,
@@ -23,7 +26,6 @@ struct Pass1Result {
     l2_scale: f64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 struct TopKHeapEntry {
     abs_value: f64,
@@ -40,7 +42,6 @@ impl PartialOrd for TopKHeapEntry {
 }
 
 impl TopKHeapEntry {
-    #[allow(dead_code)]
     fn new(abs_value: f64, original_value: f64, flat_index: u64) -> Self {
         debug_assert!(
             !abs_value.is_nan(),
@@ -62,7 +63,6 @@ impl Ord for TopKHeapEntry {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Pass2Result {
     counts: [u64; NUM_HISTOGRAM_BINS],
@@ -70,7 +70,6 @@ struct Pass2Result {
     top_k: Vec<TopKHeapEntry>,
 }
 
-#[allow(dead_code)]
 fn compute_pass1(values: &[f64]) -> Pass1Result {
     let mut n: u64 = 0;
     let mut mean: f64 = 0.0;
@@ -144,7 +143,6 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
     }
 }
 
-#[allow(dead_code)]
 fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pass2Result {
     debug_assert!(
         range_min <= range_max || range_min.is_nan(),
@@ -211,6 +209,189 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
         edges,
         top_k,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Byte-to-value conversion functions
+// ---------------------------------------------------------------------------
+
+fn read_f16_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(2)
+        .map(|chunk| {
+            let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+            f64::from(half::f16::from_bits(bits))
+        })
+        .collect()
+}
+
+fn read_bf16_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(2)
+        .map(|chunk| {
+            let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+            f64::from(half::bf16::from_bits(bits))
+        })
+        .collect()
+}
+
+fn read_f32_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(4)
+        .map(|chunk| f64::from(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
+        .collect()
+}
+
+fn read_f64_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(8)
+        .map(|chunk| {
+            f64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+        })
+        .collect()
+}
+
+fn read_i8_values(data: &[u8]) -> Vec<f64> {
+    data.iter().map(|&b| f64::from(b as i8)).collect()
+}
+
+fn read_i16_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(2)
+        .map(|chunk| f64::from(i16::from_le_bytes([chunk[0], chunk[1]])))
+        .collect()
+}
+
+fn read_i32_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(4)
+        .map(|chunk| f64::from(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
+        .collect()
+}
+
+fn read_i64_values(data: &[u8]) -> Vec<f64> {
+    data.chunks_exact(8)
+        .map(|chunk| {
+            i64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]) as f64
+        })
+        .collect()
+}
+
+fn read_u8_values(data: &[u8]) -> Vec<f64> {
+    data.iter().map(|&b| f64::from(b)).collect()
+}
+
+fn read_bool_values(data: &[u8]) -> Vec<f64> {
+    data.iter()
+        .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+        .collect()
+}
+
+fn decode_values(data: &[u8], dtype: DType) -> Vec<f64> {
+    match dtype {
+        DType::Float16 => read_f16_values(data),
+        DType::Bfloat16 => read_bf16_values(data),
+        DType::Float32 => read_f32_values(data),
+        DType::Float64 => read_f64_values(data),
+        DType::Int8 => read_i8_values(data),
+        DType::Int16 => read_i16_values(data),
+        DType::Int32 => read_i32_values(data),
+        DType::Int64 => read_i64_values(data),
+        DType::Uint8 => read_u8_values(data),
+        DType::Bool => read_bool_values(data),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flat-to-multi-dim index conversion
+// ---------------------------------------------------------------------------
+
+fn flat_index_to_multi(flat: u64, shape: &[u64]) -> Vec<u64> {
+    if shape.is_empty() {
+        return vec![];
+    }
+    let mut indices = vec![0u64; shape.len()];
+    let mut remaining = flat;
+    for i in (0..shape.len()).rev() {
+        indices[i] = remaining % shape[i];
+        remaining /= shape[i];
+    }
+    indices
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+pub fn compute_summary(data: &[u8], dtype: DType, shape: &[u64]) -> (TensorStats, Vec<TopKEntry>) {
+    let values = decode_values(data, dtype);
+
+    if values.is_empty() {
+        let empty_stats = TensorStats {
+            mean: 0.0,
+            std: 0.0,
+            min: 0.0,
+            max: 0.0,
+            abs_max: 0.0,
+            sparsity: 1.0,
+            l2_norm: 0.0,
+            histogram: Histogram {
+                bins: NUM_HISTOGRAM_BINS as u32,
+                edges: vec![0.0; NUM_HISTOGRAM_BINS + 1],
+                counts: vec![0; NUM_HISTOGRAM_BINS],
+            },
+        };
+        return (empty_stats, vec![]);
+    }
+
+    let p1 = compute_pass1(&values);
+
+    let non_nan = p1.n - p1.nan_count;
+    let variance = if non_nan > 1 {
+        p1.m2 / non_nan as f64
+    } else {
+        0.0
+    };
+    let std_dev = variance.sqrt();
+    let sparsity = if non_nan > 0 {
+        p1.sparse_count as f64 / non_nan as f64
+    } else {
+        1.0
+    };
+    let l2_norm = if p1.l2_scale > 0.0 {
+        p1.l2_scale * p1.l2_accum.sqrt()
+    } else {
+        0.0
+    };
+
+    let k = DEFAULT_TOP_K.min(values.len());
+    let p2 = compute_pass2(&values, p1.min, p1.max, k);
+
+    let histogram = Histogram {
+        bins: NUM_HISTOGRAM_BINS as u32,
+        edges: p2.edges,
+        counts: p2.counts.to_vec(),
+    };
+
+    let top_k: Vec<TopKEntry> = p2
+        .top_k
+        .iter()
+        .map(|entry| TopKEntry {
+            index: flat_index_to_multi(entry.flat_index, shape),
+            value: entry.original_value,
+        })
+        .collect();
+
+    let stats = TensorStats {
+        mean: p1.mean,
+        std: std_dev,
+        min: p1.min,
+        max: p1.max,
+        abs_max: p1.abs_max,
+        sparsity,
+        l2_norm,
+        histogram,
+    };
+
+    (stats, top_k)
 }
 
 #[cfg(test)]
@@ -377,5 +558,66 @@ mod tests {
         let total: u64 = r.counts.iter().sum();
         assert_eq!(total, 2); // only 2 non-NaN values counted
         assert_eq!(r.top_k.len(), 2); // NaN not in top-k
+    }
+
+    // --- dtype dispatch tests ---
+
+    #[test]
+    fn f32_dtype_stats() {
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, _top_k) = compute_summary(&data, DType::Float32, &[5]);
+        assert!(approx_eq(stats.mean, 3.0, 1e-6));
+        assert!(approx_eq(stats.min, 1.0, 1e-6));
+        assert!(approx_eq(stats.max, 5.0, 1e-6));
+    }
+
+    #[test]
+    fn f16_accumulates_in_f32() {
+        let f16_vals: Vec<half::f16> = vec![
+            half::f16::from_f32(1.0),
+            half::f16::from_f32(2.0),
+            half::f16::from_f32(3.0),
+        ];
+        let data: Vec<u8> = f16_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, _) = compute_summary(&data, DType::Float16, &[3]);
+        assert!(approx_eq(stats.mean, 2.0, 1e-3));
+    }
+
+    #[test]
+    fn bf16_accumulates_in_f32() {
+        let bf16_vals: Vec<half::bf16> = vec![
+            half::bf16::from_f32(10.0),
+            half::bf16::from_f32(20.0),
+            half::bf16::from_f32(30.0),
+        ];
+        let data: Vec<u8> = bf16_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, _) = compute_summary(&data, DType::Bfloat16, &[3]);
+        assert!(approx_eq(stats.mean, 20.0, 0.5));
+    }
+
+    #[test]
+    fn integer_dtype_stats() {
+        let values: Vec<i32> = vec![10, 20, 30, 40, 50];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, _) = compute_summary(&data, DType::Int32, &[5]);
+        assert!(approx_eq(stats.mean, 30.0, 1e-10));
+        assert!(approx_eq(stats.min, 10.0, 1e-10));
+        assert!(approx_eq(stats.max, 50.0, 1e-10));
+    }
+
+    #[test]
+    fn bool_dtype_stats() {
+        let data: Vec<u8> = vec![1, 1, 0, 1, 0, 0];
+        let (stats, _) = compute_summary(&data, DType::Bool, &[6]);
+        assert!(approx_eq(stats.mean, 0.5, 1e-10));
+        assert!(approx_eq(stats.sparsity, 0.5, 1e-10));
+    }
+
+    #[test]
+    fn flat_index_to_multi_index() {
+        assert_eq!(flat_index_to_multi(17, &[2, 3, 4]), vec![1, 1, 1]);
+        assert_eq!(flat_index_to_multi(0, &[2, 3, 4]), vec![0, 0, 0]);
+        assert_eq!(flat_index_to_multi(23, &[2, 3, 4]), vec![1, 2, 3]);
     }
 }
