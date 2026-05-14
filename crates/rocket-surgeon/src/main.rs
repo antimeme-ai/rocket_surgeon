@@ -2,6 +2,7 @@ mod dispatch;
 mod server;
 mod session;
 mod tensor_stats;
+mod tensor_store;
 mod trace_log;
 
 use std::io::{self, BufReader};
