@@ -6,7 +6,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "xtask", about = "rocket-surgeon build tasks")]
 enum Xtask {
-    /// Run all lints (fmt check + clippy)
+    /// Run all lints (Rust + Python)
     Lint,
     /// Run rustfmt
     Fmt {
@@ -16,9 +16,19 @@ enum Xtask {
     },
     /// Run clippy
     Clippy,
-    /// Run tests
+    /// Run Rust tests
     Test,
-    /// Run full CI suite (lint + test)
+    /// Run ruff (Python linter + formatter check)
+    Ruff {
+        /// Fix issues automatically
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Run mypy (Python type checker)
+    Mypy,
+    /// Run Python tests
+    Pytest,
+    /// Run full CI suite (all lints + all tests)
     Ci,
 }
 
@@ -28,14 +38,22 @@ fn main() -> Result<()> {
         Xtask::Lint => {
             fmt(true)?;
             clippy()?;
+            ruff(false)?;
+            mypy()?;
         }
         Xtask::Fmt { check } => fmt(check)?,
         Xtask::Clippy => clippy()?,
         Xtask::Test => test()?,
+        Xtask::Ruff { fix } => ruff(fix)?,
+        Xtask::Mypy => mypy()?,
+        Xtask::Pytest => pytest()?,
         Xtask::Ci => {
             fmt(true)?;
             clippy()?;
+            ruff(false)?;
+            mypy()?;
             test()?;
+            pytest()?;
         }
     }
     Ok(())
@@ -65,7 +83,25 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
-    run("cargo", &["test", "--workspace", "--all-targets"]).context("tests failed")
+    run("cargo", &["test", "--workspace", "--all-targets"]).context("cargo test failed")
+}
+
+fn ruff(fix: bool) -> Result<()> {
+    if fix {
+        run("ruff", &["check", "--fix", "python/"])?;
+        run("ruff", &["format", "python/"]).context("ruff format failed")
+    } else {
+        run("ruff", &["check", "python/"]).context("ruff check failed")?;
+        run("ruff", &["format", "--check", "python/"]).context("ruff format check failed")
+    }
+}
+
+fn mypy() -> Result<()> {
+    run("mypy", &["python/rocket_surgeon"]).context("mypy failed")
+}
+
+fn pytest() -> Result<()> {
+    run("python3", &["-m", "pytest", "python/tests", "-v"]).context("pytest failed")
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {

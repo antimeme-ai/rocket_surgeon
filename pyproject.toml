@@ -1,0 +1,109 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rocket-surgeon"
+version = "0.1.0"
+description = "Multi-GPU transformer forward pass debugger and surgery tool"
+requires-python = ">=3.11"
+license = "MIT OR Apache-2.0"
+authors = [
+    { name = "Patrick Beam", email = "pbeam@asu.edu" },
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.11",
+    "mypy>=1.15",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "maturin>=1.0",
+]
+sae = [
+    "sae-lens>=4.0",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "rocket_surgeon._rs"
+manifest-path = "crates/rocket-surgeon-python/Cargo.toml"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 99
+src = ["python"]
+
+[tool.ruff.lint]
+select = [
+    "F",       # pyflakes
+    "E", "W",  # pycodestyle
+    "I",       # isort
+    "N",       # pep8-naming
+    "UP",      # pyupgrade
+    "ANN",     # flake8-annotations
+    "B",       # flake8-bugbear
+    "A",       # flake8-builtins
+    "C4",      # flake8-comprehensions
+    "DTZ",     # flake8-datetimez
+    "T10",     # flake8-debugger
+    "ICN",     # flake8-import-conventions
+    "PIE",     # flake8-pie
+    "PT",      # flake8-pytest-style
+    "Q",       # flake8-quotes
+    "RSE",     # flake8-raise
+    "RET",     # flake8-return
+    "SLF",     # flake8-self
+    "SIM",     # flake8-simplify
+    "TID",     # flake8-tidy-imports
+    "TCH",     # flake8-type-checking
+    "ARG",     # flake8-unused-arguments
+    "PTH",     # flake8-use-pathlib
+    "PL",      # pylint
+    "TRY",     # tryceratops
+    "FLY",     # flynt
+    "PERF",    # perflint
+    "RUF",     # ruff-specific
+]
+ignore = [
+    "ANN401",  # dynamically typed expressions (Any)
+    "PLR0913", # too many arguments
+    "TRY003",  # long exception messages
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rocket_surgeon"]
+
+[tool.ruff.lint.per-file-ignores]
+"python/tests/**" = ["ANN", "ARG", "SLF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_reexport = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+mypy_path = "python"
+
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "transformers.*",
+    "safetensors.*",
+    "sae_lens.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
