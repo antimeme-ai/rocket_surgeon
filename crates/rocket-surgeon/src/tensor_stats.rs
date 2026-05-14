@@ -17,6 +17,7 @@ struct Pass1Result {
     max: f64,
     abs_max: f64,
     sparse_count: u64,
+    nan_count: u64,
     l2_accum: f64,
     l2_scale: f64,
 }
@@ -34,6 +35,21 @@ impl Eq for TopKHeapEntry {}
 impl PartialOrd for TopKHeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl TopKHeapEntry {
+    #[allow(dead_code)]
+    fn new(abs_value: f64, original_value: f64, flat_index: u64) -> Self {
+        debug_assert!(
+            !abs_value.is_nan(),
+            "TopKHeapEntry abs_value must not be NaN"
+        );
+        Self {
+            abs_value,
+            original_value,
+            flat_index,
+        }
     }
 }
 
@@ -62,15 +78,23 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
     let mut max = f64::NEG_INFINITY;
     let mut abs_max: f64 = 0.0;
     let mut sparse_count: u64 = 0;
+    let mut nan_count: u64 = 0;
     let mut l2_accum: f64 = 0.0;
     let mut l2_scale: f64 = 0.0;
 
     for &x in values {
         n += 1;
 
+        // NaN guard — count but skip all accumulators so they stay clean
+        if x.is_nan() {
+            nan_count += 1;
+            continue;
+        }
+
         // Welford update
+        let non_nan = n - nan_count;
         let delta = x - mean;
-        mean += delta / n as f64;
+        mean += delta / non_nan as f64;
         let delta2 = x - mean;
         m2 += delta * delta2;
 
@@ -91,7 +115,7 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
             sparse_count += 1;
         }
 
-        // Blue's scaled L2 norm accumulation
+        // LAPACK-style scaled L2 accumulation (running-max, cf. dnrm2)
         if ax > l2_scale {
             if l2_scale > 0.0 {
                 let ratio = l2_scale / ax;
@@ -113,6 +137,7 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
         max,
         abs_max,
         sparse_count,
+        nan_count,
         l2_accum,
         l2_scale,
     }
@@ -186,12 +211,41 @@ mod tests {
     }
 
     #[test]
-    fn l2_norm_large_values_no_overflow() {
-        // Values near f32 max (~3.4e38). Blue's method should not overflow.
-        let values = vec![1e30, 1e30, 1e30];
+    #[allow(clippy::float_cmp)]
+    fn pass1_empty_slice() {
+        let r = compute_pass1(&[]);
+        assert_eq!(r.n, 0);
+        assert!(approx_eq(r.mean, 0.0, 1e-10));
+        assert_eq!(r.min, f64::INFINITY);
+        assert_eq!(r.max, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn sparsity_mixed() {
+        let values = vec![0.0, 5e-9, 1.0, 2.0];
+        let r = compute_pass1(&values);
+        assert_eq!(r.sparse_count, 2);
+        let sparsity = r.sparse_count as f64 / r.n as f64;
+        assert!(approx_eq(sparsity, 0.5, 1e-10));
+    }
+
+    #[test]
+    fn l2_norm_negative_values() {
+        // [-3, 4] -> L2 = 5.0, signs must not affect norm
+        let values = vec![-3.0, 4.0];
         let r = compute_pass1(&values);
         let l2 = r.l2_scale * r.l2_accum.sqrt();
-        let expected = (3.0_f64).sqrt() * 1e30;
+        assert!(approx_eq(l2, 5.0, 1e-10));
+    }
+
+    #[test]
+    fn l2_norm_large_values_no_overflow() {
+        // Values near sqrt(f64::MAX) (~1.34e154). Naive squaring overflows to
+        // infinity; LAPACK-style scaling keeps this finite.
+        let values = vec![1e154, 1e154, 1e154];
+        let r = compute_pass1(&values);
+        let l2 = r.l2_scale * r.l2_accum.sqrt();
+        let expected = (3.0_f64).sqrt() * 1e154;
         assert!(approx_eq(l2, expected, expected * 1e-10));
     }
 }
