@@ -1,0 +1,106 @@
+{
+  "adapter_name": "llama",
+  "adapter_version": "0.1.0",
+  "description": "Adapter mapping for the Llama model family. Covers Llama-2, Llama-3, Mistral, and CodeLlama, which share the same HuggingFace module structure (LlamaForCausalLM / MistralForCausalLM). Mistral uses the same module paths as Llama in HuggingFace transformers; the only differences are config values (sliding window, num_kv_heads), not module structure.",
+  "supported_architectures": [
+    "LlamaForCausalLM",
+    "MistralForCausalLM",
+    "CodeLlamaForCausalLM"
+  ],
+  "supported_model_families": [
+    "llama-2",
+    "llama-3",
+    "llama-3.1",
+    "llama-3.2",
+    "mistral",
+    "codellama"
+  ],
+  "parameterized_indices": {
+    "{i}": "Layer index (0-based). Expands to all layers in the model (0..num_layers-1)."
+  },
+  "module_mappings": [
+    {
+      "hf_pattern": "model.embed_tokens",
+      "canonical_name": "embed_tokens"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.input_layernorm",
+      "canonical_name": "layers[{i}].ln1"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn",
+      "canonical_name": "layers[{i}].attn"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.q_proj",
+      "canonical_name": "layers[{i}].attn.q_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.k_proj",
+      "canonical_name": "layers[{i}].attn.k_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.v_proj",
+      "canonical_name": "layers[{i}].attn.v_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.o_proj",
+      "canonical_name": "layers[{i}].attn.o_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.post_attention_layernorm",
+      "canonical_name": "layers[{i}].ln2"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.mlp",
+      "canonical_name": "layers[{i}].mlp"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.mlp.gate_proj",
+      "canonical_name": "layers[{i}].mlp.gate_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.mlp.up_proj",
+      "canonical_name": "layers[{i}].mlp.up_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.mlp.down_proj",
+      "canonical_name": "layers[{i}].mlp.down_proj"
+    },
+    {
+      "hf_pattern": "model.norm",
+      "canonical_name": "ln_final"
+    },
+    {
+      "hf_pattern": "lm_head",
+      "canonical_name": "lm_head"
+    }
+  ],
+  "virtual_probes": [
+    {
+      "canonical_name": "layers[{i}].attn.scores",
+      "capture_strategy": "Captured from attention computation output. Requires attn_implementation='eager' (SDPA) or LSE reconstruction for FlashAttention. Not a hookable nn.Module.",
+      "source_module": "model.layers.{i}.self_attn"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_pre",
+      "capture_strategy": "Captured as the input tensor to the transformer block (pre-hook on model.layers.{i}).",
+      "source_module": "model.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_mid",
+      "capture_strategy": "Captured as the hidden states after attention output is added to the residual stream, before MLP. Computed from the attention output hook and the block input.",
+      "source_module": "model.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_post",
+      "capture_strategy": "Captured as the output tensor of the transformer block (post-hook on model.layers.{i}).",
+      "source_module": "model.layers.{i}"
+    }
+  ],
+  "notes": [
+    "Mistral and CodeLlama use identical module paths to Llama in HuggingFace transformers. The only differences are in config (sliding_window, num_key_value_heads, rope_theta, etc.), not module structure.",
+    "The rotary embedding module (model.layers.{i}.self_attn.rotary_emb) is intentionally unmapped. It will receive a fallback _raw name if encountered.",
+    "model.layers.{i} itself is not mapped to a canonical name — it is the parent container. Virtual probes (residual_pre, residual_mid, residual_post) attach to it via pre/post hooks."
+  ]
+}

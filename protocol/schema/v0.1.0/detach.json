@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/detach.json",
+  "title": "detach",
+  "description": "Lifecycle verb: unload the attached model and release resources. Transitions through 'detaching' back to 'initialized'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'detach' method. No parameters required.",
+      "properties": {},
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'detach'. State status returns to 'initialized' with model_id null.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "detached_model_id": {
+              "type": "string",
+              "description": "Content hash of the model that was detached."
+            }
+          },
+          "required": ["detached_model_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

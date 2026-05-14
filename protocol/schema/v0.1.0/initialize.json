@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/initialize.json",
+  "title": "initialize",
+  "description": "Lifecycle verb: negotiate protocol version and exchange capabilities. Transitions session from 'uninitialized' to 'initialized'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'initialize' method.",
+      "properties": {
+        "client_name": {
+          "type": "string",
+          "description": "Identifier for the connecting client (e.g. 'rocket-tui', 'claude-agent')."
+        },
+        "client_version": {
+          "type": "string",
+          "description": "Semantic version of the client software."
+        },
+        "protocol_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Protocol version the client wants to speak."
+        },
+        "client_capabilities": {
+          "type": "object",
+          "description": "Optional declaration of what the client supports (e.g. streaming, binary tensor transfer).",
+          "additionalProperties": true
+        }
+      },
+      "required": ["client_name", "protocol_version"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'initialize'. State status will be 'initialized' on success.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "capabilities": {
+              "$ref": "common.json#/$defs/Capabilities",
+              "description": "Server capabilities for this session."
+            }
+          },
+          "required": ["capabilities"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

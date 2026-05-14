@@ -1,0 +1,31 @@
+(* rocket_surgeon probe-point grammar v0.1.0 *)
+(* Five-level hierarchical namespace: model:rank:layer:component:event *)
+
+probe_point    = model , ":" , rank , ":" , layer , ":" , component , ":" , event ;
+
+model          = wildcard | identifier ;
+rank           = wildcard | non_neg_integer ;
+layer          = wildcard | non_neg_integer ;
+component      = wildcard | component_path ;
+event          = wildcard | identifier ;
+
+component_path = component_seg , { "." , component_seg } ;
+component_seg  = indexed_seg | identifier ;
+indexed_seg    = identifier , "[" , non_neg_integer , "]" ;
+
+wildcard       = "*" ;
+identifier     = letter , { letter | digit | "_" | "-" } ;
+non_neg_integer = digit , { digit } ;
+
+letter         = "a" | "b" | ... | "z" | "A" | "B" | ... | "Z" ;
+digit          = "0" | "1" | ... | "9" ;
+
+(* Examples:
+   llama:*:12:attn.o_proj:output         — attention output at layer 12, all ranks
+   llama:0:*:mlp:input                   — MLP input at all layers, rank 0
+   mixtral:*:8:router:pre_topk           — router logits at layer 8, all ranks
+   llama:*:*:residual_post:*             — all residual post outputs
+   llama:0:12:attn.scores:*             — attention scores at layer 12
+   mixtral:*:8:experts[3]:output         — expert 3 output at layer 8
+   mixtral:*:8:experts[3].gate_proj:output — expert 3 gate proj output
+*)

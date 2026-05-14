@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/attach.json",
+  "title": "attach",
+  "description": "Lifecycle verb: load a model and attach it to the session. Transitions from 'initialized' through 'attaching' to 'stopped'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'attach' method.",
+      "properties": {
+        "model_path": {
+          "type": "string",
+          "description": "Filesystem path to the model files (weights directory or single file)."
+        },
+        "model_family": {
+          "type": "string",
+          "description": "Model architecture family identifier.",
+          "examples": ["llama", "mixtral", "gpt-neox"]
+        },
+        "device": {
+          "type": "string",
+          "default": "cuda:0",
+          "description": "Target device for model loading (e.g. 'cuda:0', 'cuda:1', 'cpu')."
+        },
+        "dtype": {
+          "$ref": "common.json#/$defs/DType",
+          "description": "Data type for model weights. Server picks a sensible default if omitted."
+        },
+        "num_ranks": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of GPU ranks for distributed execution."
+        },
+        "config": {
+          "type": "object",
+          "description": "Additional model-specific configuration (e.g. rope_theta, sliding_window).",
+          "additionalProperties": true
+        }
+      },
+      "required": ["model_path", "model_family"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'attach'. State status will be 'stopped' on success with model_id populated.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "model_id": {
+              "type": "string",
+              "description": "Content hash of the model files, used as a stable identifier."
+            },
+            "model_family": {
+              "type": "string",
+              "description": "Confirmed model architecture family."
+            },
+            "num_layers": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Total number of transformer layers in the model."
+            },
+            "num_heads": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of attention heads per layer."
+            },
+            "hidden_dim": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Hidden dimension size."
+            },
+            "num_ranks": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of GPU ranks the model was distributed across."
+            },
+            "capabilities": {
+              "$ref": "common.json#/$defs/Capabilities",
+              "description": "Updated server capabilities reflecting the attached model (includes model_family, model_id, num_layers, etc.)."
+            }
+          },
+          "required": [
+            "model_id",
+            "model_family",
+            "num_layers",
+            "num_heads",
+            "hidden_dim",
+            "num_ranks",
+            "capabilities"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

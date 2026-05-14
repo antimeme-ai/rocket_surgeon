@@ -1,0 +1,132 @@
+{
+  "adapter_name": "mixtral",
+  "adapter_version": "0.1.0",
+  "description": "Adapter mapping for Mixtral MoE models. Extends the Llama adapter with MoE-specific components (router, experts, shared_expert). Mixtral uses the same base module structure as Llama for attention and normalization, but replaces the dense MLP with a block_sparse_moe module containing a gate (router) and multiple expert MLPs.",
+  "extends": "llama",
+  "supported_architectures": [
+    "MixtralForCausalLM"
+  ],
+  "supported_model_families": [
+    "mixtral"
+  ],
+  "parameterized_indices": {
+    "{i}": "Layer index (0-based). Expands to all layers in the model (0..num_layers-1).",
+    "{j}": "Expert index (0-based). Expands to all experts in the MoE layer (0..num_experts-1)."
+  },
+  "base_module_mappings": [
+    {
+      "hf_pattern": "model.embed_tokens",
+      "canonical_name": "embed_tokens"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.input_layernorm",
+      "canonical_name": "layers[{i}].ln1"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn",
+      "canonical_name": "layers[{i}].attn"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.q_proj",
+      "canonical_name": "layers[{i}].attn.q_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.k_proj",
+      "canonical_name": "layers[{i}].attn.k_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.v_proj",
+      "canonical_name": "layers[{i}].attn.v_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.self_attn.o_proj",
+      "canonical_name": "layers[{i}].attn.o_proj"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.post_attention_layernorm",
+      "canonical_name": "layers[{i}].ln2"
+    },
+    {
+      "hf_pattern": "model.norm",
+      "canonical_name": "ln_final"
+    },
+    {
+      "hf_pattern": "lm_head",
+      "canonical_name": "lm_head"
+    }
+  ],
+  "moe_module_mappings": [
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe",
+      "canonical_name": "layers[{i}].mlp",
+      "note": "The block_sparse_moe module replaces the dense MLP. Mapped to layers[i].mlp as the composite MLP-equivalent for this architecture."
+    },
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe.gate",
+      "canonical_name": "layers[{i}].router"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe.experts.{j}",
+      "canonical_name": "layers[{i}].experts[{j}]"
+    },
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe.experts.{j}.w1",
+      "canonical_name": "layers[{i}].experts[{j}].gate_proj",
+      "note": "Mixtral names expert projections w1/w2/w3. w1 = gate_proj."
+    },
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe.experts.{j}.w3",
+      "canonical_name": "layers[{i}].experts[{j}].up_proj",
+      "note": "w3 = up_proj (paired with gate in SwiGLU)."
+    },
+    {
+      "hf_pattern": "model.layers.{i}.block_sparse_moe.experts.{j}.w2",
+      "canonical_name": "layers[{i}].experts[{j}].down_proj",
+      "note": "w2 = down_proj."
+    }
+  ],
+  "virtual_probes": [
+    {
+      "canonical_name": "layers[{i}].attn.scores",
+      "capture_strategy": "Captured from attention computation output. Requires attn_implementation='eager' or LSE reconstruction.",
+      "source_module": "model.layers.{i}.self_attn"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_pre",
+      "capture_strategy": "Captured as the input tensor to the transformer block (pre-hook on model.layers.{i}).",
+      "source_module": "model.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_mid",
+      "capture_strategy": "Captured as hidden states after attention add, before MoE layer.",
+      "source_module": "model.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_post",
+      "capture_strategy": "Captured as the output tensor of the transformer block (post-hook on model.layers.{i}).",
+      "source_module": "model.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].router.logits",
+      "capture_strategy": "Captured from the router gate's linear output before softmax and top-k selection. Requires output_router_logits=True in model config.",
+      "source_module": "model.layers.{i}.block_sparse_moe.gate"
+    },
+    {
+      "canonical_name": "layers[{i}].router.decision",
+      "capture_strategy": "Captured from the post-softmax, post-top-k routing decision. Contains selected expert indices and gating weights per token.",
+      "source_module": "model.layers.{i}.block_sparse_moe"
+    },
+    {
+      "canonical_name": "layers[{i}].shared_expert",
+      "capture_strategy": "Not present in Mixtral (no shared expert). This virtual probe exists in the vocabulary for DeepSeek-V3-style architectures. For Mixtral, this component is absent and will not fire.",
+      "source_module": null
+    }
+  ],
+  "notes": [
+    "Mixtral uses block_sparse_moe as the MoE layer, replacing the dense MLP entirely.",
+    "Expert weight naming in Mixtral: w1=gate_proj, w2=down_proj, w3=up_proj. This is NOT a typo — Mixtral's w2 is the down projection and w3 is the up projection.",
+    "The shared_expert canonical component is defined in the vocabulary but does not apply to Mixtral. It exists for forward compatibility with DeepSeek-V3 and similar shared+routed architectures.",
+    "Set output_router_logits=True in model config at attach time to expose routing logits through the model's output object.",
+    "The dense MLP mappings (mlp.gate_proj, mlp.up_proj, mlp.down_proj) from the Llama base adapter do NOT apply to Mixtral — those modules do not exist. The per-expert projections (experts[j].gate_proj, etc.) replace them."
+  ]
+}

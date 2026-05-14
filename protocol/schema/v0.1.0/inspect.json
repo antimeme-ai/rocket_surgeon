@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/inspect.json",
+  "title": "inspect",
+  "description": "Domain verb: read tensor data at a probe point without modifying model state. Method name: 'rocket/inspect'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/inspect' method.",
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "Probe-point pattern identifying what to inspect (e.g. 'llama:0:12:attn.o_proj:output')."
+        },
+        "detail": {
+          "type": "string",
+          "enum": ["summary", "slice", "full"],
+          "default": "summary",
+          "description": "Level of detail to return. 'summary' returns stats only, 'slice' returns a sub-range of raw bytes, 'full' returns the entire tensor."
+        },
+        "slices": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Array of [start, end] pairs defining the slice ranges. Only meaningful when detail is 'slice'."
+        },
+        "format": {
+          "$ref": "common.json#/$defs/DType",
+          "description": "Desired dtype for returned slice data. Server casts if needed. Only meaningful when detail is 'slice'."
+        },
+        "view": {
+          "$ref": "common.json#/$defs/BuiltInView",
+          "description": "Request a built-in interpretability view (e.g. 'attention_pattern', 'logit_lens')."
+        }
+      },
+      "required": ["target"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/inspect'. State status will be 'stopped' on success.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "tensors": {
+              "type": "array",
+              "items": { "$ref": "common.json#/$defs/TensorSummary" },
+              "description": "One TensorSummary per matched probe point."
+            },
+            "view_result": {
+              "oneOf": [
+                { "type": "object" },
+                { "type": "null" }
+              ],
+              "description": "Result of the built-in interpretability view, if one was requested. Structure depends on the view type. Null if no view was requested."
+            },
+            "slice_data": {
+              "type": ["string", "null"],
+              "contentEncoding": "base64",
+              "description": "Base64-encoded raw bytes of the requested tensor slice. Null unless detail was 'slice' or 'full'."
+            }
+          },
+          "required": ["tensors", "view_result", "slice_data"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/step.json",
+  "title": "step",
+  "description": "Domain verb: advance or reverse the forward pass by one or more ticks. Method name: 'rocket/step'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/step' method.",
+      "properties": {
+        "direction": {
+          "$ref": "common.json#/$defs/StepDirection",
+          "description": "Whether to step forward or backward through the pass."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of ticks to execute."
+        },
+        "granularity": {
+          "$ref": "common.json#/$defs/TickGranularity",
+          "description": "Override tick granularity for this step. Uses session default if omitted."
+        }
+      },
+      "required": ["direction", "count"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/step'. State status will be 'stopped' on success.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "ticks_executed": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of ticks actually executed. May be less than requested count if the pass boundary was reached."
+            },
+            "stopped_at": {
+              "$ref": "common.json#/$defs/TickPosition",
+              "description": "Position where the forward pass is now stopped."
+            }
+          },
+          "required": ["ticks_executed", "stopped_at"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

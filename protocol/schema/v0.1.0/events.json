@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/events.json",
+  "title": "rocket_surgeon daemon-to-client events",
+  "description": "JSON-RPC 2.0 notification schemas. Events have no id and expect no response. Clients receive events after subscribing via rocket/subscribe.",
+
+  "$defs": {
+    "TickStopped": {
+      "type": "object",
+      "description": "rocket/tick.stopped — Forward pass paused at a tick boundary. Emitted after every step completes or when the daemon stops for any reason.",
+      "properties": {
+        "position": {
+          "$ref": "common.json#/$defs/TickPosition",
+          "description": "Tick position where the forward pass is now stopped."
+        },
+        "state": {
+          "$ref": "common.json#/$defs/SessionState",
+          "description": "Full session state at this tick."
+        }
+      },
+      "required": ["position", "state"],
+      "additionalProperties": false
+    },
+
+    "TickHeartbeat": {
+      "type": "object",
+      "description": "rocket/tick.heartbeat — Sent every 1s while the session is stopped. Keeps clients alive and provides per-rank GPU status.",
+      "properties": {
+        "position": {
+          "$ref": "common.json#/$defs/TickPosition",
+          "description": "Current tick position."
+        },
+        "uptime_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Server uptime in seconds since process start."
+        },
+        "elapsed_stopped_sec": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Seconds elapsed since the session entered the stopped state."
+        },
+        "per_rank_status": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rank": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "GPU rank index."
+              },
+              "status": {
+                "type": "string",
+                "enum": ["idle", "stopped", "waiting", "processing"],
+                "description": "Current activity state of this rank."
+              },
+              "gpu_memory_used_mb": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU memory currently in use on this rank, in megabytes."
+              },
+              "gpu_memory_total_mb": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Total GPU memory available on this rank, in megabytes."
+              }
+            },
+            "required": ["rank", "status", "gpu_memory_used_mb", "gpu_memory_total_mb"],
+            "additionalProperties": false
+          },
+          "description": "Status of each GPU rank in the session."
+        }
+      },
+      "required": ["position", "uptime_seconds", "elapsed_stopped_sec", "per_rank_status"],
+      "additionalProperties": false
+    },
+
+    "ProbeFired": {
+      "type": "object",
+      "description": "rocket/probe.fired — A probe matched its probe point and executed its action. Contains the tensor summary if the action was 'capture'.",
+      "properties": {
+        "probe_id": {
+          "type": "string",
+          "description": "ID of the probe that fired."
+        },
+        "point": {
+          "type": "string",
+          "description": "The probe point pattern that matched (model:rank:layer:component:event)."
+        },
+        "tick_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tick at which the probe fired."
+        },
+        "tensor_summary": {
+          "oneOf": [
+            { "$ref": "common.json#/$defs/TensorSummary" },
+            { "type": "null" }
+          ],
+          "description": "Tensor summary if the probe action was 'capture'. Null for other actions."
+        },
+        "action": {
+          "$ref": "common.json#/$defs/ProbeAction",
+          "description": "Which probe action fired."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the probe fired."
+        }
+      },
+      "required": ["probe_id", "point", "tick_id", "action", "timestamp"],
+      "additionalProperties": false
+    },
+
+    "ReplayDivergence": {
+      "type": "object",
+      "description": "rocket/replay.divergence — A replayed tensor diverges from the original beyond tolerance. Emitted during replay when fidelity checking is enabled.",
+      "properties": {
+        "tick_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The replay tick where divergence was detected."
+        },
+        "original_tick_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The original tick being replayed."
+        },
+        "probe_point": {
+          "type": "string",
+          "description": "Probe point where divergence was measured."
+        },
+        "cosine_similarity": {
+          "type": "number",
+          "description": "Cosine similarity between original and replayed tensors. 1.0 = identical."
+        },
+        "max_relative_error": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum element-wise relative error."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable divergence description."
+        }
+      },
+      "required": ["tick_id", "original_tick_id", "probe_point", "cosine_similarity", "max_relative_error", "message"],
+      "additionalProperties": false
+    },
+
+    "Error": {
+      "type": "object",
+      "description": "rocket/error — Unrecoverable error notification. Sent when the daemon encounters a fatal condition (OOM, NCCL hang, etc.) that may not be associated with a specific request.",
+      "properties": {
+        "error_code": {
+          "$ref": "common.json#/$defs/ErrorCode",
+          "description": "Machine-readable error code."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human/LLM-readable error description."
+        },
+        "details": {
+          "oneOf": [
+            { "type": "object" },
+            { "type": "null" }
+          ],
+          "description": "Additional structured context. Schema varies by error_code."
+        },
+        "fatal": {
+          "type": "boolean",
+          "description": "If true, the session is terminated and no further requests will be accepted."
+        }
+      },
+      "required": ["error_code", "message", "fatal"],
+      "additionalProperties": false
+    }
+  }
+}

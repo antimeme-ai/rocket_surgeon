@@ -42,6 +42,9 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Parsing
+winnow = "0.7"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

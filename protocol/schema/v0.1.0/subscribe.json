@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/subscribe.json",
+  "title": "subscribe",
+  "description": "Streaming verb: subscribe to real-time event notifications with optional filtering. Method name: 'rocket/subscribe'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/subscribe' method.",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["tick.stopped", "tick.heartbeat", "probe.fired", "replay.divergence", "error"]
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Event types to subscribe to."
+        },
+        "filter": {
+          "type": "object",
+          "properties": {
+            "layer": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 },
+              "description": "Only receive events for these layer indices."
+            },
+            "rank": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 },
+              "description": "Only receive events for these GPU ranks."
+            },
+            "probe_ids": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Only receive 'probe.fired' events for these probe IDs."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Optional filter to narrow which events are delivered."
+        }
+      },
+      "required": ["events"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/subscribe'. Confirms the subscription and returns its ID for later management.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "subscription_id": {
+              "type": "string",
+              "description": "Unique identifier for this subscription, used to unsubscribe or modify."
+            },
+            "subscribed_events": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["tick.stopped", "tick.heartbeat", "probe.fired", "replay.divergence", "error"]
+              },
+              "description": "Confirmed event types that are now subscribed."
+            }
+          },
+          "required": ["subscription_id", "subscribed_events"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

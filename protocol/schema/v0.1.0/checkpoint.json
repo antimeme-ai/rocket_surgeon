@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/checkpoint.json",
+  "title": "checkpoint",
+  "description": "Domain verb: create, restore, list, delete, or bookmark checkpoints. Method name: 'rocket/checkpoint'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/checkpoint' method.",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["create", "restore", "list", "delete", "bookmark"],
+          "description": "Checkpoint operation to perform."
+        },
+        "checkpoint_id": {
+          "type": "string",
+          "description": "Checkpoint to operate on. Required for 'restore' and 'delete' actions."
+        },
+        "tick_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tick to bookmark. Used with the 'bookmark' action."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable bookmark name. Used with the 'bookmark' action."
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["activation", "full_snapshot"],
+          "description": "Storage tier for the checkpoint. Used with the 'create' action."
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "const": "restore" } } },
+          "then": { "required": ["action", "checkpoint_id"] }
+        },
+        {
+          "if": { "properties": { "action": { "const": "delete" } } },
+          "then": { "required": ["action", "checkpoint_id"] }
+        },
+        {
+          "if": { "properties": { "action": { "const": "bookmark" } } },
+          "then": { "required": ["action", "tick_id", "name"] }
+        }
+      ]
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/checkpoint'. Returns the checkpoint list after the operation completes.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "checkpoints": {
+              "type": "array",
+              "items": { "$ref": "common.json#/$defs/CheckpointRef" },
+              "description": "All checkpoints available after the operation."
+            },
+            "checkpoint_id": {
+              "type": ["string", "null"],
+              "description": "ID of the newly created checkpoint. Non-null only for the 'create' action."
+            },
+            "restored_to": {
+              "oneOf": [
+                { "$ref": "common.json#/$defs/TickPosition" },
+                { "type": "null" }
+              ],
+              "description": "Tick position restored to. Non-null only for the 'restore' action."
+            }
+          },
+          "required": ["checkpoints", "checkpoint_id", "restored_to"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

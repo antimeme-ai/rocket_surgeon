@@ -1,0 +1,192 @@
+{
+  "schema_version": "0.1.0",
+  "description": "Canonical component vocabulary for rocket_surgeon. Defines all hookable component names that model adapters map HuggingFace module paths to. Every adapter MUST map to names from this vocabulary. Unknown modules that do not appear in an adapter mapping are assigned the fallback name _raw.<original.module.path>.",
+  "fallback_convention": "_raw.<module_path>",
+  "fallback_description": "Any HuggingFace module path not covered by an adapter mapping is exposed under the _raw prefix. The original dotted module path is preserved verbatim after the prefix. Example: an unmapped module 'model.layers.0.self_attn.rotary_emb' becomes '_raw.model.layers.0.self_attn.rotary_emb'. Clients MUST treat _raw components as opaque — no assumptions about tensor shape or semantics.",
+  "dense_components": [
+    {
+      "name": "embed_tokens",
+      "description": "Token embedding layer. Maps input token IDs to dense vectors.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "embedding"
+    },
+    {
+      "name": "layers[i].ln1",
+      "description": "Pre-attention layer norm (RMSNorm for Llama family, LayerNorm for GPT-NeoX).",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "normalization"
+    },
+    {
+      "name": "layers[i].attn",
+      "description": "Attention module (composite). Contains q/k/v/o projections. Hook captures the full attention output.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].attn.q_proj",
+      "description": "Query projection. Maps hidden states to query vectors.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, num_heads * head_dim]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].attn.k_proj",
+      "description": "Key projection. Maps hidden states to key vectors.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, num_kv_heads * head_dim]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].attn.v_proj",
+      "description": "Value projection. Maps hidden states to value vectors.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, num_kv_heads * head_dim]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].attn.o_proj",
+      "description": "Output projection. Maps concatenated head outputs back to hidden dimension.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].attn.scores",
+      "description": "Attention scores (virtual probe). Captured from the attention computation, not a hookable nn.Module. Requires eager SDPA or LSE reconstruction for FlashAttention.",
+      "virtual": true,
+      "tensor_shape": "[batch, num_heads, seq_len, seq_len]",
+      "category": "attention"
+    },
+    {
+      "name": "layers[i].ln2",
+      "description": "Pre-MLP layer norm (post-attention layer norm).",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "normalization"
+    },
+    {
+      "name": "layers[i].mlp",
+      "description": "MLP module (composite). Contains gate/up/down projections for SwiGLU or equivalent.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "mlp"
+    },
+    {
+      "name": "layers[i].mlp.gate_proj",
+      "description": "Gate projection (SwiGLU gate). Projects hidden states to intermediate dimension.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, intermediate_dim]",
+      "category": "mlp"
+    },
+    {
+      "name": "layers[i].mlp.up_proj",
+      "description": "Up projection. Projects hidden states to intermediate dimension (paired with gate in SwiGLU).",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, intermediate_dim]",
+      "category": "mlp"
+    },
+    {
+      "name": "layers[i].mlp.down_proj",
+      "description": "Down projection. Projects intermediate activations back to hidden dimension.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "mlp"
+    },
+    {
+      "name": "layers[i].residual_pre",
+      "description": "Residual stream entering the transformer block (before attention). Virtual probe — captured at block entry, not a distinct module.",
+      "virtual": true,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "residual"
+    },
+    {
+      "name": "layers[i].residual_mid",
+      "description": "Residual stream between attention and MLP (after attention add, before MLP). Virtual probe.",
+      "virtual": true,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "residual"
+    },
+    {
+      "name": "layers[i].residual_post",
+      "description": "Residual stream leaving the transformer block (after MLP add). Virtual probe.",
+      "virtual": true,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "residual"
+    },
+    {
+      "name": "ln_final",
+      "description": "Final layer norm applied to the last transformer block's output.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, hidden_dim]",
+      "category": "normalization"
+    },
+    {
+      "name": "lm_head",
+      "description": "Language model head. Projects hidden states to vocabulary logits.",
+      "virtual": false,
+      "tensor_shape": "[batch, seq_len, vocab_size]",
+      "category": "output"
+    }
+  ],
+  "moe_components": [
+    {
+      "name": "layers[i].router",
+      "description": "MoE gating network. Computes routing scores for dispatching tokens to experts.",
+      "virtual": false,
+      "tensor_shape": "[batch * seq_len, num_experts]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].router.logits",
+      "description": "Raw router logits (pre-softmax, pre-top-k). Virtual probe — captured from the router's linear output before gating.",
+      "virtual": true,
+      "tensor_shape": "[batch * seq_len, num_experts]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].router.decision",
+      "description": "Top-k selection result. Virtual probe — captures the post-softmax, post-top-k expert assignments and weights per token.",
+      "virtual": true,
+      "tensor_shape": "[batch * seq_len, top_k]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].experts[j]",
+      "description": "Expert j (composite). An individual expert MLP within the MoE layer. Hook captures the full expert output.",
+      "virtual": false,
+      "tensor_shape": "[num_tokens_routed, hidden_dim]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].experts[j].gate_proj",
+      "description": "Expert gate projection. Same role as dense mlp.gate_proj but within one expert.",
+      "virtual": false,
+      "tensor_shape": "[num_tokens_routed, intermediate_dim]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].experts[j].up_proj",
+      "description": "Expert up projection. Same role as dense mlp.up_proj but within one expert.",
+      "virtual": false,
+      "tensor_shape": "[num_tokens_routed, intermediate_dim]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].experts[j].down_proj",
+      "description": "Expert down projection. Same role as dense mlp.down_proj but within one expert.",
+      "virtual": false,
+      "tensor_shape": "[num_tokens_routed, hidden_dim]",
+      "category": "moe"
+    },
+    {
+      "name": "layers[i].shared_expert",
+      "description": "Shared expert (DeepSeek-V3 style). Always-active expert whose output is added to the routed expert outputs. Not present in all MoE architectures.",
+      "virtual": false,
+      "tensor_shape": "[batch * seq_len, hidden_dim]",
+      "category": "moe"
+    }
+  ]
+}

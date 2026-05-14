@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/status.json",
+  "title": "status",
+  "description": "Introspection verb: return server health and session diagnostics. Method name: 'rocket/status'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/status' method. No parameters required.",
+      "properties": {},
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/status'. The envelope state field carries the full SessionState; data carries operational metrics.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "uptime_seconds": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Server uptime in seconds since process start."
+            },
+            "connected_clients": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of currently connected clients."
+            },
+            "memory_usage": {
+              "type": "object",
+              "properties": {
+                "gpu_mb": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Total GPU memory usage in megabytes across all ranks."
+                },
+                "cpu_mb": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "CPU (host) memory usage in megabytes."
+                }
+              },
+              "required": ["gpu_mb", "cpu_mb"],
+              "additionalProperties": false,
+              "description": "Current memory consumption."
+            },
+            "pending_interventions": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of interventions queued but not yet applied."
+            },
+            "trace_events_recorded": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total trace events recorded in this session."
+            }
+          },
+          "required": ["uptime_seconds", "connected_clients", "memory_usage", "pending_interventions", "trace_events_recorded"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

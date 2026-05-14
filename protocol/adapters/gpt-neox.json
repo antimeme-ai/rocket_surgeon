@@ -1,0 +1,115 @@
+{
+  "adapter_name": "gpt-neox",
+  "adapter_version": "0.1.0",
+  "description": "Adapter mapping for GPT-NeoX models (EleutherAI Pythia family, GPT-NeoX-20B). GPT-NeoX differs from Llama in several structural ways: (1) fused QKV projection (single query_key_value module instead of separate q/k/v), (2) parallel attention+MLP (attention and MLP computed in parallel, not sequentially), (3) different module naming (gpt_neox.layers instead of model.layers), (4) dense_h_to_4h / dense_4h_to_h instead of gate/up/down projections (no SwiGLU — uses GELU).",
+  "supported_architectures": [
+    "GPTNeoXForCausalLM"
+  ],
+  "supported_model_families": [
+    "gpt-neox",
+    "pythia"
+  ],
+  "parameterized_indices": {
+    "{i}": "Layer index (0-based). Expands to all layers in the model (0..num_layers-1)."
+  },
+  "module_mappings": [
+    {
+      "hf_pattern": "gpt_neox.embed_in",
+      "canonical_name": "embed_tokens"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.input_layernorm",
+      "canonical_name": "layers[{i}].ln1"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.attention",
+      "canonical_name": "layers[{i}].attn"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.attention.query_key_value",
+      "canonical_name": "layers[{i}].attn.q_proj",
+      "fused": true,
+      "fused_components": [
+        "layers[{i}].attn.q_proj",
+        "layers[{i}].attn.k_proj",
+        "layers[{i}].attn.v_proj"
+      ],
+      "fused_description": "GPT-NeoX fuses Q, K, V into a single linear projection (query_key_value). This single module maps to all three canonical projection names. The output tensor has shape [batch, seq_len, 3 * hidden_dim] and must be split along the last dimension to extract individual Q, K, V tensors. When inspecting q_proj, k_proj, or v_proj individually, the adapter slices the fused output."
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.attention.dense",
+      "canonical_name": "layers[{i}].attn.o_proj"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.post_attention_layernorm",
+      "canonical_name": "layers[{i}].ln2"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.mlp",
+      "canonical_name": "layers[{i}].mlp"
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.mlp.dense_h_to_4h",
+      "canonical_name": "layers[{i}].mlp.up_proj",
+      "note": "GPT-NeoX uses GELU activation, not SwiGLU. There is no separate gate projection. dense_h_to_4h maps to up_proj as the primary expansion projection."
+    },
+    {
+      "hf_pattern": "gpt_neox.layers.{i}.mlp.dense_4h_to_h",
+      "canonical_name": "layers[{i}].mlp.down_proj"
+    },
+    {
+      "hf_pattern": "gpt_neox.final_layer_norm",
+      "canonical_name": "ln_final"
+    },
+    {
+      "hf_pattern": "embed_out",
+      "canonical_name": "lm_head"
+    }
+  ],
+  "virtual_probes": [
+    {
+      "canonical_name": "layers[{i}].attn.scores",
+      "capture_strategy": "Captured from attention computation output. Requires eager SDPA.",
+      "source_module": "gpt_neox.layers.{i}.attention"
+    },
+    {
+      "canonical_name": "layers[{i}].attn.k_proj",
+      "capture_strategy": "Virtual for GPT-NeoX. Extracted by slicing the fused query_key_value output tensor along the last dimension: tensor[..., hidden_dim:2*hidden_dim].",
+      "source_module": "gpt_neox.layers.{i}.attention.query_key_value"
+    },
+    {
+      "canonical_name": "layers[{i}].attn.v_proj",
+      "capture_strategy": "Virtual for GPT-NeoX. Extracted by slicing the fused query_key_value output tensor along the last dimension: tensor[..., 2*hidden_dim:3*hidden_dim].",
+      "source_module": "gpt_neox.layers.{i}.attention.query_key_value"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_pre",
+      "capture_strategy": "Captured as the input tensor to the transformer block (pre-hook on gpt_neox.layers.{i}).",
+      "source_module": "gpt_neox.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_mid",
+      "capture_strategy": "In GPT-NeoX with parallel attention+MLP, residual_mid is captured after the input layernorm but before both attention and MLP (since they run in parallel). This differs from sequential architectures where residual_mid is between attention and MLP.",
+      "source_module": "gpt_neox.layers.{i}"
+    },
+    {
+      "canonical_name": "layers[{i}].residual_post",
+      "capture_strategy": "Captured as the output tensor of the transformer block (post-hook on gpt_neox.layers.{i}). This is the sum of residual + attention_output + mlp_output.",
+      "source_module": "gpt_neox.layers.{i}"
+    }
+  ],
+  "absent_components": [
+    {
+      "canonical_name": "layers[{i}].mlp.gate_proj",
+      "reason": "GPT-NeoX uses GELU activation, not SwiGLU. There is no gate projection. The single expansion linear (dense_h_to_4h) maps to up_proj."
+    }
+  ],
+  "notes": [
+    "GPT-NeoX uses a fused QKV projection (query_key_value). The single module maps to q_proj, k_proj, and v_proj. The fused tensor has shape [batch, seq_len, 3 * hidden_dim] and is split to obtain individual projections.",
+    "GPT-NeoX computes attention and MLP in parallel (both receive the same layernorm output), unlike Llama which computes them sequentially. This affects residual_mid semantics.",
+    "GPT-NeoX uses LayerNorm (not RMSNorm), but both map to the same canonical ln1/ln2 names.",
+    "The absence of gate_proj is architecture-specific. Adapters SHOULD report absent canonical components so the daemon knows not to expect probes at those points.",
+    "GPT-NeoX uses 'embed_out' for the LM head (a separate linear layer), unlike Llama which uses 'lm_head'. Both map to the canonical 'lm_head' name.",
+    "Pythia models (70M through 12B) use the same GPT-NeoX architecture and module paths."
+  ]
+}

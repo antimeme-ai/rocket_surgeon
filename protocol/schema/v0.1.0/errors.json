@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/errors.json",
+  "title": "rocket_surgeon error code registry",
+  "description": "Authoritative registry of all protocol error codes. No verb implementation may invent error codes not listed here.",
+
+  "$defs": {
+    "ErrorCodeEnum": {
+      "type": "string",
+      "description": "Canonical enumeration of all error codes in the protocol.",
+      "enum": [
+        "INVALID_STATE",
+        "INVALID_TARGET",
+        "INVALID_RECIPE",
+        "MODEL_NOT_ATTACHED",
+        "TENSOR_NOT_FOUND",
+        "CHECKPOINT_NOT_FOUND",
+        "PROBE_NOT_FOUND",
+        "CAPABILITY_NOT_SUPPORTED",
+        "SLICE_OUT_OF_BOUNDS",
+        "RESPONSE_TOO_LARGE",
+        "HOST_ERROR",
+        "GPU_OOM",
+        "NCCL_TIMEOUT",
+        "REPLAY_DIVERGENCE",
+        "UNSUPPORTED_MODEL",
+        "COMPILED_MODEL",
+        "MODEL_ALREADY_ATTACHED",
+        "INVALID_PARAMS"
+      ]
+    },
+
+    "ErrorRegistry": {
+      "type": "array",
+      "description": "Complete registry of error code definitions. Each entry is the authoritative specification for one error code.",
+      "items": { "$ref": "#/$defs/ErrorDefinition" },
+      "minItems": 18,
+      "examples": [[
+        {
+          "code": "INVALID_STATE",
+          "numeric_code": -32001,
+          "description": "The requested verb is not valid in the current session state.",
+          "suggestion_template": "Session is in '{current_state}' state. Valid states for {verb}: {valid_states}. Wait or transition first.",
+          "applicable_verbs": ["initialize", "attach", "detach", "rocket/step", "rocket/inspect", "rocket/intervene", "rocket/probe", "rocket/checkpoint", "rocket/replay", "rocket/subscribe"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "INVALID_TARGET",
+          "numeric_code": -32002,
+          "description": "The specified probe point pattern does not match any component in the attached model.",
+          "suggestion_template": "Probe point '{target}' did not match any component. Check the component vocabulary via rocket/status or use wildcard patterns.",
+          "applicable_verbs": ["rocket/inspect", "rocket/intervene", "rocket/probe"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "INVALID_RECIPE",
+          "numeric_code": -32003,
+          "description": "The intervention recipe is malformed or specifies an unsupported intervention type.",
+          "suggestion_template": "Recipe '{recipe_id}' is invalid: {reason}. Check intervention type, params schema, and target format.",
+          "applicable_verbs": ["rocket/intervene", "rocket/probe"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "MODEL_NOT_ATTACHED",
+          "numeric_code": -32004,
+          "description": "The requested operation requires an attached model, but no model is currently loaded.",
+          "suggestion_template": "No model is attached. Call 'attach' with a valid model path first.",
+          "applicable_verbs": ["rocket/step", "rocket/inspect", "rocket/intervene", "rocket/probe", "rocket/checkpoint", "rocket/replay", "detach"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "TENSOR_NOT_FOUND",
+          "numeric_code": -32005,
+          "description": "The specified tensor_id does not exist in the tensor store.",
+          "suggestion_template": "Tensor '{tensor_id}' not found. It may have been evicted or never captured. Re-inspect or check active probes.",
+          "applicable_verbs": ["rocket/inspect", "rocket/intervene"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "CHECKPOINT_NOT_FOUND",
+          "numeric_code": -32006,
+          "description": "The specified checkpoint_id or bookmark does not exist in this session.",
+          "suggestion_template": "Checkpoint '{checkpoint_id}' not found. List available checkpoints with rocket/checkpoint {{\"action\": \"list\"}}.",
+          "applicable_verbs": ["rocket/checkpoint", "rocket/replay"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "PROBE_NOT_FOUND",
+          "numeric_code": -32007,
+          "description": "The specified probe_id does not exist in this session.",
+          "suggestion_template": "Probe '{probe_id}' not found. List active probes with rocket/probe {{\"action\": \"list\"}}.",
+          "applicable_verbs": ["rocket/probe"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "CAPABILITY_NOT_SUPPORTED",
+          "numeric_code": -32008,
+          "description": "The requested verb or feature requires a capability that this session does not support.",
+          "suggestion_template": "Capability '{capability}' is not supported. Server capabilities: {capabilities}. Check initialize response.",
+          "applicable_verbs": ["rocket/step", "rocket/inspect", "rocket/intervene", "rocket/probe", "rocket/checkpoint", "rocket/replay"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "SLICE_OUT_OF_BOUNDS",
+          "numeric_code": -32009,
+          "description": "The requested tensor slice indices exceed the tensor's shape.",
+          "suggestion_template": "Slice {slice} is out of bounds for tensor with shape {shape}. Adjust indices to fit within dimensions.",
+          "applicable_verbs": ["rocket/inspect", "rocket/intervene"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "RESPONSE_TOO_LARGE",
+          "numeric_code": -32010,
+          "description": "The requested data exceeds the 64 KB response size cap.",
+          "suggestion_template": "Response would be {actual_size} bytes (limit: {max_size}). Use slicing, reduce top_k, or request summary only.",
+          "applicable_verbs": ["rocket/inspect", "rocket/status"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "HOST_ERROR",
+          "numeric_code": -32011,
+          "description": "The Python host process encountered an unrecoverable error.",
+          "suggestion_template": "Host process error: {reason}. The session is terminated. Start a new session with initialize + attach.",
+          "applicable_verbs": ["attach", "detach", "rocket/step", "rocket/inspect", "rocket/intervene", "rocket/probe", "rocket/checkpoint", "rocket/replay"],
+          "severity": "fatal"
+        },
+        {
+          "code": "GPU_OOM",
+          "numeric_code": -32012,
+          "description": "A GPU ran out of memory during the requested operation.",
+          "suggestion_template": "GPU {device} out of memory ({free_bytes} bytes free). The session is terminated. Restart with a smaller batch size, fewer checkpoints, or fewer layers per rank.",
+          "applicable_verbs": ["attach", "rocket/step", "rocket/inspect", "rocket/intervene", "rocket/checkpoint", "rocket/replay"],
+          "severity": "fatal"
+        },
+        {
+          "code": "NCCL_TIMEOUT",
+          "numeric_code": -32013,
+          "description": "An NCCL collective operation timed out, indicating a multi-GPU communication failure.",
+          "suggestion_template": "NCCL collective '{operation}' timed out on rank {rank} after {timeout_ms}ms. Check GPU interconnect health and other ranks for errors.",
+          "applicable_verbs": ["attach", "rocket/step", "rocket/replay"],
+          "severity": "fatal"
+        },
+        {
+          "code": "REPLAY_DIVERGENCE",
+          "numeric_code": -32014,
+          "description": "The replayed forward pass diverged from the original beyond the configured tolerance. This is informational -- replay continues.",
+          "suggestion_template": "Replay diverged at tick {tick_id}: {metric} = {value} (tolerance: {tolerance}). Interventions or non-determinism may be the cause.",
+          "applicable_verbs": ["rocket/replay"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "UNSUPPORTED_MODEL",
+          "numeric_code": -32015,
+          "description": "The model architecture is not in the server's support matrix.",
+          "suggestion_template": "Model family '{model_family}' is not supported. Supported families: {supported_families}.",
+          "applicable_verbs": ["attach"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "COMPILED_MODEL",
+          "numeric_code": -32016,
+          "description": "The model uses torch.compile and cannot be attached at Tier A (hook-based) fidelity.",
+          "suggestion_template": "Model is compiled with torch.compile. Tier A attach requires eager mode. Re-load the model without torch.compile, or use Tier B (limited) attach.",
+          "applicable_verbs": ["attach"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "MODEL_ALREADY_ATTACHED",
+          "numeric_code": -32017,
+          "description": "An attach was requested but a model is already loaded in this session.",
+          "suggestion_template": "Model '{model_id}' is already attached. Call 'detach' first, then 'attach' the new model.",
+          "applicable_verbs": ["attach"],
+          "severity": "recoverable"
+        },
+        {
+          "code": "INVALID_PARAMS",
+          "numeric_code": -32602,
+          "description": "The JSON-RPC request params are malformed or do not conform to the verb's schema.",
+          "suggestion_template": "Invalid params for '{verb}': {reason}. Check the verb schema in protocol/schema/v0.1.0/.",
+          "applicable_verbs": ["initialize", "attach", "detach", "rocket/step", "rocket/inspect", "rocket/intervene", "rocket/probe", "rocket/checkpoint", "rocket/replay", "rocket/status", "rocket/subscribe"],
+          "severity": "recoverable"
+        }
+      ]]
+    },
+
+    "ErrorDefinition": {
+      "type": "object",
+      "description": "Definition of a single error code in the registry.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCodeEnum",
+          "description": "Unique string identifier for this error."
+        },
+        "numeric_code": {
+          "type": "integer",
+          "description": "JSON-RPC numeric error code. Domain errors use -32001 to -32099; JSON-RPC standard errors use their assigned codes."
+        },
+        "description": {
+          "type": "string",
+          "description": "What this error means."
+        },
+        "suggestion_template": {
+          "type": "string",
+          "description": "Recovery guidance template with {placeholders} for context-specific values."
+        },
+        "applicable_verbs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Verbs that can raise this error."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["fatal", "recoverable"],
+          "description": "fatal = session terminated, recoverable = client can retry or adjust."
+        }
+      },
+      "required": ["code", "numeric_code", "description", "suggestion_template", "applicable_verbs", "severity"]
+    }
+  }
+}

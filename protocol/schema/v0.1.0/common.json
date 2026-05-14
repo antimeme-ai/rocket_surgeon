@@ -1,0 +1,708 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/common.json",
+  "title": "rocket_surgeon common protocol types",
+  "description": "Shared type definitions referenced by all verb schemas.",
+
+  "$defs": {
+    "SessionState": {
+      "type": "object",
+      "description": "Session envelope included in every response.",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique session identifier."
+        },
+        "model_id": {
+          "type": ["string", "null"],
+          "description": "Content hash of model files. Null when no model is attached."
+        },
+        "status": { "$ref": "#/$defs/Status" },
+        "position": {
+          "oneOf": [
+            { "$ref": "#/$defs/TickPosition" },
+            { "type": "null" }
+          ],
+          "description": "Current tick position. Null before first step."
+        },
+        "tick_id": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Monotonic tick counter. Null before first step."
+        },
+        "active_probes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "IDs of currently armed probes."
+        },
+        "checkpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CheckpointRef" },
+          "description": "Available checkpoints in this session."
+        },
+        "available_actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ActionName" },
+          "description": "Verbs valid in the current state. Populated by the state machine: uninitialized=[initialize], initialized=[attach], stopped=[step,inspect,intervene,probe,checkpoint,replay,detach,status,subscribe], stepping/inspecting/modifying/replaying=[], detaching=[]."
+        }
+      },
+      "required": ["session_id", "model_id", "status", "position", "tick_id", "active_probes", "checkpoints", "available_actions"]
+    },
+
+    "Status": {
+      "type": "string",
+      "enum": [
+        "uninitialized",
+        "initialized",
+        "attaching",
+        "stopped",
+        "stepping",
+        "inspecting",
+        "modifying",
+        "replaying",
+        "detaching"
+      ]
+    },
+
+    "ActionName": {
+      "type": "string",
+      "enum": [
+        "initialize",
+        "attach",
+        "detach",
+        "step",
+        "inspect",
+        "intervene",
+        "probe",
+        "checkpoint",
+        "replay",
+        "status",
+        "subscribe"
+      ]
+    },
+
+    "TickPosition": {
+      "type": "object",
+      "description": "Position in the forward/backward pass.",
+      "properties": {
+        "tick_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic, never reused within a session."
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["forward", "backward"]
+        },
+        "rank": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "GPU rank. Null for single-GPU."
+        },
+        "layer": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "component": {
+          "type": "string",
+          "description": "Canonical component name (e.g. 'attn.o_proj')."
+        },
+        "event": {
+          "type": "string",
+          "enum": ["input", "output"],
+          "description": "Observation point: 'input' (tensor entering component) or 'output' (tensor leaving component). Matches probe-point grammar 5th segment."
+        },
+        "replay_of": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "If this tick is a replay, the original tick_id."
+        }
+      },
+      "required": ["tick_id", "direction", "rank", "layer", "component", "event"]
+    },
+
+    "TickGranularity": {
+      "type": "string",
+      "enum": [
+        "layer",
+        "component",
+        "head",
+        "router_pre_topk",
+        "router_post_topk",
+        "expert",
+        "moe_layer"
+      ]
+    },
+
+    "StepDirection": {
+      "type": "string",
+      "enum": ["forward", "backward"]
+    },
+
+    "TensorSummary": {
+      "type": "object",
+      "description": "Compact tensor descriptor (~200 bytes). Always returned by inspect.",
+      "properties": {
+        "tensor_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "BLAKE3 hash of raw bytes, hex-encoded."
+        },
+        "shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "dtype": { "$ref": "#/$defs/DType" },
+        "device": {
+          "type": "string",
+          "description": "e.g. 'cuda:0', 'cpu'."
+        },
+        "sharding": {
+          "oneOf": [
+            { "$ref": "#/$defs/ShardingInfo" },
+            { "type": "null" }
+          ]
+        },
+        "stats": { "$ref": "#/$defs/TensorStats" },
+        "top_k": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TopKEntry" }
+        }
+      },
+      "required": ["tensor_id", "shape", "dtype", "device", "stats", "top_k"]
+    },
+
+    "TensorStats": {
+      "type": "object",
+      "properties": {
+        "mean": { "type": "number" },
+        "std": { "type": "number" },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "abs_max": { "type": "number" },
+        "sparsity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "l2_norm": { "type": "number", "minimum": 0 },
+        "histogram": { "$ref": "#/$defs/Histogram" }
+      },
+      "required": ["mean", "std", "min", "max", "abs_max", "sparsity", "l2_norm", "histogram"]
+    },
+
+    "Histogram": {
+      "type": "object",
+      "properties": {
+        "bins": { "type": "integer", "minimum": 1 },
+        "edges": {
+          "type": "array",
+          "items": { "type": "number" }
+        },
+        "counts": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "required": ["bins", "edges", "counts"]
+    },
+
+    "TopKEntry": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "value": { "type": "number" }
+      },
+      "required": ["index", "value"]
+    },
+
+    "DType": {
+      "type": "string",
+      "enum": [
+        "float16",
+        "bfloat16",
+        "float32",
+        "float64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "bool"
+      ]
+    },
+
+    "ShardingInfo": {
+      "type": "object",
+      "properties": {
+        "mesh": { "type": "string" },
+        "placements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Placement" }
+        },
+        "local_shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "global_shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "required": ["mesh", "placements", "local_shape", "global_shape"]
+    },
+
+    "Placement": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["Shard", "Replicate", "Partial"]
+        },
+        "dim": {
+          "type": ["integer", "null"],
+          "description": "Shard dimension. Null for Replicate/Partial."
+        }
+      },
+      "required": ["type"]
+    },
+
+    "TensorHandle": {
+      "type": "object",
+      "description": "Lightweight reference to a tensor in the store.",
+      "properties": {
+        "tensor_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "dtype": { "$ref": "#/$defs/DType" }
+      },
+      "required": ["tensor_id", "shape", "dtype"]
+    },
+
+    "ProbeDefinition": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique probe identifier."
+        },
+        "point": {
+          "type": "string",
+          "description": "Probe-point pattern (model:rank:layer:component:event)."
+        },
+        "action": { "$ref": "#/$defs/ProbeAction" },
+        "config": { "$ref": "#/$defs/ProbeConfig" },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "priority": {
+          "type": "integer",
+          "default": 0,
+          "description": "Execution order (lower = earlier)."
+        }
+      },
+      "required": ["id", "point", "action"]
+    },
+
+    "ProbeAction": {
+      "type": "string",
+      "enum": ["capture", "checkpoint", "trace", "assert", "aggregate", "intervene"]
+    },
+
+    "ProbeConfig": {
+      "type": "object",
+      "description": "Action-specific configuration.",
+      "properties": {
+        "summary": { "type": "boolean", "default": true },
+        "capture_tensor": { "type": "boolean", "default": false },
+        "filter": {
+          "type": ["string", "null"],
+          "description": "Predicate expression (e.g. 'norm > 50.0')."
+        },
+        "aggregate_fn": {
+          "type": ["string", "null"],
+          "description": "For aggregate action: 'running_mean', 'histogram', etc."
+        },
+        "assertion": {
+          "type": ["string", "null"],
+          "description": "For assert action: predicate that must hold."
+        },
+        "intervention": {
+          "oneOf": [
+            { "$ref": "#/$defs/InterventionRecipe" },
+            { "type": "null" }
+          ],
+          "description": "For intervene action: the recipe to apply."
+        }
+      }
+    },
+
+    "InterventionRecipe": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique intervention identifier."
+        },
+        "type": { "$ref": "#/$defs/InterventionType" },
+        "target": {
+          "type": "string",
+          "description": "Canonical probe point."
+        },
+        "params": { "$ref": "#/$defs/InterventionParams" },
+        "condition": {
+          "type": ["string", "null"],
+          "description": "Optional predicate (e.g. 'norm > 50.0')."
+        },
+        "priority": {
+          "type": "integer",
+          "default": 0,
+          "description": "Execution order (lower = first)."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["additive", "replace"],
+          "default": "additive",
+          "description": "Composition mode."
+        }
+      },
+      "required": ["id", "type", "target", "params"]
+    },
+
+    "InterventionType": {
+      "type": "string",
+      "enum": ["ablate", "scale", "add", "patch", "clamp", "route_override"]
+    },
+
+    "InterventionParams": {
+      "description": "Type-specific parameters for intervention.",
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "AblateParams",
+          "properties": {},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "title": "ScaleParams",
+          "properties": {
+            "factor": { "type": "number" }
+          },
+          "required": ["factor"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "title": "AddParams",
+          "properties": {
+            "vector": {
+              "description": "Inline array or tensor_id reference.",
+              "oneOf": [
+                { "type": "array", "items": { "type": "number" } },
+                { "type": "string", "description": "tensor_id" }
+              ]
+            }
+          },
+          "required": ["vector"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "title": "PatchParams",
+          "properties": {
+            "source_tensor_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": ["source_tensor_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "title": "ClampParams",
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          },
+          "required": ["min", "max"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "title": "RouteOverrideParams",
+          "properties": {
+            "token": { "type": "integer", "minimum": 0 },
+            "experts": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "required": ["token", "experts"],
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "Capabilities": {
+      "type": "object",
+      "description": "Server capabilities returned at initialize. Evolves across phases; clients must tolerate unknown fields (forward-compatible). Fields absent from this object are assumed unsupported.",
+      "properties": {
+        "protocol_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Semver protocol version. Phase 0+."
+        },
+        "supports_reverse_step": {
+          "type": "boolean",
+          "description": "Whether backward stepping is available. Phase 3+."
+        },
+        "supports_checkpointing": {
+          "type": "boolean",
+          "description": "Whether checkpoint/replay verbs are functional. Phase 3+."
+        },
+        "supports_moe": {
+          "type": "boolean",
+          "description": "Whether MoE tick granularities and routing interventions are available. Phase 6+."
+        },
+        "supports_backward": {
+          "type": "boolean",
+          "description": "Whether backward-pass ticks are available. Phase 8+."
+        },
+        "supports_sae": {
+          "type": "boolean",
+          "description": "Whether SAE feature-level surgery is available. Phase 8+."
+        },
+        "execution_mode": {
+          "type": "string",
+          "enum": ["eager", "compiled", "mixed"],
+          "description": "Model execution mode. Phase 0-2: always 'eager'. Phase 7+: 'compiled' or 'mixed'."
+        },
+        "parallelism": {
+          "type": "string",
+          "enum": ["single_gpu", "ddp", "fsdp", "tensor_parallel", "pipeline_parallel"],
+          "description": "Active parallelism strategy. Phase 0-4: 'single_gpu'. Phase 5+: others."
+        },
+        "tick_granularities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TickGranularity" },
+          "minItems": 1,
+          "description": "Available granularity levels. Phase 0-2: ['layer','component']. Phase 6+: adds MoE granularities."
+        },
+        "intervention_types": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InterventionType" },
+          "description": "Available intervention types. Phase 2: ['ablate','scale','add','patch','clamp']. Phase 6+: adds 'route_override'."
+        },
+        "built_in_views": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/BuiltInView" },
+          "description": "Available interpretability views. Grows across phases."
+        },
+        "head_granularity": {
+          "type": "string",
+          "enum": ["native", "requires_unfused", "unavailable"],
+          "description": "Whether per-head ticks are available. 'requires_unfused' means a shadow replay with unfused attention is needed (Phase 7+). 'unavailable' pre-Phase 7."
+        },
+        "transports": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["stdio", "unix_socket", "tcp", "websocket"]
+          },
+          "description": "Available transport mechanisms. Phase 0-4: ['stdio','unix_socket']. Phase 5+: adds 'tcp'. Phase 8+: adds 'websocket'."
+        },
+        "wire_formats": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["json", "protobuf"]
+          },
+          "description": "Available wire format encodings. Phase 0-3: ['json']. Phase 4+: adds 'protobuf'."
+        },
+        "max_response_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum response payload size in bytes. Default 65536 (64 KB)."
+        },
+        "model_family": {
+          "type": "string",
+          "description": "Model architecture family. Populated after attach."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Content hash of model files. Populated after attach."
+        },
+        "num_layers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of transformer layers. Populated after attach."
+        },
+        "num_heads": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of attention heads. Populated after attach."
+        },
+        "hidden_dim": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Hidden dimension size. Populated after attach."
+        },
+        "num_ranks": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of GPU ranks. Populated after attach."
+        },
+        "num_experts": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Number of experts per MoE layer. Null for dense models. Populated after attach."
+        },
+        "top_k_experts": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Number of experts selected per token. Null for dense models. Populated after attach."
+        }
+      },
+      "required": [
+        "protocol_version",
+        "supports_reverse_step",
+        "supports_checkpointing",
+        "supports_moe",
+        "supports_backward",
+        "supports_sae",
+        "execution_mode",
+        "parallelism",
+        "tick_granularities",
+        "intervention_types",
+        "built_in_views",
+        "head_granularity",
+        "transports",
+        "wire_formats",
+        "max_response_bytes"
+      ],
+      "additionalProperties": true
+    },
+
+    "BuiltInView": {
+      "type": "string",
+      "enum": [
+        "residual_stream_norm",
+        "attention_pattern",
+        "head_output",
+        "logit_lens",
+        "routing_decision",
+        "routing_entropy",
+        "feature_attribution",
+        "sae_activation"
+      ]
+    },
+
+    "CheckpointRef": {
+      "type": "object",
+      "properties": {
+        "checkpoint_id": { "type": "string" },
+        "tick_id": { "type": "integer", "minimum": 0 },
+        "layer_idx": { "type": "integer", "minimum": 0 },
+        "tier": {
+          "type": "string",
+          "enum": ["probe_log", "activation", "full_snapshot"]
+        },
+        "bookmark": {
+          "type": ["string", "null"],
+          "description": "Named bookmark if one exists for this checkpoint."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["checkpoint_id", "tick_id", "layer_idx", "tier", "created_at"]
+    },
+
+    "ErrorData": {
+      "type": "object",
+      "description": "Structured error data included in JSON-RPC error responses.",
+      "properties": {
+        "error_code": { "$ref": "#/$defs/ErrorCode" },
+        "numeric_code": {
+          "type": "integer",
+          "description": "JSON-RPC numeric error code. Mirrors the top-level error.code field for convenience."
+        },
+        "current_state": { "$ref": "#/$defs/Status" },
+        "valid_states": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Status" }
+        },
+        "suggestion": {
+          "type": "string",
+          "description": "Human/LLM-readable recovery suggestion."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["fatal", "recoverable"],
+          "description": "Whether the session is terminated (fatal) or the client can retry (recoverable)."
+        },
+        "context": {
+          "type": "object",
+          "description": "Additional context for suggestion template placeholders.",
+          "additionalProperties": true
+        }
+      },
+      "required": ["error_code", "suggestion", "severity"]
+    },
+
+    "ErrorCode": {
+      "description": "Canonical error codes. Must match ErrorCodeEnum in errors.json exactly.",
+      "$ref": "errors.json#/$defs/ErrorCodeEnum"
+    },
+
+    "GranularityScope": {
+      "type": "object",
+      "properties": {
+        "match": {
+          "type": "string",
+          "description": "Component pattern to match (e.g. 'layers[12]', 'layers[*]')."
+        },
+        "granularity": { "$ref": "#/$defs/TickGranularity" }
+      },
+      "required": ["match", "granularity"]
+    },
+
+    "ResponseEnvelope": {
+      "type": "object",
+      "description": "Standard result shape: state + data.",
+      "properties": {
+        "state": { "$ref": "#/$defs/SessionState" },
+        "data": {}
+      },
+      "required": ["state"]
+    },
+
+    "ErrorResponse": {
+      "type": "object",
+      "description": "Standard JSON-RPC 2.0 error response shape. All verbs share this format. The error.data field conforms to ErrorData.",
+      "properties": {
+        "jsonrpc": { "type": "string", "const": "2.0" },
+        "id": { "type": ["integer", "string", "null"] },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": { "type": "integer", "description": "JSON-RPC numeric error code." },
+            "message": { "type": "string", "description": "Human-readable error message." },
+            "data": { "$ref": "#/$defs/ErrorData" }
+          },
+          "required": ["code", "message", "data"]
+        }
+      },
+      "required": ["jsonrpc", "id", "error"]
+    }
+  }
+}

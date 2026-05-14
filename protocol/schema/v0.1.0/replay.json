@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/replay.json",
+  "title": "replay",
+  "description": "Domain verb: replay execution from a checkpoint with optional interventions and fidelity verification. Method name: 'rocket/replay'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/replay' method.",
+      "properties": {
+        "from_checkpoint": {
+          "type": "string",
+          "description": "Checkpoint ID to replay from."
+        },
+        "interventions": {
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/InterventionRecipe" },
+          "description": "Interventions to apply during replay."
+        },
+        "stop_at": {
+          "type": "object",
+          "properties": {
+            "layer": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Layer index to stop replay at."
+            },
+            "component": {
+              "type": "string",
+              "description": "Component name to stop replay at."
+            }
+          },
+          "required": ["layer", "component"],
+          "additionalProperties": false,
+          "description": "Position to stop replay at. If omitted, replay runs to the end of the recorded range."
+        },
+        "verify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to verify replay fidelity by comparing against original execution."
+        }
+      },
+      "required": ["from_checkpoint"],
+      "additionalProperties": false
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/replay'. State status will be 'stopped' after replay completes.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "ticks_replayed": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of ticks replayed from the checkpoint."
+            },
+            "stopped_at": {
+              "$ref": "common.json#/$defs/TickPosition",
+              "description": "Position where replay stopped."
+            },
+            "divergences": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "tick_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Tick ID in the replay where divergence was detected."
+                  },
+                  "original_tick_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Corresponding tick ID from the original execution."
+                  },
+                  "probe_point": {
+                    "type": "string",
+                    "description": "Probe point pattern where divergence was measured."
+                  },
+                  "cosine_similarity": {
+                    "type": "number",
+                    "minimum": -1,
+                    "maximum": 1,
+                    "description": "Cosine similarity between original and replayed activations."
+                  },
+                  "max_relative_error": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Maximum relative error between original and replayed values."
+                  },
+                  "message": {
+                    "type": "string",
+                    "description": "Human/LLM-readable description of the divergence."
+                  }
+                },
+                "required": ["tick_id", "original_tick_id", "probe_point", "cosine_similarity", "max_relative_error", "message"],
+                "additionalProperties": false
+              },
+              "description": "Divergences detected during replay compared to original execution."
+            },
+            "verified": {
+              "type": "boolean",
+              "description": "Whether replay matched the original execution within tolerance."
+            }
+          },
+          "required": ["ticks_replayed", "stopped_at", "divergences", "verified"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}

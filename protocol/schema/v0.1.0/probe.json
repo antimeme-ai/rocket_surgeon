@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rocket-surgeon.dev/protocol/v0.1.0/probe.json",
+  "title": "probe",
+  "description": "Domain verb: define, manage, and configure probe points on the forward pass. Method name: 'rocket/probe'.",
+
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 params for the 'rocket/probe' method.",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["define", "list", "enable", "disable", "remove", "set_granularity"],
+          "description": "Probe management action to perform."
+        },
+        "probe": {
+          "$ref": "common.json#/$defs/ProbeDefinition",
+          "description": "Probe to create. Required when action is 'define'."
+        },
+        "probe_id": {
+          "type": "string",
+          "description": "ID of the probe to act on. Required when action is 'enable', 'disable', or 'remove'."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/GranularityScope" },
+          "description": "Granularity overrides to apply. Required when action is 'set_granularity'."
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "const": "define" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["probe"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "enable" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["probe_id"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "disable" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["probe_id"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "remove" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["probe_id"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "set_granularity" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["scopes"]
+          }
+        }
+      ]
+    },
+
+    "Response": {
+      "type": "object",
+      "description": "JSON-RPC 2.0 result for 'rocket/probe'. State status will be 'stopped' on success.",
+      "properties": {
+        "state": {
+          "$ref": "common.json#/$defs/SessionState"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "probes": {
+              "type": "array",
+              "items": { "$ref": "common.json#/$defs/ProbeDefinition" },
+              "description": "Complete list of all probes after this operation."
+            },
+            "probe_id": {
+              "type": ["string", "null"],
+              "description": "ID of the newly defined probe. Non-null only for action 'define'."
+            }
+          },
+          "required": ["probes", "probe_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["state", "data"],
+      "additionalProperties": false
+    }
+  }
+}
