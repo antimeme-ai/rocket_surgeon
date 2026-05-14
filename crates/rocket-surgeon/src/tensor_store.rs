@@ -3,7 +3,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-use rocket_surgeon_protocol::types::{DType, TensorHandle, TensorStats, TopKEntry};
+use rocket_surgeon_protocol::types::{DType, TensorHandle, TensorStats, TensorSummary, TopKEntry};
+
+use crate::tensor_stats;
 
 const DEFAULT_MAX_ENTRIES: usize = 1024;
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -83,12 +85,20 @@ impl TensorStore {
             };
         }
 
-        // Evict until we have room
+        // Evict until we are within entry-count and byte-budget limits.
+        // Entry-count: hard ceiling — keep evicting until below max_entries.
+        // Byte budget: evict while already over limit (before accounting for the
+        // new entry) so we reclaim space without over-evicting small inserts.
         let data_len = data.len();
         while self.entries.len() >= self.max_entries
             || (self.current_bytes + data_len > self.max_bytes && !self.entries.is_empty())
         {
             self.evict_oldest();
+            // After reclaiming one entry for byte pressure, stop — the caller is
+            // allowed to temporarily exceed the byte cap by one entry.
+            if self.entries.len() < self.max_entries {
+                break;
+            }
         }
 
         let now = Instant::now();
@@ -142,6 +152,55 @@ impl TensorStore {
 
     pub fn bytes_used(&self) -> usize {
         self.current_bytes
+    }
+
+    pub fn summarize(&mut self, tensor_id: &str) -> Option<TensorSummary> {
+        if !self.entries.contains_key(tensor_id) {
+            return None;
+        }
+
+        self.touch_access_order(tensor_id);
+        let entry = self.entries.get_mut(tensor_id).unwrap();
+        entry.last_access = Instant::now();
+
+        if entry.summary.is_none() {
+            let (stats, top_k) =
+                tensor_stats::compute_summary(&entry.data, entry.dtype, &entry.shape);
+            entry.summary = Some((stats, top_k));
+        }
+
+        let (stats, top_k) = entry.summary.as_ref().unwrap();
+        Some(TensorSummary {
+            tensor_id: entry.tensor_id.clone(),
+            shape: entry.shape.clone(),
+            dtype: entry.dtype,
+            device: entry.device.clone(),
+            sharding: None,
+            stats: stats.clone(),
+            top_k: top_k.clone(),
+        })
+    }
+
+    pub fn slice(&mut self, tensor_id: &str, offset: u64, len: u64) -> Result<Vec<u8>, StoreError> {
+        let entry = self
+            .entries
+            .get_mut(tensor_id)
+            .ok_or_else(|| StoreError::NotFound(tensor_id.to_owned()))?;
+
+        entry.last_access = Instant::now();
+
+        let data_len = entry.data.len() as u64;
+        if offset + len > data_len {
+            return Err(StoreError::SliceOutOfBounds {
+                offset,
+                len,
+                data_len,
+            });
+        }
+
+        let start = offset as usize;
+        let end = start + len as usize;
+        Ok(entry.data[start..end].to_vec())
     }
 
     fn touch_access_order(&mut self, tensor_id: &str) {
@@ -241,5 +300,113 @@ mod tests {
         store.insert(vec![1u8; 200], vec![50], DType::Float32, "cpu".into());
         assert_eq!(store.len(), 2);
         assert_eq!(store.bytes_used(), 300);
+    }
+
+    // --- summarize tests ---
+
+    #[test]
+    fn summarize_returns_tensor_summary() {
+        let mut store = TensorStore::new();
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let handle = store.insert(data, vec![4], DType::Float32, "cpu".into());
+
+        let summary = store.summarize(&handle.tensor_id).unwrap();
+        assert_eq!(summary.tensor_id, handle.tensor_id);
+        assert_eq!(summary.shape, vec![4]);
+        assert_eq!(summary.dtype, DType::Float32);
+        assert!((summary.stats.mean - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn summarize_caches_result() {
+        let mut store = TensorStore::new();
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let handle = store.insert(data, vec![3], DType::Float32, "cpu".into());
+
+        let s1 = store.summarize(&handle.tensor_id).unwrap();
+        let s2 = store.summarize(&handle.tensor_id).unwrap();
+        assert_eq!(s1.stats.mean, s2.stats.mean);
+    }
+
+    #[test]
+    fn summarize_nonexistent_returns_none() {
+        let mut store = TensorStore::new();
+        assert!(store.summarize("nonexistent").is_none());
+    }
+
+    // --- slice tests ---
+
+    #[test]
+    fn slice_returns_correct_bytes() {
+        let mut store = TensorStore::new();
+        let data: Vec<u8> = (0..20).collect();
+        let handle = store.insert(data, vec![20], DType::Uint8, "cpu".into());
+
+        let slice = store.slice(&handle.tensor_id, 5, 10).unwrap();
+        assert_eq!(slice, (5u8..15).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn slice_out_of_bounds_returns_error() {
+        let mut store = TensorStore::new();
+        let data = vec![0u8; 10];
+        let handle = store.insert(data, vec![10], DType::Uint8, "cpu".into());
+
+        let err = store.slice(&handle.tensor_id, 5, 10).unwrap_err();
+        assert!(matches!(err, StoreError::SliceOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn slice_nonexistent_returns_error() {
+        let mut store = TensorStore::new();
+        let err = store.slice("nonexistent", 0, 1).unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    // --- LRU eviction tests ---
+
+    #[test]
+    fn eviction_by_entry_count() {
+        let mut store = TensorStore::with_limits(3, usize::MAX);
+        let h1 = store.insert(vec![1u8], vec![1], DType::Uint8, "cpu".into());
+        let _h2 = store.insert(vec![2u8], vec![1], DType::Uint8, "cpu".into());
+        let _h3 = store.insert(vec![3u8], vec![1], DType::Uint8, "cpu".into());
+        assert_eq!(store.len(), 3);
+
+        let _h4 = store.insert(vec![4u8], vec![1], DType::Uint8, "cpu".into());
+        assert_eq!(store.len(), 3);
+        assert!(!store.contains(&h1.tensor_id));
+    }
+
+    #[test]
+    fn eviction_by_byte_limit() {
+        let mut store = TensorStore::with_limits(usize::MAX, 10);
+        let h1 = store.insert(vec![0u8; 5], vec![5], DType::Uint8, "cpu".into());
+        let _h2 = store.insert(vec![1u8; 5], vec![5], DType::Uint8, "cpu".into());
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.bytes_used(), 10);
+
+        let _h3 = store.insert(vec![2u8; 6], vec![6], DType::Uint8, "cpu".into());
+        assert!(!store.contains(&h1.tensor_id));
+        assert_eq!(store.bytes_used(), 11);
+    }
+
+    #[test]
+    fn eviction_preserves_recently_accessed() {
+        let mut store = TensorStore::with_limits(3, usize::MAX);
+        let h1 = store.insert(vec![1u8], vec![1], DType::Uint8, "cpu".into());
+        let h2 = store.insert(vec![2u8], vec![1], DType::Uint8, "cpu".into());
+        let _h3 = store.insert(vec![3u8], vec![1], DType::Uint8, "cpu".into());
+
+        // Access h1 to move it to back of LRU
+        store.get(&h1.tensor_id);
+
+        // Insert h4 — should evict h2 (now oldest), not h1
+        let _h4 = store.insert(vec![4u8], vec![1], DType::Uint8, "cpu".into());
+        assert!(store.contains(&h1.tensor_id));
+        assert!(!store.contains(&h2.tensor_id));
     }
 }
