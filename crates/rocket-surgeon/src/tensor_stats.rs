@@ -794,4 +794,54 @@ mod tests {
         assert!(approx_eq(merged_rl.mean, real.mean, 1e-10));
         assert_eq!(merged_rl.n, real.n);
     }
+
+    #[test]
+    fn summary_matches_numpy_reference() {
+        // 10 f32 values: [0.1, -0.5, 1.2, 0.0, -3.3, 2.1, 0.7, -0.9, 0.0, 1.5]
+        // Pre-computed with NumPy (accounting for f32 precision loss vs f64):
+        //   np.mean  =  0.089999996... (0.09)
+        //   np.std   =  1.430699110... (population std)
+        //   np.min   = -3.299999952...
+        //   np.max   =  2.099999904...
+        //   abs_max  =  3.299999952...
+        //   sparsity =  0.2 (two zeros with eps=1e-8)
+        //   l2_norm  =  np.linalg.norm = 4.533210754...
+        let raw: Vec<f32> = vec![0.1, -0.5, 1.2, 0.0, -3.3, 2.1, 0.7, -0.9, 0.0, 1.5];
+        let data: Vec<u8> = raw.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, top_k) = compute_summary(&data, DType::Float32, &[10]);
+
+        assert!(approx_eq(stats.mean, 0.09, 1e-5), "mean={}", stats.mean);
+        assert!(approx_eq(stats.std, 1.430_699, 1e-5), "std={}", stats.std);
+        assert!(approx_eq(stats.min, -3.3, 1e-5), "min={}", stats.min);
+        assert!(approx_eq(stats.max, 2.1, 1e-5), "max={}", stats.max);
+        assert!(
+            approx_eq(stats.abs_max, 3.3, 1e-5),
+            "abs_max={}",
+            stats.abs_max
+        );
+        assert!(
+            approx_eq(stats.sparsity, 0.2, 1e-10),
+            "sparsity={}",
+            stats.sparsity
+        );
+        assert!(
+            approx_eq(stats.l2_norm, 4.533_210, 1e-4),
+            "l2_norm={}",
+            stats.l2_norm
+        );
+
+        // top-k: largest by abs are -3.3 (idx 4), 2.1 (idx 5), 1.5 (idx 9)
+        assert!(!top_k.is_empty());
+        assert!(approx_eq(top_k[0].value, -3.3, 1e-4));
+        assert_eq!(top_k[0].index, vec![4]);
+    }
+
+    #[test]
+    fn empty_tensor_returns_zero_stats() {
+        let (stats, top_k) = compute_summary(&[], DType::Float32, &[0]);
+        assert!(approx_eq(stats.mean, 0.0, 1e-10));
+        assert!(approx_eq(stats.std, 0.0, 1e-10));
+        assert!(approx_eq(stats.sparsity, 1.0, 1e-10));
+        assert!(top_k.is_empty());
+    }
 }
