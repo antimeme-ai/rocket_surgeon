@@ -13,7 +13,7 @@ const SPARSITY_EPSILON: f64 = 1e-8;
 const DEFAULT_TOP_K: usize = 10;
 
 #[derive(Debug, Clone)]
-struct Pass1Result {
+pub struct Pass1Result {
     n: u64,
     mean: f64,
     m2: f64,
@@ -208,6 +208,69 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
         counts,
         edges,
         top_k,
+    }
+}
+
+#[allow(dead_code)]
+pub fn merge_pass1(a: &Pass1Result, b: &Pass1Result) -> Pass1Result {
+    if a.n == 0 {
+        return b.clone();
+    }
+    if b.n == 0 {
+        return a.clone();
+    }
+
+    let a_non_nan = a.n - a.nan_count;
+    let b_non_nan = b.n - b.nan_count;
+    let total_non_nan = a_non_nan + b_non_nan;
+
+    let n = a.n + b.n;
+    let nan_count = a.nan_count + b.nan_count;
+
+    // Chan/Golub/LeVeque parallel Welford merge
+    let (mean, m2) = if total_non_nan == 0 {
+        (0.0, 0.0)
+    } else {
+        let delta = b.mean - a.mean;
+        let mean = delta.mul_add(b_non_nan as f64 / total_non_nan as f64, a.mean);
+        let m2 = (delta * delta).mul_add(
+            a_non_nan as f64 * b_non_nan as f64 / total_non_nan as f64,
+            a.m2 + b.m2,
+        );
+        (mean, m2)
+    };
+
+    let min = a.min.min(b.min);
+    let max = a.max.max(b.max);
+    let abs_max = a.abs_max.max(b.abs_max);
+    let sparse_count = a.sparse_count + b.sparse_count;
+
+    // Merge LAPACK-style L2 accumulators: rescale to the larger scale
+    let (l2_scale, l2_accum) = if a.l2_scale >= b.l2_scale {
+        if a.l2_scale > 0.0 && b.l2_scale > 0.0 {
+            let ratio = b.l2_scale / a.l2_scale;
+            (a.l2_scale, (b.l2_accum * ratio).mul_add(ratio, a.l2_accum))
+        } else {
+            (a.l2_scale, a.l2_accum)
+        }
+    } else if b.l2_scale > 0.0 && a.l2_scale > 0.0 {
+        let ratio = a.l2_scale / b.l2_scale;
+        (b.l2_scale, (a.l2_accum * ratio).mul_add(ratio, b.l2_accum))
+    } else {
+        (b.l2_scale, b.l2_accum)
+    };
+
+    Pass1Result {
+        n,
+        mean,
+        m2,
+        min,
+        max,
+        abs_max,
+        sparse_count,
+        nan_count,
+        l2_accum,
+        l2_scale,
     }
 }
 
@@ -651,5 +714,48 @@ mod tests {
         assert_eq!(flat_index_to_multi(17, &[2, 3, 4]), vec![1, 1, 1]);
         assert_eq!(flat_index_to_multi(0, &[2, 3, 4]), vec![0, 0, 0]);
         assert_eq!(flat_index_to_multi(23, &[2, 3, 4]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn welford_merge_two_halves() {
+        let full: Vec<f64> = (0..100).map(|i| f64::from(i).mul_add(0.7, -20.0)).collect();
+        let (left, right) = full.split_at(50);
+
+        let full_result = compute_pass1(&full);
+        let left_result = compute_pass1(left);
+        let right_result = compute_pass1(right);
+        let merged = merge_pass1(&left_result, &right_result);
+
+        assert!(approx_eq(merged.mean, full_result.mean, 1e-10));
+        assert!(approx_eq(merged.m2, full_result.m2, 1e-6));
+        assert!(approx_eq(merged.min, full_result.min, 1e-10));
+        assert!(approx_eq(merged.max, full_result.max, 1e-10));
+        assert!(approx_eq(merged.abs_max, full_result.abs_max, 1e-10));
+        assert_eq!(merged.sparse_count, full_result.sparse_count);
+
+        let merged_l2 = merged.l2_scale * merged.l2_accum.sqrt();
+        let full_l2 = full_result.l2_scale * full_result.l2_accum.sqrt();
+        assert!(approx_eq(merged_l2, full_l2, 1e-6));
+    }
+
+    #[test]
+    fn welford_merge_numerical_stability() {
+        // Values clustered around 1e8 with small noise.
+        // Naive summation would lose precision; Welford + merge should be stable.
+        let base = 1e8;
+        let full: Vec<f64> = (0..1000)
+            .map(|i| f64::from(i).mul_add(0.001, base))
+            .collect();
+        let (left, right) = full.split_at(500);
+
+        let full_result = compute_pass1(&full);
+        let merged = merge_pass1(&compute_pass1(left), &compute_pass1(right));
+
+        let full_std = (full_result.m2 / full_result.n as f64).sqrt();
+        let merged_std = (merged.m2 / merged.n as f64).sqrt();
+        assert!(
+            approx_eq(merged_std, full_std, full_std * 1e-4),
+            "merged_std={merged_std}, full_std={full_std}"
+        );
     }
 }
