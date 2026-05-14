@@ -95,7 +95,7 @@ TickPosition {
     rank:       Option<u32>,
     layer:      u32,
     component:  String,
-    event:      pre | post,
+    event:      input | output,
 }
 ```
 
