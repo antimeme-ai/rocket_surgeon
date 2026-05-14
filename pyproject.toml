@@ -22,6 +22,7 @@ dev = [
     "ruff>=0.11",
     "mypy>=1.15",
     "pytest>=8.0",
+    "pytest-bdd>=8.0",
     "pytest-asyncio>=0.25",
     "maturin>=1.0",
 ]

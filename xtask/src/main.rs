@@ -28,6 +28,8 @@ enum Xtask {
     Mypy,
     /// Run Python tests
     Pytest,
+    /// Run TCK (Technology Compatibility Kit) tests
+    Tck,
     /// Run full CI suite (all lints + all tests)
     Ci,
 }
@@ -47,6 +49,7 @@ fn main() -> Result<()> {
         Xtask::Ruff { fix } => ruff(fix)?,
         Xtask::Mypy => mypy()?,
         Xtask::Pytest => pytest()?,
+        Xtask::Tck => tck()?,
         Xtask::Ci => {
             fmt(true)?;
             clippy()?;
@@ -102,6 +105,14 @@ fn mypy() -> Result<()> {
 
 fn pytest() -> Result<()> {
     run("python3", &["-m", "pytest", "python/tests", "-v"]).context("pytest failed")
+}
+
+fn tck() -> Result<()> {
+    run(
+        "python3",
+        &["-m", "pytest", "python/tests/tck", "-v", "--no-header"],
+    )
+    .context("tck tests failed")
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {
