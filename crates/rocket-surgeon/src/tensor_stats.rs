@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 #[allow(dead_code)]
 const NUM_HISTOGRAM_BINS: usize = 64;
@@ -143,6 +144,71 @@ fn compute_pass1(values: &[f64]) -> Pass1Result {
     }
 }
 
+#[allow(dead_code)]
+fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pass2Result {
+    let mut counts = [0u64; NUM_HISTOGRAM_BINS];
+    let range = range_max - range_min;
+
+    // Min-heap: std::collections::BinaryHeap is a max-heap,
+    // so we use std::cmp::Reverse for min-heap behavior.
+    let mut heap: BinaryHeap<std::cmp::Reverse<TopKHeapEntry>> = BinaryHeap::with_capacity(k + 1);
+
+    for (i, &x) in values.iter().enumerate() {
+        // Skip NaNs — they were counted in pass 1
+        if x.is_nan() {
+            continue;
+        }
+
+        // Histogram binning
+        if range > 0.0 {
+            let frac = (x - range_min) / range;
+            let bin = (frac * NUM_HISTOGRAM_BINS as f64).floor() as usize;
+            let bin = bin.min(NUM_HISTOGRAM_BINS - 1);
+            counts[bin] += 1;
+        } else {
+            // All values identical — put everything in the middle bin
+            counts[NUM_HISTOGRAM_BINS / 2] += 1;
+        }
+
+        // Top-k min-heap on |x|
+        let ax = x.abs();
+        let entry = TopKHeapEntry::new(ax, x, i as u64);
+        if heap.len() < k {
+            heap.push(std::cmp::Reverse(entry));
+        } else if let Some(std::cmp::Reverse(min_entry)) = heap.peek() {
+            if ax > min_entry.abs_value {
+                heap.pop();
+                heap.push(std::cmp::Reverse(entry));
+            }
+        }
+    }
+
+    // Build histogram edges: n_bins + 1 edges from min to max
+    let edges: Vec<f64> = (0..=NUM_HISTOGRAM_BINS)
+        .map(|i| {
+            if range > 0.0 {
+                range.mul_add(i as f64 / NUM_HISTOGRAM_BINS as f64, range_min)
+            } else {
+                range_min
+            }
+        })
+        .collect();
+
+    // Extract top-k sorted by descending abs_value
+    let mut top_k: Vec<TopKHeapEntry> = heap.into_iter().map(|r| r.0).collect();
+    top_k.sort_by(|a, b| {
+        b.abs_value
+            .partial_cmp(&a.abs_value)
+            .unwrap_or(Ordering::Equal)
+    });
+
+    Pass2Result {
+        counts,
+        edges,
+        top_k,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +313,55 @@ mod tests {
         let l2 = r.l2_scale * r.l2_accum.sqrt();
         let expected = (3.0_f64).sqrt() * 1e154;
         assert!(approx_eq(l2, expected, expected * 1e-10));
+    }
+
+    #[test]
+    fn histogram_uniform_distribution() {
+        // 640 values spread uniformly => ~10 per bin
+        let values: Vec<f64> = (0..640).map(|i| f64::from(i) / 640.0).collect();
+        let min = 0.0;
+        let max = 639.0 / 640.0;
+        let r = compute_pass2(&values, min, max, 0);
+        let total: u64 = r.counts.iter().sum();
+        assert_eq!(total, 640);
+        for &c in &r.counts {
+            assert!((8..=12).contains(&c), "bin count {c} not near 10");
+        }
+    }
+
+    #[test]
+    fn histogram_single_value() {
+        let values = vec![5.0, 5.0, 5.0];
+        let r = compute_pass2(&values, 5.0, 5.0, 0);
+        let total: u64 = r.counts.iter().sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn histogram_edges_correct() {
+        let r = compute_pass2(&[0.0, 10.0], 0.0, 10.0, 0);
+        assert_eq!(r.edges.len(), NUM_HISTOGRAM_BINS + 1);
+        assert!(approx_eq(r.edges[0], 0.0, 1e-10));
+        assert!(approx_eq(*r.edges.last().unwrap(), 10.0, 1e-10));
+    }
+
+    #[test]
+    fn top_k_returns_largest() {
+        let values = vec![1.0, -5.0, 3.0, -8.0, 2.0, 7.0, -1.0];
+        let r = compute_pass2(&values, -8.0, 7.0, 3);
+        assert_eq!(r.top_k.len(), 3);
+        // By abs_value descending: 8, 7, 5
+        assert!(approx_eq(r.top_k[0].abs_value, 8.0, 1e-10));
+        assert!(approx_eq(r.top_k[0].original_value, -8.0, 1e-10));
+        assert_eq!(r.top_k[0].flat_index, 3);
+        assert!(approx_eq(r.top_k[1].abs_value, 7.0, 1e-10));
+        assert!(approx_eq(r.top_k[2].abs_value, 5.0, 1e-10));
+    }
+
+    #[test]
+    fn top_k_with_k_larger_than_n() {
+        let values = vec![1.0, 2.0, 3.0];
+        let r = compute_pass2(&values, 1.0, 3.0, 100);
+        assert_eq!(r.top_k.len(), 3);
     }
 }
