@@ -1,75 +1,11 @@
-use std::io::{self, BufRead, Write};
-
-const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, thiserror::Error)]
-pub enum FramingError {
-    #[error("missing Content-Length header")]
-    MissingContentLength,
-    #[error("invalid Content-Length value")]
-    InvalidContentLength,
-    #[error("message too large ({0} bytes, max {MAX_MESSAGE_BYTES})")]
-    MessageTooLarge(usize),
-    #[error("{0}")]
-    Io(#[from] io::Error),
-}
-
-pub fn read_message(reader: &mut impl BufRead) -> Result<String, FramingError> {
-    let mut content_length: Option<usize> = None;
-
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Err(FramingError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "EOF",
-            )));
-        }
-
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-
-        if trimmed.is_empty() {
-            break;
-        }
-
-        if let Some((key, value)) = trimmed.split_once(':') {
-            if key.eq_ignore_ascii_case("content-length") {
-                content_length = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|_| FramingError::InvalidContentLength)?,
-                );
-            }
-        }
-    }
-
-    let content_length = content_length.ok_or(FramingError::MissingContentLength)?;
-
-    if content_length > MAX_MESSAGE_BYTES {
-        return Err(FramingError::MessageTooLarge(content_length));
-    }
-
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body)?;
-
-    String::from_utf8(body)
-        .map_err(|e| FramingError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
-}
-
-pub fn write_message(writer: &mut impl Write, body: &str) -> Result<(), FramingError> {
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes())?;
-    writer.write_all(body.as_bytes())?;
-    writer.flush()?;
-    Ok(())
-}
+pub use rocket_surgeon_transport::framing::{read_message, write_message};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    use rocket_surgeon_transport::framing::FramingError;
 
     fn frame(body: &str) -> Vec<u8> {
         format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
@@ -172,6 +108,7 @@ mod tests {
 
     #[test]
     fn message_too_large() {
+        use rocket_surgeon_transport::framing::MAX_MESSAGE_BYTES;
         let huge = MAX_MESSAGE_BYTES + 1;
         let header = format!("Content-Length: {huge}\r\n\r\n");
         let mut cursor = Cursor::new(header.into_bytes());
