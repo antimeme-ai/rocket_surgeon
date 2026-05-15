@@ -1,4 +1,5 @@
 pub mod framing;
+pub mod stdio;
 
 use rocket_surgeon_protocol::jsonrpc::{Request, Response};
 
