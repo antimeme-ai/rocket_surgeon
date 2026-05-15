@@ -43,7 +43,7 @@ crossterm = "0.29"
 pyo3 = { version = "0.24", features = ["extension-module"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Logging / tracing
 tracing = "0.1"
