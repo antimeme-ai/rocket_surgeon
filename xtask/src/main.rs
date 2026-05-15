@@ -86,7 +86,27 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
-    run("cargo", &["test", "--workspace", "--all-targets"]).context("cargo test failed")
+    // PyO3 feature unification: rocket-surgeon-python uses `extension-module`
+    // (suppresses libpython linking) while rocket-surgeon-worker uses
+    // `auto-initialize` (requires libpython linking). Cargo unifies these
+    // features when building the workspace, so the worker test binary fails
+    // to link. Fix: test them separately.
+    run(
+        "cargo",
+        &[
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--exclude",
+            "rocket-surgeon-worker",
+        ],
+    )
+    .context("cargo test (workspace) failed")?;
+    run_with_python_lib(
+        "cargo",
+        &["test", "-p", "rocket-surgeon-worker", "--all-targets"],
+    )
+    .context("cargo test (worker) failed")
 }
 
 fn ruff(fix: bool) -> Result<()> {
@@ -113,6 +133,41 @@ fn tck() -> Result<()> {
         &["-m", "pytest", "python/tests/tck", "-v", "--no-header"],
     )
     .context("tck tests failed")
+}
+
+fn python_libdir() -> Result<String> {
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))",
+        ])
+        .output()
+        .context("failed to query python3 LIBDIR")?;
+    if !output.status.success() {
+        bail!("python3 LIBDIR query failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Run a command with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH set to the Python
+/// shared library directory. Required for PyO3 `auto-initialize` binaries on
+/// macOS where SIP strips DYLD vars from child processes.
+fn run_with_python_lib(program: &str, args: &[&str]) -> Result<()> {
+    let libdir = python_libdir()?;
+    eprintln!(
+        "==> DYLD_LIBRARY_PATH={libdir} {program} {}",
+        args.join(" ")
+    );
+    let status = Command::new(program)
+        .args(args)
+        .env("DYLD_LIBRARY_PATH", &libdir)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .status()
+        .with_context(|| format!("failed to run {program}"))?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {

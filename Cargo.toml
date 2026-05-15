@@ -7,6 +7,7 @@ members = [
     "crates/rocket-surgeon-probes",
     "crates/rocket-surgeon-python",
     "crates/rocket-surgeon-transport",
+    "crates/rocket-surgeon-worker",
     "xtask",
 ]
 
