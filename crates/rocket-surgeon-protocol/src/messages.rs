@@ -33,6 +33,11 @@ pub mod event {
     pub const ERROR: &str = "error";
 }
 
+pub mod internal {
+    pub const HOST_ATTACH: &str = "_host/attach";
+    pub const HOST_DETACH: &str = "_host/detach";
+}
+
 // ---------------------------------------------------------------------------
 // initialize
 // ---------------------------------------------------------------------------
@@ -392,4 +397,107 @@ pub struct ErrorEvent {
     pub message: String,
     pub details: Option<serde_json::Value>,
     pub fatal: bool,
+}
+
+// ---------------------------------------------------------------------------
+// _host/attach (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAttachRequest {
+    pub model_source: String,
+    pub model_family: String,
+    #[serde(default = "default_device")]
+    pub device: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dtype: Option<DType>,
+    pub rank: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAttachResponse {
+    pub model_handle: u64,
+    pub num_layers: u32,
+    pub num_heads: u32,
+    pub hidden_dim: u32,
+    pub module_tree: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// _host/detach (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDetachRequest {
+    pub model_handle: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDetachResponse {
+    pub released: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_attach_request_round_trip() {
+        let req = HostAttachRequest {
+            model_source: "hf-internal-testing/tiny-random-LlamaForCausalLM".to_owned(),
+            model_family: "llama".to_owned(),
+            device: "cuda:0".to_owned(),
+            dtype: None,
+            rank: 0,
+            config: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostAttachRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_attach_response_round_trip() {
+        let resp = HostAttachResponse {
+            model_handle: 1,
+            num_layers: 32,
+            num_heads: 32,
+            hidden_dim: 4096,
+            module_tree: vec!["model.embed_tokens".to_owned(), "model.layers.0".to_owned()],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn host_detach_request_round_trip() {
+        let req = HostDetachRequest { model_handle: 42 };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostDetachRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_detach_response_round_trip() {
+        let resp = HostDetachResponse { released: true };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostDetachResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn host_attach_request_default_device() {
+        let json = r#"{"model_source":"test","model_family":"llama","rank":0}"#;
+        let req: HostAttachRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.device, "cuda:0");
+    }
+
+    #[test]
+    fn internal_method_constants() {
+        assert_eq!(internal::HOST_ATTACH, "_host/attach");
+        assert_eq!(internal::HOST_DETACH, "_host/detach");
+    }
 }
