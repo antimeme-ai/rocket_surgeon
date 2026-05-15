@@ -1,0 +1,25 @@
+[package]
+name = "rocket-surgeon-orchestrator"
+description = "Worker lifecycle orchestrator for rocket-surgeon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rs-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+rocket-surgeon-transport.workspace = true
+rocket-surgeon-protocol.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
