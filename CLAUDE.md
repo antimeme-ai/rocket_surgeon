@@ -1,3 +1,14 @@
+## Git identity
+
+This repo belongs to the antimeme-ai org. Commits must use the org identity:
+
+```
+git config user.name "antimemeai"
+git config user.email "hiya@antimeme.ai"
+```
+
+History rewritten and repo-local config set — all commits use the org identity.
+
 # Project: rocket_surgeon
 
 A proper debugger + in-situ surgery tool operating natively on multi-GPU forward passes. Step-through transformer internals (dense and MoE) one tick at a time, forward and backward, with full surgical intervention between steps.
