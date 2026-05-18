@@ -3,7 +3,10 @@ use rocket_surgeon_protocol::jsonrpc::{
 };
 use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
-use rocket_surgeon_protocol::messages::{HostDetachRequest, HostDetachResponse};
+use rocket_surgeon_protocol::messages::{
+    HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest, HostDetachResponse,
+    HostStepRequest, HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse,
+};
 use tracing::error;
 
 use crate::bridge;
@@ -12,6 +15,9 @@ pub fn dispatch(request: &Request) -> Response {
     match request.method.as_str() {
         internal::HOST_ATTACH => handle_host_attach(request),
         internal::HOST_DETACH => handle_host_detach(request),
+        internal::HOST_CONFIGURE_HOOKS => handle_host_configure_hooks(request),
+        internal::HOST_STEP => handle_host_step(request),
+        internal::HOST_UPDATE_PROBES => handle_host_update_probes(request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -86,14 +92,38 @@ fn handle_host_attach(request: &Request) -> Response {
         }
     };
 
+    let config = match bridge::get_model_config(handle) {
+        Ok(c) => c,
+        Err(e) => {
+            return internal_error(request.id.clone(), format!("model_config failed: {e}"));
+        }
+    };
+
+    let modules = match bridge::discover_modules(handle) {
+        Ok(m) => m,
+        Err(e) => {
+            return internal_error(request.id.clone(), format!("discover_modules failed: {e}"));
+        }
+    };
+
+    let component_map = match crate::adapter::resolve(&modules, &config) {
+        Ok(m) => m,
+        Err(e) => {
+            return internal_error(
+                request.id.clone(),
+                format!("adapter resolution failed: {e}"),
+            );
+        }
+    };
+
     let resp = HostAttachResponse {
         model_handle: info.handle,
         num_layers: info.num_layers,
         num_heads: info.num_heads,
         hidden_dim: info.hidden_dim,
         module_tree: info.module_tree,
-        model_type: String::new(),
-        component_vocabulary: Vec::new(),
+        model_type: config.model_type,
+        component_vocabulary: component_map.vocabulary,
     };
 
     match serde_json::to_value(resp) {
@@ -116,6 +146,65 @@ fn handle_host_detach(request: &Request) -> Response {
     }
 
     let resp = HostDetachResponse { released: true };
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+fn handle_host_configure_hooks(request: &Request) -> Response {
+    let _req: HostConfigureHooksRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let resp = HostConfigureHooksResponse {
+        sentinel_count: 0,
+        capture_count: 0,
+    };
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+fn handle_host_step(request: &Request) -> Response {
+    let _req: HostStepRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let resp = HostStepResponse {
+        position: rocket_surgeon_protocol::types::TickPosition {
+            tick_id: 0,
+            direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: String::new(),
+            event: rocket_surgeon_protocol::types::TickEvent::Output,
+            replay_of: None,
+        },
+        capture: None,
+        forward_complete: false,
+    };
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+fn handle_host_update_probes(request: &Request) -> Response {
+    let req: HostUpdateProbesRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let resp = HostUpdateProbesResponse {
+        probes_active: req.active_probes.len() as u32,
+    };
 
     match serde_json::to_value(resp) {
         Ok(value) => Response::success(request.id.clone(), value),
@@ -204,5 +293,35 @@ mod tests {
         let req = make_request("nonexistent", serde_json::Value::Null);
         let resp = dispatch(&req);
         assert_eq!(resp.jsonrpc, JSONRPC_VERSION);
+    }
+
+    #[test]
+    fn dispatch_configure_hooks_invalid_params() {
+        let req = make_request(
+            internal::HOST_CONFIGURE_HOOKS,
+            serde_json::json!({"wrong_field": 42}),
+        );
+        let resp = dispatch(&req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_step_invalid_params() {
+        let req = make_request(internal::HOST_STEP, serde_json::json!({"wrong_field": 42}));
+        let resp = dispatch(&req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_update_probes_invalid_params() {
+        let req = make_request(
+            internal::HOST_UPDATE_PROBES,
+            serde_json::json!({"wrong_field": 42}),
+        );
+        let resp = dispatch(&req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
 }
