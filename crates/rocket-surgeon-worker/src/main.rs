@@ -2,6 +2,7 @@ mod adapter;
 mod bridge;
 mod capture;
 mod dispatch;
+mod step_driver;
 mod tick;
 
 use std::io::{self, BufReader};
@@ -10,7 +11,7 @@ use clap::Parser;
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{error, info};
 
-use crate::dispatch::dispatch;
+use crate::dispatch::{WorkerState, dispatch};
 
 #[derive(Parser)]
 #[command(name = "rs-worker", about = "Per-rank model worker for rocket-surgeon")]
@@ -35,6 +36,7 @@ fn main() {
 
     info!("rs-worker starting");
 
+    let mut state = WorkerState::new();
     let mut reader = BufReader::new(io::stdin().lock());
     let mut writer = io::stdout().lock();
 
@@ -67,7 +69,7 @@ fn main() {
             }
         };
 
-        let response = dispatch(&request);
+        let response = dispatch(&mut state, &request);
         let resp_json = serde_json::to_string(&response).expect("serialize response");
 
         if let Err(e) = write_message(&mut writer, &resp_json) {

@@ -1,3 +1,6 @@
+use pyo3::IntoPyObjectExt;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 use rocket_surgeon_protocol::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RequestId, Response, RpcError,
 };
@@ -9,14 +12,45 @@ use rocket_surgeon_protocol::messages::{
 };
 use tracing::error;
 
+use crate::adapter::ComponentMap;
 use crate::bridge;
+use crate::tick::TickState;
 
-pub fn dispatch(request: &Request) -> Response {
+pub struct ForwardPassState {
+    pub result_mailbox: pyo3::PyObject,
+    pub resume_mailbox: pyo3::PyObject,
+    pub sentinel_handles: Vec<pyo3::PyObject>,
+    pub capture_handles: Vec<pyo3::PyObject>,
+    #[allow(dead_code)]
+    pub call_counts: pyo3::PyObject,
+}
+
+pub struct WorkerState {
+    pub component_map: Option<ComponentMap>,
+    pub model_handle: Option<u64>,
+    pub rank: u32,
+    pub tick_state: TickState,
+    pub forward_pass: Option<ForwardPassState>,
+}
+
+impl WorkerState {
+    pub fn new() -> Self {
+        Self {
+            component_map: None,
+            model_handle: None,
+            rank: 0,
+            tick_state: TickState::new(0),
+            forward_pass: None,
+        }
+    }
+}
+
+pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
     match request.method.as_str() {
-        internal::HOST_ATTACH => handle_host_attach(request),
-        internal::HOST_DETACH => handle_host_detach(request),
+        internal::HOST_ATTACH => handle_host_attach(state, request),
+        internal::HOST_DETACH => handle_host_detach(state, request),
         internal::HOST_CONFIGURE_HOOKS => handle_host_configure_hooks(request),
-        internal::HOST_STEP => handle_host_step(request),
+        internal::HOST_STEP => handle_host_step(state, request),
         internal::HOST_UPDATE_PROBES => handle_host_update_probes(request),
         _ => Response::error(
             request.id.clone(),
@@ -58,7 +92,7 @@ fn internal_error(id: RequestId, message: String) -> Response {
     )
 }
 
-fn handle_host_attach(request: &Request) -> Response {
+fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     let req: HostAttachRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
@@ -127,6 +161,12 @@ fn handle_host_attach(request: &Request) -> Response {
     };
     crate::adapter::apply_execution_order(&mut component_map, &execution_order);
 
+    state.model_handle = Some(info.handle);
+    state.component_map = Some(component_map.clone());
+    state.rank = req.rank;
+    state.tick_state = TickState::new(req.rank);
+    state.forward_pass = None;
+
     let resp = HostAttachResponse {
         model_handle: info.handle,
         num_layers: info.num_layers,
@@ -143,11 +183,25 @@ fn handle_host_attach(request: &Request) -> Response {
     }
 }
 
-fn handle_host_detach(request: &Request) -> Response {
+fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     let req: HostDetachRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
+
+    if let Some(fwd) = state.forward_pass.take() {
+        Python::with_gil(|py| {
+            let _ = fwd
+                .resume_mailbox
+                .bind(py)
+                .call_method1("put", (py.None(),));
+            let _ = bridge::remove_hooks(py, &fwd.sentinel_handles);
+            let _ = bridge::remove_hooks(py, &fwd.capture_handles);
+        });
+    }
+
+    state.model_handle = None;
+    state.component_map = None;
 
     match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
@@ -181,29 +235,147 @@ fn handle_host_configure_hooks(request: &Request) -> Response {
     }
 }
 
-fn handle_host_step(request: &Request) -> Response {
-    let _req: HostStepRequest = match parse_params(request) {
+fn ensure_forward_pass(
+    py: Python<'_>,
+    state: &mut WorkerState,
+    handle: u64,
+    component_map: &ComponentMap,
+) -> anyhow::Result<()> {
+    if state.forward_pass.is_some() {
+        return Ok(());
+    }
+
+    let module_paths: Vec<String> = component_map
+        .components
+        .iter()
+        .map(|c| c.module_path.clone())
+        .collect();
+
+    let result_mb = bridge::create_mailbox(py)?;
+    let resume_mb = bridge::create_mailbox(py)?;
+
+    let sentinel_handles = bridge::install_sentinel_hooks(handle, &module_paths)?;
+
+    let active_probe_paths: Vec<String> = module_paths.clone();
+    let (capture_handles, call_counts) = bridge::install_capture_hooks(
+        py,
+        handle,
+        &module_paths,
+        result_mb.bind(py),
+        resume_mb.bind(py),
+        &active_probe_paths,
+    )?;
+
+    let done_callback = pyo3::types::PyCFunction::new_closure(
+        py,
+        None,
+        None,
+        move |_args: &pyo3::Bound<'_, PyTuple>,
+              _kwargs: Option<&pyo3::Bound<'_, PyDict>>|
+              -> pyo3::PyResult<()> { Ok(()) },
+    )?;
+
+    bridge::run_forward(py, handle, done_callback.as_any())?;
+
+    state.forward_pass = Some(ForwardPassState {
+        result_mailbox: result_mb,
+        resume_mailbox: resume_mb,
+        sentinel_handles,
+        capture_handles,
+        call_counts: call_counts.into_py_any(py)?,
+    });
+    Ok(())
+}
+
+fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
+    let req: HostStepRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
 
-    let resp = HostStepResponse {
-        position: rocket_surgeon_protocol::types::TickPosition {
-            tick_id: 0,
-            direction: rocket_surgeon_protocol::types::StepDirection::Forward,
-            rank: Some(0),
-            layer: 0,
-            component: String::new(),
-            event: rocket_surgeon_protocol::types::TickEvent::Output,
-            replay_of: None,
-        },
-        capture: None,
-        forward_complete: false,
+    let Some(handle) = state.model_handle else {
+        return internal_error(request.id.clone(), "No model loaded".to_owned());
     };
 
-    match serde_json::to_value(resp) {
-        Ok(value) => Response::success(request.id.clone(), value),
-        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    let Some(ref component_map) = state.component_map else {
+        return internal_error(request.id.clone(), "No component map available".to_owned());
+    };
+
+    let granularity = req
+        .granularity
+        .unwrap_or(rocket_surgeon_protocol::types::TickGranularity::Component);
+
+    let component_map_clone = component_map.clone();
+
+    match Python::with_gil(|py| -> anyhow::Result<HostStepResponse> {
+        ensure_forward_pass(py, state, handle, &component_map_clone)?;
+
+        let fwd = state.forward_pass.as_ref().unwrap();
+        let result_mb = fwd.result_mailbox.bind(py);
+        let resume_mb = fwd.resume_mailbox.bind(py);
+
+        let mut ticks_consumed = 0u32;
+        let current_layer = state.tick_state.to_tick_position().layer;
+        let mut tracking_layer = if state.tick_state.tick_id() > 0 {
+            Some(current_layer)
+        } else {
+            None
+        };
+
+        if state.tick_state.tick_id() > 0 {
+            resume_mb.call_method1("put", (py.None(),))?;
+        }
+
+        loop {
+            let value = result_mb.call_method1("wait", (30.0,))?;
+
+            let tuple = value
+                .downcast::<PyTuple>()
+                .map_err(|e| anyhow::anyhow!("expected tuple from mailbox, got: {e}"))?;
+            let path: String = tuple.get_item(0)?.extract()?;
+            let call_index: u32 = tuple.get_item(1)?.extract()?;
+
+            result_mb.call_method0("restore")?;
+
+            let component =
+                crate::step_driver::lookup_component(&component_map_clone, &path, call_index);
+
+            let (canonical, layer) = match component {
+                Some(c) => (c.canonical.clone(), c.layer_index.unwrap_or(0)),
+                None => (format!("_raw.{path}"), 0),
+            };
+
+            state.tick_state.advance(&canonical, layer, call_index);
+
+            if granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
+                if crate::step_driver::is_layer_boundary(tracking_layer, layer) {
+                    ticks_consumed += 1;
+                }
+                tracking_layer = Some(layer);
+            } else {
+                ticks_consumed += 1;
+            }
+
+            if ticks_consumed >= req.count {
+                break;
+            }
+
+            resume_mb.call_method1("put", (py.None(),))?;
+        }
+
+        let position = state.tick_state.to_tick_position();
+
+        Ok(HostStepResponse {
+            position,
+            capture: None,
+            forward_complete: false,
+        })
+    }) {
+        Ok(resp) => match serde_json::to_value(resp) {
+            Ok(value) => Response::success(request.id.clone(), value),
+            Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+        },
+        Err(e) => internal_error(request.id.clone(), format!("step failed: {e}")),
     }
 }
 
@@ -237,38 +409,46 @@ mod tests {
         }
     }
 
+    fn make_state() -> WorkerState {
+        WorkerState::new()
+    }
+
     #[test]
     fn unknown_method_returns_method_not_found() {
+        let mut state = make_state();
         let req = make_request("nonexistent/method", serde_json::Value::Null);
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, METHOD_NOT_FOUND);
     }
 
     #[test]
     fn host_attach_invalid_params_returns_error() {
+        let mut state = make_state();
         let req = make_request(
             internal::HOST_ATTACH,
             serde_json::json!({"wrong_field": 42}),
         );
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
 
     #[test]
     fn host_detach_invalid_params_returns_error() {
+        let mut state = make_state();
         let req = make_request(
             internal::HOST_DETACH,
             serde_json::json!({"wrong_field": 42}),
         );
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
 
     #[test]
     fn host_attach_unsupported_dtype_returns_error() {
+        let mut state = make_state();
         let req = make_request(
             internal::HOST_ATTACH,
             serde_json::json!({
@@ -279,7 +459,7 @@ mod tests {
                 "rank": 0
             }),
         );
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
         assert!(
@@ -293,45 +473,50 @@ mod tests {
 
     #[test]
     fn dispatch_preserves_request_id() {
+        let mut state = make_state();
         let mut req = make_request("nonexistent", serde_json::Value::Null);
         req.id = RequestId::String("test-id-42".to_owned());
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert_eq!(resp.id, RequestId::String("test-id-42".to_owned()));
     }
 
     #[test]
     fn dispatch_jsonrpc_version() {
+        let mut state = make_state();
         let req = make_request("nonexistent", serde_json::Value::Null);
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert_eq!(resp.jsonrpc, JSONRPC_VERSION);
     }
 
     #[test]
     fn dispatch_configure_hooks_invalid_params() {
+        let mut state = make_state();
         let req = make_request(
             internal::HOST_CONFIGURE_HOOKS,
             serde_json::json!({"wrong_field": 42}),
         );
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
 
     #[test]
     fn dispatch_step_invalid_params() {
+        let mut state = make_state();
         let req = make_request(internal::HOST_STEP, serde_json::json!({"wrong_field": 42}));
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
 
     #[test]
     fn dispatch_update_probes_invalid_params() {
+        let mut state = make_state();
         let req = make_request(
             internal::HOST_UPDATE_PROBES,
             serde_json::json!({"wrong_field": 42}),
         );
-        let resp = dispatch(&req);
+        let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
     }
