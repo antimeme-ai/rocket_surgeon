@@ -12,7 +12,7 @@ pub struct ModelInfo {
 
 pub fn load_model(source: &str, device: &str, dtype: &str) -> anyhow::Result<u64> {
     Python::with_gil(|py| {
-        let skin = py.import("rocket_surgeon.skin")?;
+        let skin = py.import("rocket_surgeon.bridge")?;
         let handle = skin
             .getattr("load_model")?
             .call1((source, device, dtype))?
@@ -23,7 +23,7 @@ pub fn load_model(source: &str, device: &str, dtype: &str) -> anyhow::Result<u64
 
 pub fn unload_model(handle: u64) -> anyhow::Result<()> {
     Python::with_gil(|py| {
-        let skin = py.import("rocket_surgeon.skin")?;
+        let skin = py.import("rocket_surgeon.bridge")?;
         skin.getattr("unload_model")?.call1((handle,))?;
         Ok(())
     })
@@ -31,7 +31,7 @@ pub fn unload_model(handle: u64) -> anyhow::Result<()> {
 
 pub fn model_metadata(handle: u64) -> anyhow::Result<ModelInfo> {
     Python::with_gil(|py| {
-        let skin = py.import("rocket_surgeon.skin")?;
+        let skin = py.import("rocket_surgeon.bridge")?;
         let result = skin.getattr("model_metadata")?.call1((handle,))?;
         let dict = result
             .downcast::<PyDict>()

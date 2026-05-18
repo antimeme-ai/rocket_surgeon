@@ -1,4 +1,4 @@
-"""Minimal Python skin for PyTorch model operations.
+"""Minimal Python bridge for PyTorch model operations.
 
 Called from Rust worker via PyO3. No logic, no state management,
 no IPC — just the thinnest possible bridge to PyTorch.

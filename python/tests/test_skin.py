@@ -1,10 +1,10 @@
-"""Tests for the minimal Python skin: load_model, unload_model, model_metadata."""
+"""Tests for the Python bridge: load_model, unload_model, model_metadata."""
 
 from __future__ import annotations
 
 import pytest
 
-from rocket_surgeon.skin import load_model, model_metadata, unload_model
+from rocket_surgeon.bridge import load_model, model_metadata, unload_model
 
 TINY_MODEL = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 

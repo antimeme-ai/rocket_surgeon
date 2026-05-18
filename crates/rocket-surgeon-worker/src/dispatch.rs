@@ -6,7 +6,7 @@ use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use rocket_surgeon_protocol::messages::{HostDetachRequest, HostDetachResponse};
 use tracing::error;
 
-use crate::skin;
+use crate::bridge;
 
 pub fn dispatch(request: &Request) -> Response {
     match request.method.as_str() {
@@ -74,12 +74,12 @@ fn handle_host_attach(request: &Request) -> Response {
         }
     };
 
-    let handle = match skin::load_model(&req.model_source, &req.device, dtype_str) {
+    let handle = match bridge::load_model(&req.model_source, &req.device, dtype_str) {
         Ok(h) => h,
         Err(e) => return internal_error(request.id.clone(), format!("load_model failed: {e}")),
     };
 
-    let info = match skin::model_metadata(handle) {
+    let info = match bridge::model_metadata(handle) {
         Ok(i) => i,
         Err(e) => {
             return internal_error(request.id.clone(), format!("model_metadata failed: {e}"));
@@ -106,7 +106,7 @@ fn handle_host_detach(request: &Request) -> Response {
         Err(resp) => return *resp,
     };
 
-    match skin::unload_model(req.model_handle) {
+    match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
         Err(e) => {
             return internal_error(request.id.clone(), format!("unload_model failed: {e}"));
