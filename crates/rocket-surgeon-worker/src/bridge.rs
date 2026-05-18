@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -206,6 +207,90 @@ pub fn tensor_to_bytes(py: Python<'_>, tensor: &Bound<'_, pyo3::PyAny>) -> anyho
     let result = bridge.getattr("tensor_to_bytes")?.call1((tensor,))?;
     let bytes: Vec<u8> = result.extract()?;
     Ok(bytes)
+}
+
+pub fn install_sentinel_hooks(
+    handle: u64,
+    module_paths: &[String],
+) -> anyhow::Result<Vec<pyo3::PyObject>> {
+    Python::with_gil(|py| {
+        let bridge = py.import("rocket_surgeon.bridge")?;
+        let py_paths = PyList::new(py, module_paths)?;
+        let result = bridge
+            .getattr("install_sentinel_hooks")?
+            .call1((handle, py_paths))?;
+        let list = result
+            .downcast::<PyList>()
+            .map_err(|e| anyhow::anyhow!("expected list, got: {e}"))?;
+        let handles: Vec<pyo3::PyObject> =
+            list.iter().map(|h| h.into_py_any(py).unwrap()).collect();
+        Ok(handles)
+    })
+}
+
+pub fn install_capture_hooks<'py>(
+    py: Python<'py>,
+    handle: u64,
+    module_paths: &[String],
+    result_mailbox: &Bound<'py, pyo3::PyAny>,
+    resume_mailbox: &Bound<'py, pyo3::PyAny>,
+    active_probes: &[String],
+) -> anyhow::Result<(Vec<pyo3::PyObject>, Bound<'py, PyDict>)> {
+    let bridge = py.import("rocket_surgeon.bridge")?;
+    let py_paths = PyList::new(py, module_paths)?;
+    let py_probes: pyo3::Bound<'_, pyo3::types::PySet> =
+        pyo3::types::PySet::new(py, active_probes)?;
+    let result = bridge.getattr("install_capture_hooks")?.call1((
+        handle,
+        py_paths,
+        result_mailbox,
+        resume_mailbox,
+        py_probes,
+    ))?;
+    let tuple = result
+        .downcast::<PyTuple>()
+        .map_err(|e| anyhow::anyhow!("expected tuple, got: {e}"))?;
+    let item0 = tuple.get_item(0)?;
+    let hook_list = item0
+        .downcast::<PyList>()
+        .map_err(|e| anyhow::anyhow!("expected list for handles, got: {e}"))?;
+    let item1 = tuple.get_item(1)?;
+    let call_counts = item1
+        .downcast::<PyDict>()
+        .map_err(|e| anyhow::anyhow!("expected dict for call_counts, got: {e}"))?;
+    let handles: Vec<pyo3::PyObject> = hook_list
+        .iter()
+        .map(|h| h.into_py_any(py).unwrap())
+        .collect();
+    Ok((handles, call_counts.clone()))
+}
+
+pub fn run_forward(
+    py: Python<'_>,
+    handle: u64,
+    done_callback: &Bound<'_, pyo3::PyAny>,
+) -> anyhow::Result<()> {
+    let bridge = py.import("rocket_surgeon.bridge")?;
+    let torch = py.import("torch")?;
+    let zeros = torch.getattr("zeros")?.call1(((1, 2),))?;
+    let input_ids = zeros.call_method1("to", (torch.getattr("long")?,))?;
+    bridge
+        .getattr("run_forward")?
+        .call1((handle, input_ids, done_callback))?;
+    Ok(())
+}
+
+pub fn remove_hooks(py: Python<'_>, handles: &[pyo3::PyObject]) -> anyhow::Result<()> {
+    let bridge = py.import("rocket_surgeon.bridge")?;
+    let py_handles = PyList::new(py, handles.iter().map(|h| h.bind(py)))?;
+    bridge.getattr("remove_hooks")?.call1((py_handles,))?;
+    Ok(())
+}
+
+pub fn create_mailbox(py: Python<'_>) -> anyhow::Result<pyo3::PyObject> {
+    let mailbox_mod = py.import("rocket_surgeon.hooks.mailbox")?;
+    let mb = mailbox_mod.getattr("Mailbox")?.call0()?;
+    Ok(mb.into_py_any(py)?)
 }
 
 pub fn split_fused_output<'py>(
