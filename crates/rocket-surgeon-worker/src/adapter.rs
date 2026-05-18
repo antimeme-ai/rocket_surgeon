@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,6 +412,22 @@ fn gpt2_declaration() -> FamilyDeclaration {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawModule {
+    pub path: String,
+    pub type_name: String,
+    pub attr_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelConfig {
+    pub model_type: String,
+    pub num_layers: u32,
+    pub num_heads: u32,
+    pub hidden_size: u32,
+    pub num_kv_heads: Option<u32>,
+}
+
 static FAMILIES: &[fn() -> FamilyDeclaration] = &[llama_declaration, gpt2_declaration];
 
 pub fn family_declaration(model_type: &str) -> Option<FamilyDeclaration> {
@@ -420,6 +438,122 @@ pub fn family_declaration(model_type: &str) -> Option<FamilyDeclaration> {
         }
     }
     None
+}
+
+fn extract_layer_index(path: &str) -> Option<u32> {
+    for segment in path.split('.') {
+        if let Ok(idx) = segment.parse::<u32>() {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn matches_module(matcher: &ModuleMatcher, module: &RawModule) -> bool {
+    match matcher {
+        ModuleMatcher::TypeOnly { type_name } => module.type_name == *type_name,
+        ModuleMatcher::TypeAndName {
+            type_name,
+            attr_name,
+        } => module.type_name == *type_name && module.attr_name == *attr_name,
+    }
+}
+
+pub fn resolve(modules: &[RawModule], config: &ModelConfig) -> Result<ComponentMap, String> {
+    let decl = family_declaration(&config.model_type)
+        .ok_or_else(|| format!("unsupported model family: {}", config.model_type))?;
+
+    let family_name = config.model_type.clone();
+    let mut components = Vec::new();
+    let mut vocabulary = HashSet::new();
+
+    for module in modules {
+        let mut matched = false;
+
+        for (matcher, mapping) in &decl.mappings {
+            if matches_module(matcher, module) {
+                matched = true;
+                match mapping {
+                    ModuleMapping::Skip | ModuleMapping::Container => break,
+                    ModuleMapping::Direct { canonical } => {
+                        let layer_index = extract_layer_index(&module.path);
+                        vocabulary.insert(canonical.clone());
+                        components.push(MappedComponent {
+                            module_path: module.path.clone(),
+                            canonical: canonical.clone(),
+                            layer_index,
+                            call_index: 0,
+                            mapping: mapping.clone(),
+                            probe_point: String::new(),
+                        });
+                        break;
+                    }
+                    ModuleMapping::Fused {
+                        components: fused_comps,
+                    } => {
+                        let layer_index = extract_layer_index(&module.path);
+                        let mut resolved_fused = fused_comps.clone();
+                        for fc in &mut resolved_fused {
+                            if fc.split_size == 0 {
+                                fc.split_size = config.hidden_size as usize;
+                            }
+                            vocabulary.insert(fc.canonical.clone());
+                        }
+                        components.push(MappedComponent {
+                            module_path: module.path.clone(),
+                            canonical: format!("_fused.{}", module.attr_name),
+                            layer_index,
+                            call_index: 0,
+                            mapping: ModuleMapping::Fused {
+                                components: resolved_fused,
+                            },
+                            probe_point: String::new(),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !matched {
+            let canonical = format!("_raw.{}", module.path);
+            vocabulary.insert(canonical.clone());
+            components.push(MappedComponent {
+                module_path: module.path.clone(),
+                canonical,
+                layer_index: extract_layer_index(&module.path),
+                call_index: 0,
+                mapping: ModuleMapping::Direct {
+                    canonical: format!("_raw.{}", module.path),
+                },
+                probe_point: String::new(),
+            });
+        }
+    }
+
+    let mut vocab_sorted: Vec<String> = vocabulary.into_iter().collect();
+    vocab_sorted.sort();
+
+    Ok(ComponentMap {
+        components,
+        model_family: family_name,
+        vocabulary: vocab_sorted,
+    })
+}
+
+pub fn apply_execution_order(map: &mut ComponentMap, execution_order: &[(String, u32)]) {
+    let order_map: HashMap<(&str, u32), usize> = execution_order
+        .iter()
+        .enumerate()
+        .map(|(i, (path, ci))| ((path.as_str(), *ci), i))
+        .collect();
+
+    map.components.sort_by_key(|c| {
+        order_map
+            .get(&(c.module_path.as_str(), c.call_index))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 }
 
 #[cfg(test)]
@@ -528,5 +662,227 @@ mod tests {
             matches!(matcher, ModuleMatcher::TypeOnly { type_name } if *type_name == "LlamaRotaryEmbedding")
         });
         assert!(found, "llama should have a Skip for LlamaRotaryEmbedding");
+    }
+
+    #[test]
+    fn resolve_llama_modules() {
+        let modules = vec![
+            RawModule {
+                path: "model".into(),
+                type_name: "LlamaModel".into(),
+                attr_name: "model".into(),
+            },
+            RawModule {
+                path: "model.embed_tokens".into(),
+                type_name: "Embedding".into(),
+                attr_name: "embed_tokens".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn".into(),
+                type_name: "LlamaSdpaAttention".into(),
+                attr_name: "self_attn".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.q_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "q_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.k_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "k_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.v_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "v_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.o_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "o_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.input_layernorm".into(),
+                type_name: "LlamaRMSNorm".into(),
+                attr_name: "input_layernorm".into(),
+            },
+            RawModule {
+                path: "model.layers.0.mlp".into(),
+                type_name: "LlamaMLP".into(),
+                attr_name: "mlp".into(),
+            },
+            RawModule {
+                path: "model.layers.0.mlp.gate_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "gate_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.mlp.up_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "up_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.mlp.down_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "down_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.post_attention_layernorm".into(),
+                type_name: "LlamaRMSNorm".into(),
+                attr_name: "post_attention_layernorm".into(),
+            },
+            RawModule {
+                path: "lm_head".into(),
+                type_name: "Linear".into(),
+                attr_name: "lm_head".into(),
+            },
+        ];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: Some(4),
+        };
+        let map = resolve(&modules, &config).unwrap();
+        assert_eq!(map.model_family, "llama");
+
+        let canonicals: Vec<&str> = map
+            .components
+            .iter()
+            .map(|c| c.canonical.as_str())
+            .collect();
+        assert!(canonicals.contains(&"q_proj"));
+        assert!(canonicals.contains(&"k_proj"));
+        assert!(canonicals.contains(&"v_proj"));
+        assert!(canonicals.contains(&"o_proj"));
+        assert!(canonicals.contains(&"gate_proj"));
+        assert!(canonicals.contains(&"up_proj"));
+        assert!(canonicals.contains(&"down_proj"));
+        assert!(canonicals.contains(&"ln1"));
+        assert!(canonicals.contains(&"ln2"));
+        assert!(canonicals.contains(&"embed"));
+        assert!(canonicals.contains(&"lm_head"));
+    }
+
+    #[test]
+    fn resolve_detects_layer_index() {
+        let modules = vec![RawModule {
+            path: "model.layers.3.self_attn.q_proj".into(),
+            type_name: "Linear".into(),
+            attr_name: "q_proj".into(),
+        }];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 4,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: Some(4),
+        };
+        let map = resolve(&modules, &config).unwrap();
+        let q = map
+            .components
+            .iter()
+            .find(|c| c.canonical == "q_proj")
+            .unwrap();
+        assert_eq!(q.layer_index, Some(3));
+    }
+
+    #[test]
+    fn resolve_unknown_module_gets_raw_fallback() {
+        let modules = vec![RawModule {
+            path: "model.weird_thing".into(),
+            type_name: "UnknownModule".into(),
+            attr_name: "weird_thing".into(),
+        }];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: Some(4),
+        };
+        let map = resolve(&modules, &config).unwrap();
+        let raw = map
+            .components
+            .iter()
+            .find(|c| c.canonical.starts_with("_raw."))
+            .unwrap();
+        assert_eq!(raw.canonical, "_raw.model.weird_thing");
+    }
+
+    #[test]
+    fn resolve_unsupported_family_returns_error() {
+        let modules = vec![];
+        let config = ModelConfig {
+            model_type: "unknown_arch".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: None,
+        };
+        let result = resolve(&modules, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_builds_vocabulary() {
+        let modules = vec![
+            RawModule {
+                path: "model.layers.0.self_attn.q_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "q_proj".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.k_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "k_proj".into(),
+            },
+        ];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: Some(4),
+        };
+        let map = resolve(&modules, &config).unwrap();
+        assert!(map.vocabulary.contains(&"q_proj".to_owned()));
+        assert!(map.vocabulary.contains(&"k_proj".to_owned()));
+    }
+
+    #[test]
+    fn apply_execution_order_reorders_components() {
+        let mut map = ComponentMap {
+            components: vec![
+                MappedComponent {
+                    module_path: "a".into(),
+                    canonical: "first".into(),
+                    layer_index: Some(0),
+                    call_index: 0,
+                    mapping: ModuleMapping::Direct {
+                        canonical: "first".into(),
+                    },
+                    probe_point: String::new(),
+                },
+                MappedComponent {
+                    module_path: "b".into(),
+                    canonical: "second".into(),
+                    layer_index: Some(0),
+                    call_index: 0,
+                    mapping: ModuleMapping::Direct {
+                        canonical: "second".into(),
+                    },
+                    probe_point: String::new(),
+                },
+            ],
+            model_family: "test".into(),
+            vocabulary: vec![],
+        };
+        let execution_order = vec![("b".to_owned(), 0u32), ("a".to_owned(), 0u32)];
+        apply_execution_order(&mut map, &execution_order);
+        assert_eq!(map.components[0].module_path, "b");
+        assert_eq!(map.components[1].module_path, "a");
     }
 }
