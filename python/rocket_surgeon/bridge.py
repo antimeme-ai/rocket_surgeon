@@ -138,3 +138,45 @@ def discover_execution_order(handle: int) -> list[tuple[str, int]]:
         h.remove()
 
     return order
+
+
+_DTYPE_NAME_MAP: dict[torch.dtype, str] = {
+    torch.float16: "float16",
+    torch.float32: "float32",
+    torch.float64: "float64",
+    torch.bfloat16: "bfloat16",
+    torch.int8: "int8",
+    torch.int16: "int16",
+    torch.int32: "int32",
+    torch.int64: "int64",
+    torch.uint8: "uint8",
+    torch.bool: "bool",
+}
+
+
+def compute_tensor_stats(tensor: torch.Tensor) -> dict[str, Any]:
+    """Compute summary stats on a tensor, casting to fp32 for reduction accuracy."""
+    original_dtype = tensor.dtype
+    t = tensor.detach().float()
+    numel = t.numel()
+    return {
+        "mean": t.mean().item(),
+        "std": t.std(correction=0).item(),
+        "min": t.min().item(),
+        "max": t.max().item(),
+        "abs_max": t.abs().max().item(),
+        "l2_norm": t.norm(2).item(),
+        "sparsity": (t == 0).sum().item() / numel if numel > 0 else 0.0,
+        "shape": list(tensor.shape),
+        "dtype": _DTYPE_NAME_MAP.get(original_dtype, str(original_dtype)),
+    }
+
+
+def split_fused_output(tensor: torch.Tensor, dim: int, sizes: list[int]) -> list[torch.Tensor]:
+    """Split a fused module output tensor along the given dimension."""
+    return list(tensor.split(sizes, dim=dim))  # type: ignore[no-untyped-call]
+
+
+def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    """Serialize tensor to raw bytes. Dtype-preserving."""
+    return tensor.detach().contiguous().cpu().numpy().tobytes()
