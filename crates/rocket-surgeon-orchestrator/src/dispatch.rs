@@ -22,6 +22,9 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
     match request.method.as_str() {
         internal::HOST_ATTACH => handle_host_attach(state, request),
         internal::HOST_DETACH => handle_host_detach(state, request),
+        internal::HOST_STEP | internal::HOST_CONFIGURE_HOOKS | internal::HOST_UPDATE_PROBES => {
+            forward_to_worker(state, request)
+        }
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -155,6 +158,59 @@ fn handle_host_detach(state: &mut OrchestratorState, request: &Request) -> Respo
     }
 }
 
+fn forward_to_worker(state: &mut OrchestratorState, request: &Request) -> Response {
+    let Some(worker) = state.worker.as_mut() else {
+        return Response::error(
+            request.id.clone(),
+            RpcError {
+                code: INTERNAL_ERROR,
+                message: "No worker running".to_owned(),
+                data: None,
+            },
+        );
+    };
+
+    if !worker.is_alive() {
+        error!("worker process died before request could be sent");
+        state.worker = None;
+        return Response::error(
+            request.id.clone(),
+            RpcError {
+                code: INTERNAL_ERROR,
+                message: "Worker process is no longer running".to_owned(),
+                data: None,
+            },
+        );
+    }
+
+    if let Err(e) = worker.send_request(request) {
+        error!("failed to send request to worker: {e}");
+        return Response::error(
+            request.id.clone(),
+            RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("Failed to send request to worker: {e}"),
+                data: None,
+            },
+        );
+    }
+
+    match worker.recv_response() {
+        Ok(r) => r,
+        Err(e) => {
+            error!("failed to receive response from worker: {e}");
+            Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: INTERNAL_ERROR,
+                    message: format!("Worker failed: {e}"),
+                    data: None,
+                },
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +299,56 @@ mod tests {
         let req = make_request("nonexistent", serde_json::Value::Null);
         let resp = dispatch(&mut state, &req);
         assert_eq!(resp.jsonrpc, JSONRPC_VERSION);
+    }
+
+    #[test]
+    fn host_step_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_STEP,
+            serde_json::json!({
+                "model_handle": 1,
+                "count": 1,
+                "direction": "forward"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No worker running")
+        );
+    }
+
+    #[test]
+    fn host_configure_hooks_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_CONFIGURE_HOOKS,
+            serde_json::json!({
+                "model_handle": 1,
+                "active_probes": []
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn host_update_probes_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_UPDATE_PROBES,
+            serde_json::json!({
+                "model_handle": 1,
+                "active_probes": []
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
     }
 
     #[test]
