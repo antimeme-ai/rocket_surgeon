@@ -92,6 +92,8 @@ fn handle_host_attach(request: &Request) -> Response {
         num_heads: info.num_heads,
         hidden_dim: info.hidden_dim,
         module_tree: info.module_tree,
+        model_type: String::new(),
+        component_vocabulary: Vec::new(),
     };
 
     match serde_json::to_value(resp) {

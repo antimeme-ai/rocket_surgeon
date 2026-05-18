@@ -36,6 +36,9 @@ pub mod event {
 pub mod internal {
     pub const HOST_ATTACH: &str = "_host/attach";
     pub const HOST_DETACH: &str = "_host/detach";
+    pub const HOST_CONFIGURE_HOOKS: &str = "_host/configure_hooks";
+    pub const HOST_STEP: &str = "_host/step";
+    pub const HOST_UPDATE_PROBES: &str = "_host/update_probes";
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +426,8 @@ pub struct HostAttachResponse {
     pub num_heads: u32,
     pub hidden_dim: u32,
     pub module_tree: Vec<String>,
+    pub model_type: String,
+    pub component_vocabulary: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -439,9 +444,57 @@ pub struct HostDetachResponse {
     pub released: bool,
 }
 
+// ---------------------------------------------------------------------------
+// _host/configure_hooks (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostConfigureHooksRequest {
+    pub model_handle: u64,
+    pub active_probes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostConfigureHooksResponse {
+    pub sentinel_count: u32,
+    pub capture_count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// _host/step (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostStepRequest {
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostStepResponse {
+    pub position: TickPosition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<TensorSummary>,
+    pub forward_complete: bool,
+}
+
+// ---------------------------------------------------------------------------
+// _host/update_probes (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostUpdateProbesRequest {
+    pub active_probes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostUpdateProbesResponse {
+    pub probes_active: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TickEvent;
 
     #[test]
     fn host_attach_request_round_trip() {
@@ -466,6 +519,8 @@ mod tests {
             num_heads: 32,
             hidden_dim: 4096,
             module_tree: vec!["model.embed_tokens".to_owned(), "model.layers.0".to_owned()],
+            model_type: "llama".to_owned(),
+            component_vocabulary: vec!["q_proj".to_owned()],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
@@ -499,5 +554,98 @@ mod tests {
     fn internal_method_constants() {
         assert_eq!(internal::HOST_ATTACH, "_host/attach");
         assert_eq!(internal::HOST_DETACH, "_host/detach");
+    }
+
+    #[test]
+    fn host_configure_hooks_request_round_trip() {
+        let req = HostConfigureHooksRequest {
+            model_handle: 1,
+            active_probes: vec!["model:0:*:*:0:fwd".to_owned()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostConfigureHooksRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_configure_hooks_response_round_trip() {
+        let resp = HostConfigureHooksResponse {
+            sentinel_count: 50,
+            capture_count: 12,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostConfigureHooksResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn host_step_request_round_trip() {
+        let req = HostStepRequest { count: 1 };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_step_response_round_trip() {
+        let resp = HostStepResponse {
+            position: TickPosition {
+                tick_id: 42,
+                direction: StepDirection::Forward,
+                rank: Some(0),
+                layer: 3,
+                component: "q_proj".to_owned(),
+                event: TickEvent::Output,
+                replay_of: None,
+            },
+            capture: None,
+            forward_complete: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostStepResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.position.tick_id, parsed.position.tick_id);
+        assert_eq!(resp.forward_complete, parsed.forward_complete);
+    }
+
+    #[test]
+    fn host_update_probes_round_trip() {
+        let req = HostUpdateProbesRequest {
+            active_probes: vec!["model:0:3:q_proj:0:fwd".to_owned()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostUpdateProbesRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_attach_response_includes_component_vocabulary() {
+        let resp = HostAttachResponse {
+            model_handle: 1,
+            num_layers: 4,
+            num_heads: 4,
+            hidden_dim: 32,
+            module_tree: vec!["model.layers.0".to_owned()],
+            model_type: "llama".to_owned(),
+            component_vocabulary: vec!["q_proj".to_owned(), "k_proj".to_owned()],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.model_type, "llama");
+        assert_eq!(parsed.component_vocabulary.len(), 2);
+    }
+
+    #[test]
+    fn internal_configure_hooks_constant() {
+        assert_eq!(internal::HOST_CONFIGURE_HOOKS, "_host/configure_hooks");
+    }
+
+    #[test]
+    fn internal_step_constant() {
+        assert_eq!(internal::HOST_STEP, "_host/step");
+    }
+
+    #[test]
+    fn internal_update_probes_constant() {
+        assert_eq!(internal::HOST_UPDATE_PROBES, "_host/update_probes");
     }
 }
