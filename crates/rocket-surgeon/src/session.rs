@@ -1,8 +1,9 @@
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, DetachResponse, InitializeRequest, InitializeResponse,
-    MemoryUsage, StatusResponse,
+    MemoryUsage, StatusResponse, StepRequest, StepResponse,
 };
+use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
     ActionName, Capabilities, ResponseEnvelope, SessionState, Status,
 };
@@ -314,17 +315,44 @@ impl Session {
                 | "supports_moe"
                 | "supports_sae"
         ) {
-            return Err(SessionError::CapabilityNotSupported(ErrorData {
-                error_code: ErrorCode::CapabilityNotSupported,
-                numeric_code: Some(ErrorCode::CapabilityNotSupported.numeric_code()),
-                severity: Severity::Recoverable,
-                suggestion: format!("The {cap} capability is not supported in this build"),
-                current_state: Some(self.state.status),
-                valid_states: None,
-                context: None,
-            }));
+            return Err(self.capability_not_supported_error(cap));
         }
         Ok(())
+    }
+
+    fn capability_not_supported_error(&self, cap: &str) -> SessionError {
+        SessionError::CapabilityNotSupported(ErrorData {
+            error_code: ErrorCode::CapabilityNotSupported,
+            numeric_code: Some(ErrorCode::CapabilityNotSupported.numeric_code()),
+            severity: Severity::Recoverable,
+            suggestion: format!("The {cap} capability is not supported in this build"),
+            current_state: Some(self.state.status),
+            valid_states: None,
+            context: None,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn step(
+        &mut self,
+        req: &StepRequest,
+        host_position: &TickPosition,
+        _forward_complete: bool,
+    ) -> Result<ResponseEnvelope<StepResponse>, SessionError> {
+        self.require_stopped("rocket/step")?;
+
+        if req.direction == rocket_surgeon_protocol::types::StepDirection::Backward {
+            return Err(self.capability_not_supported_error("supports_reverse_step"));
+        }
+
+        self.state.tick_id = Some(host_position.tick_id);
+        self.state.position = Some(host_position.clone());
+        self.update_available_actions();
+
+        Ok(self.envelope(StepResponse {
+            ticks_executed: req.count,
+            stopped_at: host_position.clone(),
+        }))
     }
 }
 
@@ -340,7 +368,10 @@ fn stub_model_info(family: &str) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocket_surgeon_protocol::types::ExecutionMode;
+    use rocket_surgeon_protocol::messages::StepRequest;
+    use rocket_surgeon_protocol::types::{
+        ExecutionMode, StepDirection, TickEvent, TickGranularity, TickPosition,
+    };
 
     fn init_request() -> InitializeRequest {
         InitializeRequest {
@@ -599,5 +630,158 @@ mod tests {
         let err = session.status().unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::InvalidState);
+    }
+
+    #[test]
+    fn step_from_stopped_succeeds() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+        };
+        let host_position = TickPosition {
+            tick_id: 1,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: "q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        let result = session.step(&req, &host_position, false);
+        assert!(result.is_ok());
+        let envelope = result.unwrap();
+        assert_eq!(envelope.state.status, Status::Stopped);
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.ticks_executed, 1);
+        assert_eq!(data.stopped_at.component, "q_proj");
+    }
+
+    #[test]
+    fn step_from_initialized_returns_error() {
+        let mut session = initialized_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: None,
+        };
+        let pos = TickPosition {
+            tick_id: 1,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: String::new(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        let err = session.step(&req, &pos, false).unwrap_err();
+        assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn step_backward_returns_capability_not_supported() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Backward,
+            count: 1,
+            granularity: None,
+        };
+        let pos = TickPosition {
+            tick_id: 0,
+            direction: StepDirection::Backward,
+            rank: Some(0),
+            layer: 0,
+            component: String::new(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        let err = session.step(&req, &pos, false).unwrap_err();
+        assert_eq!(
+            err.error_data().error_code,
+            ErrorCode::CapabilityNotSupported
+        );
+    }
+
+    #[test]
+    fn step_updates_tick_id_in_session_state() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+        };
+        let pos1 = TickPosition {
+            tick_id: 1,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: "q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        session.step(&req, &pos1, false).unwrap();
+        assert_eq!(session.state().tick_id, Some(1));
+
+        let pos2 = TickPosition {
+            tick_id: 2,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: "k_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        session.step(&req, &pos2, false).unwrap();
+        assert_eq!(session.state().tick_id, Some(2));
+    }
+
+    #[test]
+    fn step_updates_position_in_session_state() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+        };
+        let pos = TickPosition {
+            tick_id: 1,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 3,
+            component: "gate_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        session.step(&req, &pos, false).unwrap();
+        let state = session.state();
+        assert!(state.position.is_some());
+        let session_pos = state.position.as_ref().unwrap();
+        assert_eq!(session_pos.layer, 3);
+        assert_eq!(session_pos.component, "gate_proj");
+    }
+
+    #[test]
+    fn step_returns_envelope_with_correct_state() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+        };
+        let pos = TickPosition {
+            tick_id: 1,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: "embed".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        let envelope = session.step(&req, &pos, false).unwrap();
+        assert!(envelope.state.session_id.len() == 36);
+        assert!(envelope.state.model_id.is_some());
+        assert_eq!(envelope.state.status, Status::Stopped);
+        assert!(envelope.state.available_actions.contains(&ActionName::Step));
     }
 }
