@@ -69,3 +69,72 @@ def model_metadata(handle: int) -> dict[str, Any]:
         "hidden_dim": hidden_dim,
         "module_tree": module_tree,
     }
+
+
+def discover_modules(handle: int) -> list[dict[str, Any]]:
+    """Walk model.named_modules() and return module inventory.
+
+    Each entry: {path, type_name, attr_name}.
+    """
+    model = _models[handle]
+    result = []
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        type_name = type(module).__name__
+        attr_name = name.rsplit(".", 1)[-1]
+        result.append(
+            {
+                "path": name,
+                "type_name": type_name,
+                "attr_name": attr_name,
+            }
+        )
+    return result
+
+
+def model_config(handle: int) -> dict[str, Any]:
+    """Extract model configuration attributes."""
+    model = _models[handle]
+    config = model.config
+    return {
+        "model_type": getattr(config, "model_type", "unknown"),
+        "num_layers": getattr(config, "num_hidden_layers", 0),
+        "num_heads": getattr(config, "num_attention_heads", 0),
+        "hidden_size": getattr(config, "hidden_size", 0),
+        "num_kv_heads": getattr(config, "num_key_value_heads", None),
+    }
+
+
+def discover_execution_order(handle: int) -> list[tuple[str, int]]:
+    """Run a tracing forward pass and record hook firing order.
+
+    Returns ordered list of (module_path, call_index) pairs.
+    """
+    model = _models[handle]
+    call_counts: dict[str, int] = {}
+    order: list[tuple[str, int]] = []
+    handles: list[Any] = []
+
+    def make_hook(path: str) -> Any:
+        def hook(_module: Any, _input: Any, _output: Any) -> None:
+            idx = call_counts.get(path, 0)
+            call_counts[path] = idx + 1
+            order.append((path, idx))
+
+        return hook
+
+    for name, module in model.named_modules():
+        if not name:
+            continue
+        h = module.register_forward_hook(make_hook(name))
+        handles.append(h)
+
+    with torch.inference_mode():
+        dummy_input = torch.zeros(1, 2, dtype=torch.long, device=next(model.parameters()).device)
+        model(dummy_input)
+
+    for h in handles:
+        h.remove()
+
+    return order
