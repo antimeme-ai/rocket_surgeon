@@ -7,6 +7,7 @@ no IPC — just the thinnest possible bridge to PyTorch.
 from __future__ import annotations
 
 import gc
+import threading
 from typing import Any
 
 import torch
@@ -180,3 +181,86 @@ def split_fused_output(tensor: torch.Tensor, dim: int, sizes: list[int]) -> list
 def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
     """Serialize tensor to raw bytes. Dtype-preserving."""
     return tensor.detach().contiguous().cpu().numpy().tobytes()
+
+
+def install_sentinel_hooks(handle: int, module_paths: list[str]) -> list[Any]:
+    """Install no-op sentinel hooks on specified modules to defeat PyTorch's fast path."""
+    model = _models[handle]
+    modules_by_path = dict(model.named_modules())
+    handles: list[Any] = []
+    for path in module_paths:
+        module = modules_by_path.get(path)
+        if module is not None:
+            h = module.register_forward_hook(lambda _m, _i, out: out)
+            handles.append(h)
+    return handles
+
+
+def install_capture_hooks(
+    handle: int,
+    module_paths: list[str],
+    result_mailbox: Any,
+    resume_mailbox: Any,
+    active_probes: set[str] | None = None,
+) -> list[Any]:
+    """Install capture hooks with mailbox barrier on specified modules."""
+    model = _models[handle]
+    modules_by_path = dict(model.named_modules())
+    handles: list[Any] = []
+    call_counts: dict[str, int] = {}
+
+    if active_probes is None:
+        active_probes = set()
+
+    for path in module_paths:
+        module = modules_by_path.get(path)
+        if module is None:
+            continue
+
+        def make_hook(p: str) -> Any:
+            def hook(_mod: Any, _inp: Any, output: torch.Tensor) -> torch.Tensor | None:
+                if p not in active_probes:
+                    return None
+
+                idx = call_counts.get(p, 0)
+                call_counts[p] = idx + 1
+
+                result_mailbox.put((p, idx, output))
+                intervention = resume_mailbox.wait()
+                resume_mailbox.restore()
+
+                if intervention is not None:
+                    return intervention  # type: ignore[no-any-return]
+                return None
+
+            return hook
+
+        h = module.register_forward_hook(make_hook(path), prepend=True)
+        handles.append(h)
+    return handles
+
+
+def remove_hooks(handles: list[Any]) -> None:
+    """Remove all hooks referenced by the given handles."""
+    for h in handles:
+        h.remove()
+
+
+def run_forward(
+    handle: int,
+    input_ids: torch.Tensor,
+    done_callback: Any,
+) -> None:
+    """Spawn a thread that runs model(input_ids) and calls done_callback on completion."""
+    model = _models[handle]
+
+    def _run() -> None:
+        try:
+            with torch.inference_mode():
+                model(input_ids)
+            done_callback(None)
+        except Exception as e:
+            done_callback(e)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
