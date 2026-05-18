@@ -191,12 +191,19 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
 
     if let Some(fwd) = state.forward_pass.take() {
         Python::with_gil(|py| {
-            let _ = fwd
+            if let Err(e) = fwd
                 .resume_mailbox
                 .bind(py)
-                .call_method1("put", (py.None(),));
-            let _ = bridge::remove_hooks(py, &fwd.sentinel_handles);
-            let _ = bridge::remove_hooks(py, &fwd.capture_handles);
+                .call_method1("put", (py.None(),))
+            {
+                tracing::warn!("failed to signal resume mailbox during detach: {e}");
+            }
+            if let Err(e) = bridge::remove_hooks(py, &fwd.sentinel_handles) {
+                tracing::warn!("failed to remove sentinel hooks during detach: {e}");
+            }
+            if let Err(e) = bridge::remove_hooks(py, &fwd.capture_handles) {
+                tracing::warn!("failed to remove capture hooks during detach: {e}");
+            }
         });
     }
 
@@ -297,6 +304,16 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
         return internal_error(request.id.clone(), "No model loaded".to_owned());
     };
 
+    if req.model_handle != handle {
+        return internal_error(
+            request.id.clone(),
+            format!(
+                "model handle mismatch: expected {handle}, got {}",
+                req.model_handle
+            ),
+        );
+    }
+
     let Some(ref component_map) = state.component_map else {
         return internal_error(request.id.clone(), "No component map available".to_owned());
     };
@@ -307,22 +324,23 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
 
     let component_map_clone = component_map.clone();
 
+    let resuming = state.forward_pass.is_some();
+
     match Python::with_gil(|py| -> anyhow::Result<HostStepResponse> {
         ensure_forward_pass(py, state, handle, &component_map_clone)?;
 
-        let fwd = state.forward_pass.as_ref().unwrap();
+        let fwd = state
+            .forward_pass
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("forward pass not initialized"))?;
         let result_mb = fwd.result_mailbox.bind(py);
         let resume_mb = fwd.resume_mailbox.bind(py);
 
         let mut ticks_consumed = 0u32;
         let current_layer = state.tick_state.to_tick_position().layer;
-        let mut tracking_layer = if state.tick_state.tick_id() > 0 {
-            Some(current_layer)
-        } else {
-            None
-        };
+        let mut tracking_layer = if resuming { Some(current_layer) } else { None };
 
-        if state.tick_state.tick_id() > 0 {
+        if resuming {
             resume_mb.call_method1("put", (py.None(),))?;
         }
 
