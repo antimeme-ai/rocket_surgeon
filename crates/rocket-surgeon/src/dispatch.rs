@@ -29,7 +29,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::ATTACH => handle_attach(session, request),
         method::DETACH => handle_detach(session, request),
         method::STATUS => handle_status(session, request),
-        method::STEP => handle_step(session, request),
+        method::STEP => handle_step(session, request, None),
         method::INSPECT
         | method::INTERVENE
         | method::PROBE
@@ -111,7 +111,11 @@ fn handle_status(session: &Session, request: &Request) -> Response {
     }
 }
 
-fn handle_step(session: &mut Session, request: &Request) -> Response {
+pub fn handle_step(
+    session: &mut Session,
+    request: &Request,
+    host_response: Option<&rocket_surgeon_protocol::messages::HostStepResponse>,
+) -> Response {
     let req: StepRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => {
@@ -126,18 +130,23 @@ fn handle_step(session: &mut Session, request: &Request) -> Response {
         }
     };
 
-    let tick_id = session.state().tick_id.unwrap_or(0) + u64::from(req.count);
-    let synthetic_position = TickPosition {
-        tick_id,
-        direction: StepDirection::Forward,
-        rank: Some(0),
-        layer: 0,
-        component: String::new(),
-        event: TickEvent::Output,
-        replay_of: None,
+    let (position, forward_complete) = if let Some(hr) = host_response {
+        (hr.position.clone(), hr.forward_complete)
+    } else {
+        let tick_id = session.state().tick_id.unwrap_or(0) + u64::from(req.count);
+        let pos = TickPosition {
+            tick_id,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 0,
+            component: String::new(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        (pos, false)
     };
 
-    match session.step(&req, &synthetic_position, false) {
+    match session.step(&req, &position, forward_complete) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }

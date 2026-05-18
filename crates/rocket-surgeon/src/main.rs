@@ -11,7 +11,7 @@ use std::io::{self, BufReader};
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use crate::dispatch::dispatch;
+use crate::dispatch::{dispatch, handle_step};
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
@@ -107,6 +107,41 @@ fn spawn_and_attach(
     }
 }
 
+/// Try to step via the orchestrator. Returns `Some(HostStepResponse)` on success.
+fn try_orchestrator_step(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+    let step_req: rocket_surgeon_protocol::messages::StepRequest = request
+        .params
+        .as_ref()
+        .map_or(
+            Ok(rocket_surgeon_protocol::messages::StepRequest {
+                direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+                count: 1,
+                granularity: None,
+            }),
+            |p| serde_json::from_value(p.clone()),
+        )
+        .ok()?;
+
+    let host_req = rocket_surgeon_protocol::messages::HostStepRequest {
+        model_handle: mh,
+        count: step_req.count,
+        direction: step_req.direction,
+        granularity: step_req.granularity,
+    };
+    match orch.step(&host_req) {
+        Ok(hr) => Some(hr),
+        Err(e) => {
+            warn!("orchestrator step failed: {e}");
+            None
+        }
+    }
+}
+
 /// Send `_host/detach` to the orchestrator and drop it.
 fn detach_orchestrator(
     orchestrator: &mut Option<OrchestratorHandle>,
@@ -181,7 +216,12 @@ fn main() {
             }
         };
 
-        let response = dispatch(&mut session, &request);
+        let response = if request.method == method::STEP {
+            let host_response = try_orchestrator_step(&mut orchestrator, model_handle, &request);
+            handle_step(&mut session, &request, host_response.as_ref())
+        } else {
+            dispatch(&mut session, &request)
+        };
 
         if response.error.is_none() && request.method == method::ATTACH {
             if let Some((orch, handle)) = spawn_and_attach(

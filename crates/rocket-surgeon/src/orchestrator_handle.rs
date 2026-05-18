@@ -3,7 +3,8 @@ use std::process::{Child, Command, Stdio};
 
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
-    HostAttachRequest, HostAttachResponse, HostDetachRequest, internal,
+    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostStepRequest, HostStepResponse,
+    internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -97,6 +98,30 @@ impl OrchestratorHandle {
         Ok(())
     }
 
+    /// Send `_host/step` to the orchestrator and parse the response.
+    pub fn step(&mut self, req: &HostStepRequest) -> anyhow::Result<HostStepResponse> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_STEP, params);
+
+        self.send(&request)?;
+        let response = self.recv()?;
+
+        if let Some(err) = response.error {
+            anyhow::bail!(
+                "orchestrator step failed (code {}): {}",
+                err.code,
+                err.message
+            );
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("orchestrator step: missing result"))?;
+        let host_resp: HostStepResponse = serde_json::from_value(result)?;
+        Ok(host_resp)
+    }
+
     /// Kill the orchestrator child process and wait for it to exit.
     pub fn kill(&mut self) {
         if let Err(e) = self.child.kill() {
@@ -163,6 +188,23 @@ mod tests {
         drop(handle);
         // After drop, the process should have been killed.
         let _ = pid;
+    }
+
+    #[test]
+    fn step_method_exists() {
+        use rocket_surgeon_protocol::messages::HostStepRequest;
+        use rocket_surgeon_protocol::types::StepDirection;
+
+        let mut handle =
+            OrchestratorHandle::spawn("cat", "/fake/worker", "info").expect("cat should exist");
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+            granularity: None,
+        };
+        let result = handle.step(&req);
+        assert!(result.is_err());
     }
 
     #[test]
