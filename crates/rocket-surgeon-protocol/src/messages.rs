@@ -470,6 +470,8 @@ pub struct HostStepRequest {
     pub count: u32,
     #[serde(default)]
     pub direction: StepDirection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<TickGranularity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -588,6 +590,7 @@ mod tests {
             model_handle: 1,
             count: 1,
             direction: StepDirection::Forward,
+            granularity: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -656,5 +659,26 @@ mod tests {
     #[test]
     fn internal_update_probes_constant() {
         assert_eq!(internal::HOST_UPDATE_PROBES, "_host/update_probes");
+    }
+
+    #[test]
+    fn host_step_request_with_granularity_round_trip() {
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 3,
+            direction: StepDirection::Forward,
+            granularity: Some(TickGranularity::Layer),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert_eq!(parsed.granularity, Some(TickGranularity::Layer));
+    }
+
+    #[test]
+    fn host_step_request_granularity_defaults_to_none() {
+        let json = r#"{"model_handle":1,"count":1}"#;
+        let req: HostStepRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.granularity, None);
     }
 }
