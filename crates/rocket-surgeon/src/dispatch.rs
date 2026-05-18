@@ -1,5 +1,6 @@
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
-use rocket_surgeon_protocol::messages::{AttachRequest, InitializeRequest, method};
+use rocket_surgeon_protocol::messages::{AttachRequest, InitializeRequest, StepRequest, method};
+use rocket_surgeon_protocol::types::{StepDirection, TickEvent, TickPosition};
 
 use crate::session::{Session, SessionError};
 
@@ -28,8 +29,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::ATTACH => handle_attach(session, request),
         method::DETACH => handle_detach(session, request),
         method::STATUS => handle_status(session, request),
-        method::STEP
-        | method::INSPECT
+        method::STEP => handle_step(session, request),
+        method::INSPECT
         | method::INTERVENE
         | method::PROBE
         | method::CHECKPOINT
@@ -105,6 +106,38 @@ fn handle_detach(session: &mut Session, request: &Request) -> Response {
 
 fn handle_status(session: &Session, request: &Request) -> Response {
     match session.status() {
+        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
+}
+
+fn handle_step(session: &mut Session, request: &Request) -> Response {
+    let req: StepRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    let tick_id = session.state().tick_id.unwrap_or(0) + u64::from(req.count);
+    let synthetic_position = TickPosition {
+        tick_id,
+        direction: StepDirection::Forward,
+        rank: Some(0),
+        layer: 0,
+        component: String::new(),
+        event: TickEvent::Output,
+        replay_of: None,
+    };
+
+    match session.step(&req, &synthetic_position, false) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
@@ -231,14 +264,14 @@ mod tests {
         dispatch(&mut session, &make_request("initialize", init_params()));
         dispatch(&mut session, &make_request("attach", attach_params()));
 
-        let req = make_request("rocket/step", serde_json::json!({}));
+        let req = make_request("rocket/inspect", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert!(result.get("state").is_some());
         let data = &result["data"];
         assert_eq!(data["stub"], true);
-        assert_eq!(data["method"], "rocket/step");
+        assert_eq!(data["method"], "rocket/inspect");
     }
 
     #[test]
@@ -246,9 +279,119 @@ mod tests {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
 
-        let req = make_request("rocket/step", serde_json::json!({}));
+        let req = make_request("rocket/inspect", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn dispatch_step_from_stopped_returns_step_response() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request(
+            "rocket/step",
+            serde_json::json!({
+                "direction": "forward",
+                "count": 1,
+                "granularity": "component"
+            }),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let data = &result["data"];
+        assert_eq!(data["ticks_executed"], 1);
+        assert!(data["stopped_at"]["tick_id"].is_number());
+        assert!(data["stopped_at"]["component"].is_string());
+        assert!(data["stopped_at"]["layer"].is_number());
+        let state = &result["state"];
+        assert_eq!(state["status"], "stopped");
+    }
+
+    #[test]
+    fn dispatch_step_backward_returns_capability_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request(
+            "rocket/step",
+            serde_json::json!({
+                "direction": "backward",
+                "count": 1,
+                "granularity": "component"
+            }),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn dispatch_step_invalid_params_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request("rocket/step", serde_json::json!({"wrong": true}));
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+        );
+    }
+
+    #[test]
+    fn dispatch_step_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request(
+            "rocket/step",
+            serde_json::json!({
+                "direction": "forward",
+                "count": 1
+            }),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn dispatch_step_tick_id_increments() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let step_params = serde_json::json!({
+            "direction": "forward",
+            "count": 1,
+            "granularity": "component"
+        });
+
+        let resp1 = dispatch(
+            &mut session,
+            &make_request("rocket/step", step_params.clone()),
+        );
+        let tick1 = resp1.result.as_ref().unwrap()["state"]["tick_id"]
+            .as_u64()
+            .unwrap();
+
+        let resp2 = dispatch(&mut session, &make_request("rocket/step", step_params));
+        let tick2 = resp2.result.as_ref().unwrap()["state"]["tick_id"]
+            .as_u64()
+            .unwrap();
+
+        assert!(
+            tick2 > tick1,
+            "tick_id should monotonically increase: {tick1} -> {tick2}"
+        );
     }
 
     #[test]
