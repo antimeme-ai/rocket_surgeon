@@ -66,6 +66,23 @@ def test_compute_tensor_stats_population_std() -> None:
     assert math.isclose(stats["std"], expected_std, rel_tol=1e-5)
 
 
+def test_compute_tensor_stats_empty_tensor() -> None:
+    t = torch.empty(0)
+    stats = compute_tensor_stats(t)
+    assert stats["mean"] == 0.0
+    assert stats["std"] == 0.0
+    assert stats["min"] == 0.0
+    assert stats["max"] == 0.0
+    assert stats["shape"] == [0]
+
+
+def test_compute_tensor_stats_nan_inf() -> None:
+    t = torch.tensor([1.0, float("nan"), float("inf"), -float("inf")])
+    stats = compute_tensor_stats(t)
+    assert math.isnan(stats["mean"])
+    assert math.isnan(stats["max"])
+
+
 def test_split_fused_output_equal_chunks() -> None:
     t = torch.randn(2, 3, 12)
     parts = split_fused_output(t, dim=-1, sizes=[4, 4, 4])
@@ -98,3 +115,12 @@ def test_tensor_to_bytes_preserves_dtype() -> None:
     t = torch.tensor([1.0, 2.0], dtype=torch.float16)
     data = tensor_to_bytes(t)
     assert len(data) == 2 * 2
+
+
+def test_tensor_to_bytes_bf16_does_not_crash() -> None:
+    t = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
+    data = tensor_to_bytes(t)
+    assert isinstance(data, bytes)
+    assert len(data) == 3 * 2
+    reconstructed = torch.frombuffer(bytearray(data), dtype=torch.float16)
+    assert torch.allclose(t.float(), reconstructed.float(), atol=0.01)

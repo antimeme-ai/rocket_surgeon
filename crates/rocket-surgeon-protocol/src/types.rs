@@ -62,9 +62,10 @@ pub struct TickPosition {
     pub replay_of: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepDirection {
+    #[default]
     Forward,
     Backward,
 }

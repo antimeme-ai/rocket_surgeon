@@ -160,6 +160,18 @@ def compute_tensor_stats(tensor: torch.Tensor) -> dict[str, Any]:
     original_dtype = tensor.dtype
     t = tensor.detach().float()
     numel = t.numel()
+    if numel == 0:
+        return {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "abs_max": 0.0,
+            "l2_norm": 0.0,
+            "sparsity": 0.0,
+            "shape": list(tensor.shape),
+            "dtype": _DTYPE_NAME_MAP.get(original_dtype, str(original_dtype)),
+        }
     return {
         "mean": t.mean().item(),
         "std": t.std(correction=0).item(),
@@ -167,7 +179,7 @@ def compute_tensor_stats(tensor: torch.Tensor) -> dict[str, Any]:
         "max": t.max().item(),
         "abs_max": t.abs().max().item(),
         "l2_norm": t.norm(2).item(),
-        "sparsity": (t == 0).sum().item() / numel if numel > 0 else 0.0,
+        "sparsity": (t == 0).sum().item() / numel,
         "shape": list(tensor.shape),
         "dtype": _DTYPE_NAME_MAP.get(original_dtype, str(original_dtype)),
     }
@@ -179,8 +191,11 @@ def split_fused_output(tensor: torch.Tensor, dim: int, sizes: list[int]) -> list
 
 
 def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
-    """Serialize tensor to raw bytes. Dtype-preserving."""
-    return tensor.detach().contiguous().cpu().numpy().tobytes()
+    """Serialize tensor to raw bytes. Dtype-preserving except bf16 → fp16 (NumPy has no bf16)."""
+    t = tensor.detach().contiguous().cpu()
+    if t.dtype == torch.bfloat16:
+        t = t.to(torch.float16)
+    return t.numpy().tobytes()
 
 
 def install_sentinel_hooks(handle: int, module_paths: list[str]) -> list[Any]:
@@ -191,7 +206,7 @@ def install_sentinel_hooks(handle: int, module_paths: list[str]) -> list[Any]:
     for path in module_paths:
         module = modules_by_path.get(path)
         if module is not None:
-            h = module.register_forward_hook(lambda _m, _i, out: out)
+            h = module.register_forward_hook(lambda _m, _i, _o: None)
             handles.append(h)
     return handles
 
@@ -202,8 +217,12 @@ def install_capture_hooks(
     result_mailbox: Any,
     resume_mailbox: Any,
     active_probes: set[str] | None = None,
-) -> list[Any]:
-    """Install capture hooks with mailbox barrier on specified modules."""
+) -> tuple[list[Any], dict[str, int]]:
+    """Install capture hooks with mailbox barrier on specified modules.
+
+    Returns (handles, call_counts). Caller should call call_counts.clear()
+    between forward passes to reset per-module call indices.
+    """
     model = _models[handle]
     modules_by_path = dict(model.named_modules())
     handles: list[Any] = []
@@ -218,7 +237,7 @@ def install_capture_hooks(
             continue
 
         def make_hook(p: str) -> Any:
-            def hook(_mod: Any, _inp: Any, output: torch.Tensor) -> torch.Tensor | None:
+            def hook(_mod: Any, _inp: Any, output: Any) -> Any:
                 if p not in active_probes:
                     return None
 
@@ -230,14 +249,14 @@ def install_capture_hooks(
                 resume_mailbox.restore()
 
                 if intervention is not None:
-                    return intervention  # type: ignore[no-any-return]
+                    return intervention
                 return None
 
             return hook
 
         h = module.register_forward_hook(make_hook(path), prepend=True)
         handles.append(h)
-    return handles
+    return handles, call_counts
 
 
 def remove_hooks(handles: list[Any]) -> None:

@@ -106,7 +106,7 @@ fn handle_host_attach(request: &Request) -> Response {
         }
     };
 
-    let component_map = match crate::adapter::resolve(&modules, &config) {
+    let mut component_map = match crate::adapter::resolve(&modules, &config, req.rank) {
         Ok(m) => m,
         Err(e) => {
             return internal_error(
@@ -115,6 +115,17 @@ fn handle_host_attach(request: &Request) -> Response {
             );
         }
     };
+
+    let execution_order = match bridge::discover_execution_order(handle) {
+        Ok(o) => o,
+        Err(e) => {
+            return internal_error(
+                request.id.clone(),
+                format!("discover_execution_order failed: {e}"),
+            );
+        }
+    };
+    crate::adapter::apply_execution_order(&mut component_map, &execution_order);
 
     let resp = HostAttachResponse {
         model_handle: info.handle,

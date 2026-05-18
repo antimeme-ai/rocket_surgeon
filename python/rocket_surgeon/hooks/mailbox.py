@@ -17,9 +17,18 @@ class Mailbox:
     """Single-slot mailbox: one producer, one consumer.
 
     - put(value): store value, release lock (wakes consumer)
-    - wait() -> value: acquire lock (blocks until put), return value
+    - wait(timeout) -> value: acquire lock (blocks until put), return value
     - get() -> value: non-blocking read of current value
     - restore(): clear value, drop references
+
+    Lock-state invariants::
+
+        __init__  → lock ACQUIRED  (consumer will block)
+        put()     → lock RELEASED  (consumer unblocked)
+        wait()    → lock ACQUIRED  (consumer blocks again)
+        restore() → lock unchanged (still acquired from wait)
+
+    Correct cycle: put → wait → restore → put → wait → restore → ...
     """
 
     __slots__ = ("_lock", "_value")
@@ -35,9 +44,14 @@ class Mailbox:
         if self._lock.locked():
             self._lock.release()
 
-    def wait(self) -> Any:
-        """Block until a value is put, then return it."""
-        self._lock.acquire()
+    def wait(self, timeout: float | None = None) -> Any:
+        """Block until a value is put, then return it.
+
+        Raises TimeoutError if *timeout* seconds elapse without a value.
+        """
+        acquired = self._lock.acquire(timeout=timeout if timeout is not None else -1)
+        if not acquired:
+            raise TimeoutError
         return self._value
 
     def get(self) -> Any:

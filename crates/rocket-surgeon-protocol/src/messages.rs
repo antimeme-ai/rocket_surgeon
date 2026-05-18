@@ -466,7 +466,10 @@ pub struct HostConfigureHooksResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostStepRequest {
+    pub model_handle: u64,
     pub count: u32,
+    #[serde(default)]
+    pub direction: StepDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -483,6 +486,7 @@ pub struct HostStepResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostUpdateProbesRequest {
+    pub model_handle: u64,
     pub active_probes: Vec<String>,
 }
 
@@ -580,7 +584,11 @@ mod tests {
 
     #[test]
     fn host_step_request_round_trip() {
-        let req = HostStepRequest { count: 1 };
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+        };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, parsed);
@@ -610,6 +618,7 @@ mod tests {
     #[test]
     fn host_update_probes_round_trip() {
         let req = HostUpdateProbesRequest {
+            model_handle: 1,
             active_probes: vec!["model:0:3:q_proj:0:fwd".to_owned()],
         };
         let json = serde_json::to_string(&req).unwrap();

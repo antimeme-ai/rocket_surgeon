@@ -95,7 +95,7 @@ def install_sentinels(ctx):
 @given('a capture hook is installed on "model.layers.0.self_attn.q_proj"')
 def install_capture_q_proj(ctx):
     target = "model.layers.0.self_attn.q_proj"
-    handles = install_capture_hooks(
+    handles, _call_counts = install_capture_hooks(
         ctx["handle"],
         [target],
         ctx["result_mb"],
@@ -109,7 +109,7 @@ def install_capture_q_proj(ctx):
 @given('a capture hook is installed on "model.layers.0.self_attn.q_proj" with no active probes')
 def install_capture_no_probes(ctx):
     target = "model.layers.0.self_attn.q_proj"
-    handles = install_capture_hooks(
+    handles, _call_counts = install_capture_hooks(
         ctx["handle"],
         [target],
         ctx["result_mb"],

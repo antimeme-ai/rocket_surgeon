@@ -184,9 +184,9 @@ pub fn compute_tensor_stats(
 }
 
 fn python_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> anyhow::Result<serde_json::Value> {
-    if let Ok(v) = obj.extract::<f64>() {
+    if let Ok(v) = obj.extract::<i64>() {
         Ok(serde_json::Value::from(v))
-    } else if let Ok(v) = obj.extract::<i64>() {
+    } else if let Ok(v) = obj.extract::<f64>() {
         Ok(serde_json::Value::from(v))
     } else if let Ok(v) = obj.extract::<String>() {
         Ok(serde_json::Value::from(v))

@@ -24,6 +24,7 @@ pub enum ModuleMatcher {
     TypeAndName {
         type_name: &'static str,
         attr_name: &'static str,
+        path_contains: Option<&'static str>,
     },
     TypeOnly {
         type_name: &'static str,
@@ -124,6 +125,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LlamaRMSNorm",
                     attr_name: "input_layernorm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln1".to_owned(),
@@ -133,6 +135,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LlamaRMSNorm",
                     attr_name: "post_attention_layernorm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln2".to_owned(),
@@ -142,6 +145,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LlamaRMSNorm",
                     attr_name: "norm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln_final".to_owned(),
@@ -151,6 +155,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "MistralRMSNorm",
                     attr_name: "input_layernorm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln1".to_owned(),
@@ -160,6 +165,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "MistralRMSNorm",
                     attr_name: "post_attention_layernorm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln2".to_owned(),
@@ -169,6 +175,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "MistralRMSNorm",
                     attr_name: "norm",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln_final".to_owned(),
@@ -178,6 +185,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "q_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "q_proj".to_owned(),
@@ -187,6 +195,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "k_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "k_proj".to_owned(),
@@ -196,6 +205,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "v_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "v_proj".to_owned(),
@@ -205,6 +215,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "o_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "o_proj".to_owned(),
@@ -214,6 +225,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "gate_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "gate_proj".to_owned(),
@@ -223,6 +235,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "up_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "up_proj".to_owned(),
@@ -232,6 +245,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "down_proj",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "down_proj".to_owned(),
@@ -247,6 +261,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Embedding",
                     attr_name: "embed_tokens",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "embed".to_owned(),
@@ -256,6 +271,7 @@ fn llama_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "lm_head",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "lm_head".to_owned(),
@@ -294,6 +310,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LayerNorm",
                     attr_name: "ln_1",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln1".to_owned(),
@@ -303,6 +320,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LayerNorm",
                     attr_name: "ln_2",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln2".to_owned(),
@@ -312,6 +330,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "LayerNorm",
                     attr_name: "ln_f",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "ln_final".to_owned(),
@@ -321,6 +340,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Conv1D",
                     attr_name: "c_attn",
+                    path_contains: None,
                 },
                 Fused {
                     components: vec![
@@ -346,6 +366,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Conv1D",
                     attr_name: "c_proj",
+                    path_contains: Some("attn"),
                 },
                 Direct {
                     canonical: "o_proj".to_owned(),
@@ -355,6 +376,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Conv1D",
                     attr_name: "c_fc",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "up_proj".to_owned(),
@@ -364,6 +386,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Conv1D",
                     attr_name: "c_proj",
+                    path_contains: Some("mlp"),
                 },
                 Direct {
                     canonical: "down_proj".to_owned(),
@@ -373,6 +396,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Embedding",
                     attr_name: "wte",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "embed".to_owned(),
@@ -382,6 +406,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Embedding",
                     attr_name: "wpe",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "pos_embed".to_owned(),
@@ -391,6 +416,7 @@ fn gpt2_declaration() -> FamilyDeclaration {
                 TypeAndName {
                     type_name: "Linear",
                     attr_name: "lm_head",
+                    path_contains: None,
                 },
                 Direct {
                     canonical: "lm_head".to_owned(),
@@ -455,11 +481,20 @@ fn matches_module(matcher: &ModuleMatcher, module: &RawModule) -> bool {
         ModuleMatcher::TypeAndName {
             type_name,
             attr_name,
-        } => module.type_name == *type_name && module.attr_name == *attr_name,
+            path_contains,
+        } => {
+            module.type_name == *type_name
+                && module.attr_name == *attr_name
+                && path_contains.is_none_or(|pat| module.path.contains(pat))
+        }
     }
 }
 
-pub fn resolve(modules: &[RawModule], config: &ModelConfig) -> Result<ComponentMap, String> {
+pub fn resolve(
+    modules: &[RawModule],
+    config: &ModelConfig,
+    rank: u32,
+) -> Result<ComponentMap, String> {
     let decl = family_declaration(&config.model_type)
         .ok_or_else(|| format!("unsupported model family: {}", config.model_type))?;
 
@@ -478,13 +513,14 @@ pub fn resolve(modules: &[RawModule], config: &ModelConfig) -> Result<ComponentM
                     ModuleMapping::Direct { canonical } => {
                         let layer_index = extract_layer_index(&module.path);
                         vocabulary.insert(canonical.clone());
+                        let layer = layer_index.unwrap_or(0);
                         components.push(MappedComponent {
                             module_path: module.path.clone(),
                             canonical: canonical.clone(),
                             layer_index,
                             call_index: 0,
                             mapping: mapping.clone(),
-                            probe_point: String::new(),
+                            probe_point: format!("model:{rank}:{layer}:{canonical}:0:fwd"),
                         });
                         break;
                     }
@@ -499,15 +535,17 @@ pub fn resolve(modules: &[RawModule], config: &ModelConfig) -> Result<ComponentM
                             }
                             vocabulary.insert(fc.canonical.clone());
                         }
+                        let layer = layer_index.unwrap_or(0);
+                        let fused_canonical = format!("_fused.{}", module.attr_name);
                         components.push(MappedComponent {
                             module_path: module.path.clone(),
-                            canonical: format!("_fused.{}", module.attr_name),
+                            canonical: fused_canonical.clone(),
                             layer_index,
                             call_index: 0,
                             mapping: ModuleMapping::Fused {
                                 components: resolved_fused,
                             },
-                            probe_point: String::new(),
+                            probe_point: format!("model:{rank}:{layer}:{fused_canonical}:0:fwd"),
                         });
                         break;
                     }
@@ -517,16 +555,18 @@ pub fn resolve(modules: &[RawModule], config: &ModelConfig) -> Result<ComponentM
 
         if !matched {
             let canonical = format!("_raw.{}", module.path);
+            let layer_index = extract_layer_index(&module.path);
+            let layer = layer_index.unwrap_or(0);
             vocabulary.insert(canonical.clone());
             components.push(MappedComponent {
                 module_path: module.path.clone(),
-                canonical,
-                layer_index: extract_layer_index(&module.path),
+                canonical: canonical.clone(),
+                layer_index,
                 call_index: 0,
                 mapping: ModuleMapping::Direct {
                     canonical: format!("_raw.{}", module.path),
                 },
-                probe_point: String::new(),
+                probe_point: format!("model:{rank}:{layer}:{canonical}:0:fwd"),
             });
         }
     }
@@ -745,7 +785,7 @@ mod tests {
             hidden_size: 32,
             num_kv_heads: Some(4),
         };
-        let map = resolve(&modules, &config).unwrap();
+        let map = resolve(&modules, &config, 0).unwrap();
         assert_eq!(map.model_family, "llama");
 
         let canonicals: Vec<&str> = map
@@ -780,7 +820,7 @@ mod tests {
             hidden_size: 32,
             num_kv_heads: Some(4),
         };
-        let map = resolve(&modules, &config).unwrap();
+        let map = resolve(&modules, &config, 0).unwrap();
         let q = map
             .components
             .iter()
@@ -803,7 +843,7 @@ mod tests {
             hidden_size: 32,
             num_kv_heads: Some(4),
         };
-        let map = resolve(&modules, &config).unwrap();
+        let map = resolve(&modules, &config, 0).unwrap();
         let raw = map
             .components
             .iter()
@@ -822,7 +862,7 @@ mod tests {
             hidden_size: 32,
             num_kv_heads: None,
         };
-        let result = resolve(&modules, &config);
+        let result = resolve(&modules, &config, 0);
         assert!(result.is_err());
     }
 
@@ -847,7 +887,7 @@ mod tests {
             hidden_size: 32,
             num_kv_heads: Some(4),
         };
-        let map = resolve(&modules, &config).unwrap();
+        let map = resolve(&modules, &config, 0).unwrap();
         assert!(map.vocabulary.contains(&"q_proj".to_owned()));
         assert!(map.vocabulary.contains(&"k_proj".to_owned()));
     }

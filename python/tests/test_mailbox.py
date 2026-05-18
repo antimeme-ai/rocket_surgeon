@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from rocket_surgeon.hooks.mailbox import Mailbox
 
 
@@ -93,3 +95,17 @@ def test_put_overwrites_unconsumed_value() -> None:
     m.put("first")
     m.put("second")
     assert m.wait() == "second"
+
+
+def test_wait_timeout_raises_on_empty() -> None:
+    """wait() with timeout on empty mailbox raises TimeoutError."""
+    m = Mailbox()
+    with pytest.raises(TimeoutError):
+        m.wait(timeout=0.05)
+
+
+def test_wait_timeout_succeeds_when_value_available() -> None:
+    """wait() with timeout returns value if already available."""
+    m = Mailbox()
+    m.put("ready")
+    assert m.wait(timeout=1.0) == "ready"
