@@ -70,7 +70,21 @@ fn main() {
         };
 
         let response = dispatch(&mut state, &request);
-        let resp_json = serde_json::to_string(&response).expect("serialize response");
+        let resp_json = match serde_json::to_string(&response) {
+            Ok(j) => j,
+            Err(e) => {
+                error!("failed to serialize response: {e}");
+                let fallback = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {
+                        "code": rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                        "message": format!("serialization failed: {e}"),
+                    }
+                });
+                fallback.to_string()
+            }
+        };
 
         if let Err(e) = write_message(&mut writer, &resp_json) {
             error!("failed to write response: {e}");

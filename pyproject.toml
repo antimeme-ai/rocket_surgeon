@@ -83,6 +83,7 @@ known-first-party = ["rocket_surgeon"]
 
 [tool.ruff.lint.per-file-ignores]
 "python/tests/**" = ["ANN", "ARG", "PLR2004", "SLF"]
+"tests/**" = ["ANN", "ARG", "PLR2004", "SLF"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -14,6 +16,7 @@ use tracing::error;
 
 use crate::adapter::ComponentMap;
 use crate::bridge;
+use crate::step_driver;
 use crate::tick::TickState;
 
 pub struct ForwardPassState {
@@ -23,10 +26,13 @@ pub struct ForwardPassState {
     pub capture_handles: Vec<pyo3::PyObject>,
     #[allow(dead_code)]
     pub call_counts: pyo3::PyObject,
+    pub forward_complete: bool,
 }
 
 pub struct WorkerState {
     pub component_map: Option<ComponentMap>,
+    pub component_index: HashMap<(String, u32), usize>,
+    pub module_paths: Vec<String>,
     pub model_handle: Option<u64>,
     pub rank: u32,
     pub tick_state: TickState,
@@ -37,11 +43,21 @@ impl WorkerState {
     pub fn new() -> Self {
         Self {
             component_map: None,
+            component_index: HashMap::new(),
+            module_paths: Vec::new(),
             model_handle: None,
             rank: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
         }
+    }
+
+    fn build_component_index(map: &ComponentMap) -> HashMap<(String, u32), usize> {
+        map.components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c.module_path.clone(), c.call_index), i))
+            .collect()
     }
 }
 
@@ -161,6 +177,12 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     };
     crate::adapter::apply_execution_order(&mut component_map, &execution_order);
 
+    state.component_index = WorkerState::build_component_index(&component_map);
+    state.module_paths = component_map
+        .components
+        .iter()
+        .map(|c| c.module_path.clone())
+        .collect();
     state.model_handle = Some(info.handle);
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
@@ -209,6 +231,8 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
 
     state.model_handle = None;
     state.component_map = None;
+    state.component_index.clear();
+    state.module_paths.clear();
 
     match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
@@ -242,44 +266,47 @@ fn handle_host_configure_hooks(request: &Request) -> Response {
     }
 }
 
-fn ensure_forward_pass(
-    py: Python<'_>,
-    state: &mut WorkerState,
-    handle: u64,
-    component_map: &ComponentMap,
-) -> anyhow::Result<()> {
+const FORWARD_COMPLETE_SENTINEL: &str = "__forward_complete__";
+
+fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> anyhow::Result<()> {
     if state.forward_pass.is_some() {
         return Ok(());
     }
 
-    let module_paths: Vec<String> = component_map
-        .components
-        .iter()
-        .map(|c| c.module_path.clone())
-        .collect();
-
     let result_mb = bridge::create_mailbox(py)?;
     let resume_mb = bridge::create_mailbox(py)?;
 
-    let sentinel_handles = bridge::install_sentinel_hooks(handle, &module_paths)?;
+    let sentinel_handles = bridge::install_sentinel_hooks(handle, &state.module_paths)?;
 
-    let active_probe_paths: Vec<String> = module_paths.clone();
     let (capture_handles, call_counts) = bridge::install_capture_hooks(
         py,
         handle,
-        &module_paths,
+        &state.module_paths,
         result_mb.bind(py),
         resume_mb.bind(py),
-        &active_probe_paths,
+        &state.module_paths,
     )?;
 
+    let completion_mb = result_mb.clone_ref(py);
     let done_callback = pyo3::types::PyCFunction::new_closure(
         py,
         None,
         None,
-        move |_args: &pyo3::Bound<'_, PyTuple>,
+        move |args: &pyo3::Bound<'_, PyTuple>,
               _kwargs: Option<&pyo3::Bound<'_, PyDict>>|
-              -> pyo3::PyResult<()> { Ok(()) },
+              -> pyo3::PyResult<()> {
+            let py = args.py();
+            let err_arg = args.get_item(0)?;
+            if !err_arg.is_none() {
+                tracing::error!("forward pass failed: {err_arg}");
+            }
+            let s: pyo3::Bound<'_, pyo3::types::PyAny> =
+                FORWARD_COMPLETE_SENTINEL.into_pyobject(py)?.into_any();
+            let z: pyo3::Bound<'_, pyo3::types::PyAny> = 0u32.into_pyobject(py)?.into_any();
+            let sentinel = PyTuple::new(py, [s, z])?;
+            completion_mb.bind(py).call_method1("put", (sentinel,))?;
+            Ok(())
+        },
     )?;
 
     bridge::run_forward(py, handle, done_callback.as_any())?;
@@ -290,6 +317,7 @@ fn ensure_forward_pass(
         sentinel_handles,
         capture_handles,
         call_counts: call_counts.into_py_any(py)?,
+        forward_complete: false,
     });
     Ok(())
 }
@@ -314,20 +342,16 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
         );
     }
 
-    let Some(ref component_map) = state.component_map else {
+    if state.component_map.is_none() {
         return internal_error(request.id.clone(), "No component map available".to_owned());
-    };
+    }
 
-    let granularity = req
-        .granularity
-        .unwrap_or(rocket_surgeon_protocol::types::TickGranularity::Component);
-
-    let component_map_clone = component_map.clone();
+    let plan = step_driver::plan_step(req.count, req.granularity);
 
     let resuming = state.forward_pass.is_some();
 
     match Python::with_gil(|py| -> anyhow::Result<HostStepResponse> {
-        ensure_forward_pass(py, state, handle, &component_map_clone)?;
+        ensure_forward_pass(py, state, handle)?;
 
         let fwd = state
             .forward_pass
@@ -344,6 +368,8 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
             resume_mb.call_method1("put", (py.None(),))?;
         }
 
+        let mut forward_complete = false;
+
         loop {
             let value = result_mb.call_method1("wait", (30.0,))?;
 
@@ -355,18 +381,28 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
 
             result_mb.call_method0("restore")?;
 
-            let component =
-                crate::step_driver::lookup_component(&component_map_clone, &path, call_index);
+            if path == FORWARD_COMPLETE_SENTINEL {
+                forward_complete = true;
+                break;
+            }
 
-            let (canonical, layer) = match component {
-                Some(c) => (c.canonical.clone(), c.layer_index.unwrap_or(0)),
-                None => (format!("_raw.{path}"), 0),
-            };
+            let (canonical, layer) =
+                if let Some(&idx) = state.component_index.get(&(path.clone(), call_index)) {
+                    let c = &state.component_map.as_ref().unwrap().components[idx];
+                    (c.canonical.clone(), c.layer_index.unwrap_or(0))
+                } else {
+                    tracing::warn!(
+                        path,
+                        call_index,
+                        "unrecognized module in forward pass, defaulting to layer 0"
+                    );
+                    (format!("_raw.{path}"), 0)
+                };
 
             state.tick_state.advance(&canonical, layer, call_index);
 
-            if granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
-                if crate::step_driver::is_layer_boundary(tracking_layer, layer) {
+            if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
+                if step_driver::is_layer_boundary(tracking_layer, layer) {
                     ticks_consumed += 1;
                 }
                 tracking_layer = Some(layer);
@@ -374,11 +410,17 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
                 ticks_consumed += 1;
             }
 
-            if ticks_consumed >= req.count {
+            if ticks_consumed >= plan.ticks_to_drain {
                 break;
             }
 
             resume_mb.call_method1("put", (py.None(),))?;
+        }
+
+        if forward_complete {
+            if let Some(fwd) = state.forward_pass.as_mut() {
+                fwd.forward_complete = true;
+            }
         }
 
         let position = state.tick_state.to_tick_position();
@@ -386,7 +428,7 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
         Ok(HostStepResponse {
             position,
             capture: None,
-            forward_complete: false,
+            forward_complete,
         })
     }) {
         Ok(resp) => match serde_json::to_value(resp) {

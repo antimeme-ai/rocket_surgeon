@@ -9,179 +9,28 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import os
 import subprocess
-import sysconfig
-import time
-from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TARGET_DIR = REPO_ROOT / "target" / "debug"
-PYTHON_DIR = REPO_ROOT / "python"
-
-DAEMON_BIN = TARGET_DIR / "rocket-surgeon"
-ORCHESTRATOR_BIN = TARGET_DIR / "rs-orchestrator"
-WORKER_BIN = TARGET_DIR / "rs-worker"
-
-TIMEOUT_SEC = 60
-MODEL_SOURCE = "hf-internal-testing/tiny-random-LlamaForCausalLM"
-MODEL_FAMILY = "llama"
-
-
-# ---------------------------------------------------------------------------
-# Content-Length framing helpers
-# ---------------------------------------------------------------------------
-
-
-def send_message(proc: subprocess.Popen, body: dict) -> None:
-    """Serialize *body* as JSON and send with Content-Length framing."""
-    payload = json.dumps(body).encode("utf-8")
-    header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
-    proc.stdin.write(header + payload)
-    proc.stdin.flush()
-
-
-def recv_message(proc: subprocess.Popen, timeout: float = TIMEOUT_SEC) -> dict:
-    """Read one Content-Length-framed JSON-RPC message from *proc.stdout*."""
-    deadline = time.monotonic() + timeout
-    content_length = None
-    while True:
-        if time.monotonic() > deadline:
-            raise TimeoutError("Timed out waiting for response header")
-        line = proc.stdout.readline()
-        if not line:
-            raise EOFError("Daemon stdout closed unexpectedly")
-        stripped = line.decode("utf-8", errors="replace").rstrip("\r\n")
-        if stripped == "":
-            break
-        if ":" in stripped:
-            key, value = stripped.split(":", 1)
-            if key.strip().lower() == "content-length":
-                content_length = int(value.strip())
-    if content_length is None:
-        raise ValueError("Missing Content-Length header")
-    body_bytes = b""
-    while len(body_bytes) < content_length:
-        if time.monotonic() > deadline:
-            raise TimeoutError("Timed out waiting for response body")
-        chunk = proc.stdout.read(content_length - len(body_bytes))
-        if not chunk:
-            raise EOFError("Daemon stdout closed while reading body")
-        body_bytes += chunk
-    return json.loads(body_bytes.decode("utf-8"))
-
-
-def make_request(method: str, params: dict | None = None, req_id: int = 1) -> dict:
-    """Build a JSON-RPC 2.0 request dict."""
-    msg: dict = {"jsonrpc": "2.0", "id": req_id, "method": method}
-    if params is not None:
-        msg["params"] = params
-    return msg
-
-
-def assert_jsonrpc(resp: dict, req_id: int) -> None:
-    """Validate JSON-RPC 2.0 envelope basics."""
-    assert resp.get("jsonrpc") == "2.0", f"Bad jsonrpc version: {resp.get('jsonrpc')}"
-    assert resp.get("id") == req_id, f"Expected id={req_id}, got {resp.get('id')}"
-
-
-def assert_session_id(resp: dict, expected: str) -> None:
-    """Validate session_id stability across responses."""
-    actual = resp["result"]["state"]["session_id"]
-    assert actual == expected, f"session_id drift: {expected} -> {actual}"
-
-
-def assert_envelope_fields(state: dict) -> None:
-    """Validate that the session state envelope has all required fields."""
-    required = {
-        "session_id": str,
-        "status": str,
-        "tick_id": int,
-        "available_actions": list,
-    }
-    for field, typ in required.items():
-        assert field in state, f"Missing envelope field: {field}"
-        assert isinstance(state[field], typ), (
-            f"Envelope field {field}: expected {typ.__name__}, got {type(state[field]).__name__}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Build helpers
-# ---------------------------------------------------------------------------
-
-
-def build_binaries() -> None:
-    """Build all workspace binaries."""
-    print("[build] Building workspace (excluding PyO3 crates)...")
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--workspace",
-            "--exclude",
-            "rocket-surgeon-python",
-            "--exclude",
-            "rocket-surgeon-worker",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-    )
-    print("[build] Building worker separately (PyO3 auto-initialize)...")
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
-    env = os.environ.copy()
-    env["DYLD_LIBRARY_PATH"] = python_libdir
-    env["LD_LIBRARY_PATH"] = python_libdir
-    subprocess.run(
-        ["cargo", "build", "-p", "rocket-surgeon-worker"],
-        cwd=REPO_ROOT,
-        check=True,
-        env=env,
-    )
-    for binary in (DAEMON_BIN, ORCHESTRATOR_BIN, WORKER_BIN):
-        if not binary.is_file():
-            raise FileNotFoundError(f"Expected binary not found: {binary}")
-    print("[build] All binaries built successfully.")
-
+from e2e_harness import (
+    MODEL_FAMILY,
+    MODEL_SOURCE,
+    assert_envelope_fields,
+    assert_jsonrpc,
+    assert_session_id,
+    build_binaries,
+    make_request,
+    recv_message,
+    send_message,
+    spawn_daemon,
+)
 
 # ---------------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------------
 
 
-def run_test() -> None:  # noqa: C901
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(PYTHON_DIR)
-    env["DYLD_LIBRARY_PATH"] = python_libdir
-    env["LD_LIBRARY_PATH"] = python_libdir
-
-    print(f"[env] PYTHONPATH={env['PYTHONPATH']}")
-    print(f"[env] DYLD_LIBRARY_PATH={env['DYLD_LIBRARY_PATH']}")
-    print(f"[env] DAEMON_BIN={DAEMON_BIN}")
-    print(f"[env] ORCHESTRATOR_BIN={ORCHESTRATOR_BIN}")
-    print(f"[env] WORKER_BIN={WORKER_BIN}")
-
-    proc = subprocess.Popen(
-        [
-            str(DAEMON_BIN),
-            "--orchestrator-bin",
-            str(ORCHESTRATOR_BIN),
-            "--worker-bin",
-            str(WORKER_BIN),
-            "--log-level",
-            "debug",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=None,
-        env=env,
-    )
+def run_test() -> None:  # noqa: PLR0915
+    proc = spawn_daemon()
 
     try:
         # ------------------------------------------------------------------
@@ -350,9 +199,7 @@ def run_test() -> None:  # noqa: C901
         assert_jsonrpc(resp, 6)
         assert resp.get("error") is None, f"Step error: {resp.get('error')}"
         data_6 = resp["result"]["data"]
-        assert data_6["ticks_executed"] == 3, (
-            f"Expected 3 ticks, got: {data_6['ticks_executed']}"
-        )
+        assert data_6["ticks_executed"] == 3, f"Expected 3 ticks, got: {data_6['ticks_executed']}"
         tick_after_multi = resp["result"]["state"]["tick_id"]
         assert tick_after_multi > tick_3, "tick_id must advance after multi-step"
         print(f"  ticks_executed: {data_6['ticks_executed']}")
@@ -389,7 +236,7 @@ def run_test() -> None:  # noqa: C901
         print("  PASS")
 
         # ------------------------------------------------------------------
-        # Step 8: backward step → CAPABILITY_NOT_SUPPORTED
+        # Step 8: backward step -> CAPABILITY_NOT_SUPPORTED
         # ------------------------------------------------------------------
         print("\n[test] Step 8: backward step returns error")
         send_message(
@@ -421,15 +268,130 @@ def run_test() -> None:  # noqa: C901
         print("  PASS")
 
         # ------------------------------------------------------------------
-        # Step 9: detach
+        # Step 9: 10-step tick_id uniqueness
         # ------------------------------------------------------------------
-        print("\n[test] Step 9: detach")
-        send_message(proc, make_request("detach", {}, req_id=9))
+        print("\n[test] Step 9: 10-step tick_id uniqueness")
+        tick_ids: list[int] = []
+        for i in range(10):
+            send_message(
+                proc,
+                make_request(
+                    "rocket/step",
+                    {
+                        "direction": "forward",
+                        "count": 1,
+                        "granularity": "component",
+                    },
+                    req_id=100 + i,
+                ),
+            )
+            resp = recv_message(proc)
+            assert_jsonrpc(resp, 100 + i)
+            assert resp.get("error") is None, f"Step {i} error: {resp.get('error')}"
+            tick_ids.append(resp["result"]["state"]["tick_id"])
+        assert len(tick_ids) == len(set(tick_ids)), (
+            f"tick_ids must all be unique, got duplicates: {tick_ids}"
+        )
+        print(f"  collected {len(tick_ids)} tick_ids, all unique: OK")
+        print("  PASS")
+
+        # ------------------------------------------------------------------
+        # Step 10: layer advances across layer-granularity steps
+        # (detach + re-attach for a fresh forward pass — the tiny model
+        # only has 2 layers, so the prior 22+ ticks have wrapped around)
+        # ------------------------------------------------------------------
+        print("\n[test] Step 10: layer advances across layer-granularity steps")
+        send_message(proc, make_request("detach", {}, req_id=190))
         resp = recv_message(proc)
-        assert_jsonrpc(resp, 9)
+        assert_jsonrpc(resp, 190)
+        assert resp.get("error") is None, f"Pre-layer detach error: {resp.get('error')}"
+
+        send_message(
+            proc,
+            make_request(
+                "attach",
+                {
+                    "model_path": MODEL_SOURCE,
+                    "model_family": MODEL_FAMILY,
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
+                req_id=191,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 191)
+        assert resp.get("error") is None, f"Pre-layer re-attach error: {resp.get('error')}"
+
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {
+                    "direction": "forward",
+                    "count": 1,
+                    "granularity": "layer",
+                },
+                req_id=200,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 200)
+        assert resp.get("error") is None, f"Layer step A error: {resp.get('error')}"
+        layer_a = resp["result"]["data"]["stopped_at"]["layer"]
+
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {
+                    "direction": "forward",
+                    "count": 1,
+                    "granularity": "layer",
+                },
+                req_id=201,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 201)
+        assert resp.get("error") is None, f"Layer step B error: {resp.get('error')}"
+        layer_b = resp["result"]["data"]["stopped_at"]["layer"]
+        assert layer_b != layer_a, f"Layer must change: layer_a={layer_a}, layer_b={layer_b}"
+        print(f"  layer_a={layer_a}, layer_b={layer_b} (changed: OK)")
+        print("  PASS")
+
+        # ------------------------------------------------------------------
+        # Step 11: detach
+        # ------------------------------------------------------------------
+        print("\n[test] Step 11: detach")
+        send_message(proc, make_request("detach", {}, req_id=300))
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 300)
         assert resp.get("error") is None, f"Detach error: {resp.get('error')}"
         assert resp["result"]["state"]["status"] == "initialized"
         assert_session_id(resp, session_id)
+        print("  PASS")
+
+        # ------------------------------------------------------------------
+        # Step 12: step before attach returns error
+        # ------------------------------------------------------------------
+        print("\n[test] Step 12: step before attach returns error")
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {
+                    "direction": "forward",
+                    "count": 1,
+                    "granularity": "component",
+                },
+                req_id=301,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 301)
+        assert resp.get("error") is not None, "Expected error when stepping without attach"
+        print(f"  error: {resp['error']['message']}")
         print("  PASS")
 
     finally:
@@ -446,7 +408,9 @@ def run_test() -> None:  # noqa: C901
     print("\n" + "=" * 60)
     print("PASS — e2e stepping")
     print("  initialize -> attach -> step x3 (monotonicity)")
-    print("  -> step count=3 -> step layer -> backward error -> detach")
+    print("  -> step count=3 -> step layer -> backward error")
+    print("  -> 10-step uniqueness -> layer advances -> detach")
+    print("  -> step-before-attach error")
     print("=" * 60)
 
 
