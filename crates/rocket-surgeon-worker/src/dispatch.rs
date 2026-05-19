@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+use rocket_surgeon_probes::grammar::{
+    ComponentOrWild, ComponentSeg, NameOrWild, NumOrWild, ProbePoint,
+};
 use rocket_surgeon_protocol::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RequestId, Response, RpcError,
 };
@@ -10,7 +13,7 @@ use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
     CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
     HostDetachResponse, HostInspectRequest, HostInspectResponse, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse,
+    HostUpdateProbesRequest, HostUpdateProbesResponse, ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -278,6 +281,58 @@ fn handle_host_configure_hooks(request: &Request) -> Response {
 
 const FORWARD_COMPLETE_SENTINEL: &str = "__forward_complete__";
 
+fn build_tick_probe_point(
+    model_family: &str,
+    rank: u32,
+    layer: u32,
+    canonical: &str,
+    call_index: u32,
+) -> ProbePoint {
+    ProbePoint {
+        model: NameOrWild::Name(model_family.to_owned()),
+        rank: NumOrWild::Num(rank),
+        layer: NumOrWild::Num(layer),
+        component: ComponentOrWild::Path(vec![ComponentSeg::Named(canonical.to_owned())]),
+        call_index: NumOrWild::Num(call_index),
+        event: NameOrWild::Name("fwd".to_owned()),
+    }
+}
+
+fn evaluate_probes(
+    state: &WorkerState,
+    current_point: &ProbePoint,
+    remaining_budget: u32,
+) -> (Vec<ProbeFiredEvent>, bool) {
+    let mut events = Vec::new();
+    let mut truncated = false;
+
+    for (def, pattern) in &state.active_probes {
+        if !pattern.matches(current_point) {
+            continue;
+        }
+        if events.len() >= remaining_budget as usize {
+            truncated = true;
+            break;
+        }
+
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+
+        let event = ProbeFiredEvent {
+            probe_id: def.id.clone(),
+            point: current_point.to_string(),
+            tick_id: state.tick_state.tick_id(),
+            tensor_summary: None,
+            action: def.action,
+            timestamp: format!("{}", d.as_secs()),
+        };
+        events.push(event);
+    }
+
+    (events, truncated)
+}
+
 fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> anyhow::Result<()> {
     if state.forward_pass.is_some() {
         return Ok(());
@@ -387,100 +442,124 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
         return internal_error(request.id.clone(), "No component map available".to_owned());
     }
 
-    let plan = step_driver::plan_step(req.count, req.granularity);
-
-    let resuming = state.forward_pass.is_some();
-
-    match Python::with_gil(|py| -> anyhow::Result<HostStepResponse> {
-        ensure_forward_pass(py, state, handle)?;
-
-        let fwd = state
-            .forward_pass
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("forward pass not initialized"))?;
-        let result_mb = fwd.result_mailbox.bind(py);
-        let resume_mb = fwd.resume_mailbox.bind(py);
-
-        let mut ticks_consumed = 0u32;
-        let current_layer = state.tick_state.to_tick_position().layer;
-        let mut tracking_layer = if resuming { Some(current_layer) } else { None };
-
-        if resuming {
-            resume_mb.call_method1("put", (py.None(),))?;
-        }
-
-        let mut forward_complete = false;
-
-        loop {
-            let value = result_mb.call_method1("wait", (30.0,))?;
-
-            let tuple = value
-                .downcast::<PyTuple>()
-                .map_err(|e| anyhow::anyhow!("expected tuple from mailbox, got: {e}"))?;
-            let path: String = tuple.get_item(0)?.extract()?;
-            let call_index: u32 = tuple.get_item(1)?.extract()?;
-
-            stash_tensor_output(py, state.last_outputs.as_ref(), &path, call_index, tuple)?;
-
-            result_mb.call_method0("restore")?;
-
-            if path == FORWARD_COMPLETE_SENTINEL {
-                forward_complete = true;
-                break;
-            }
-
-            let (canonical, layer) =
-                if let Some(&idx) = state.component_index.get(&(path.clone(), call_index)) {
-                    let c = &state.component_map.as_ref().unwrap().components[idx];
-                    (c.canonical.clone(), c.layer_index.unwrap_or(0))
-                } else {
-                    tracing::warn!(
-                        path,
-                        call_index,
-                        "unrecognized module in forward pass, defaulting to layer 0"
-                    );
-                    (format!("_raw.{path}"), 0)
-                };
-
-            state.tick_state.advance(&canonical, layer, call_index);
-
-            if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
-                if step_driver::is_layer_boundary(tracking_layer, layer) {
-                    ticks_consumed += 1;
-                }
-                tracking_layer = Some(layer);
-            } else {
-                ticks_consumed += 1;
-            }
-
-            if ticks_consumed >= plan.ticks_to_drain {
-                break;
-            }
-
-            resume_mb.call_method1("put", (py.None(),))?;
-        }
-
-        if forward_complete {
-            if let Some(fwd) = state.forward_pass.as_mut() {
-                fwd.forward_complete = true;
-            }
-        }
-
-        let position = state.tick_state.to_tick_position();
-
-        Ok(HostStepResponse {
-            position,
-            events: vec![],
-            forward_complete,
-            events_truncated: false,
-        })
-    }) {
+    match Python::with_gil(|py| run_step_loop(py, state, handle, &req)) {
         Ok(resp) => match serde_json::to_value(resp) {
             Ok(value) => Response::success(request.id.clone(), value),
             Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
         },
         Err(e) => internal_error(request.id.clone(), format!("step failed: {e}")),
     }
+}
+
+fn run_step_loop(
+    py: Python<'_>,
+    state: &mut WorkerState,
+    handle: u64,
+    req: &HostStepRequest,
+) -> anyhow::Result<HostStepResponse> {
+    let plan = step_driver::plan_step(req.count, req.granularity);
+    let resuming = state.forward_pass.is_some();
+
+    ensure_forward_pass(py, state, handle)?;
+
+    let fwd = state
+        .forward_pass
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("forward pass not initialized"))?;
+    let result_mb = fwd.result_mailbox.bind(py);
+    let resume_mb = fwd.resume_mailbox.bind(py);
+
+    let mut ticks_consumed = 0u32;
+    let current_layer = state.tick_state.to_tick_position().layer;
+    let mut tracking_layer = if resuming { Some(current_layer) } else { None };
+
+    if resuming {
+        resume_mb.call_method1("put", (py.None(),))?;
+    }
+
+    let mut forward_complete = false;
+    let mut all_events: Vec<ProbeFiredEvent> = Vec::new();
+    let mut all_events_truncated = false;
+    let max_events = req.max_events.unwrap_or(256);
+
+    loop {
+        let value = result_mb.call_method1("wait", (30.0,))?;
+
+        let tuple = value
+            .downcast::<PyTuple>()
+            .map_err(|e| anyhow::anyhow!("expected tuple from mailbox, got: {e}"))?;
+        let path: String = tuple.get_item(0)?.extract()?;
+        let call_index: u32 = tuple.get_item(1)?.extract()?;
+
+        stash_tensor_output(py, state.last_outputs.as_ref(), &path, call_index, tuple)?;
+
+        result_mb.call_method0("restore")?;
+
+        if path == FORWARD_COMPLETE_SENTINEL {
+            forward_complete = true;
+            break;
+        }
+
+        let (canonical, layer) =
+            if let Some(&idx) = state.component_index.get(&(path.clone(), call_index)) {
+                let c = &state.component_map.as_ref().unwrap().components[idx];
+                (c.canonical.clone(), c.layer_index.unwrap_or(0))
+            } else {
+                tracing::warn!(
+                    path,
+                    call_index,
+                    "unrecognized module in forward pass, defaulting to layer 0"
+                );
+                (format!("_raw.{path}"), 0)
+            };
+
+        state.tick_state.advance(&canonical, layer, call_index);
+
+        if !all_events_truncated && !state.active_probes.is_empty() {
+            let family = state
+                .component_map
+                .as_ref()
+                .map_or("unknown", |m| m.model_family.as_str());
+            let current_point =
+                build_tick_probe_point(family, state.rank, layer, &canonical, call_index);
+            let budget = max_events.saturating_sub(all_events.len() as u32);
+            let (new_events, trunc) = evaluate_probes(state, &current_point, budget);
+            all_events.extend(new_events);
+            if trunc {
+                all_events_truncated = true;
+            }
+        }
+
+        if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
+            if step_driver::is_layer_boundary(tracking_layer, layer) {
+                ticks_consumed += 1;
+            }
+            tracking_layer = Some(layer);
+        } else {
+            ticks_consumed += 1;
+        }
+
+        if ticks_consumed >= plan.ticks_to_drain {
+            break;
+        }
+
+        resume_mb.call_method1("put", (py.None(),))?;
+    }
+
+    if forward_complete {
+        if let Some(fwd) = state.forward_pass.as_mut() {
+            fwd.forward_complete = true;
+        }
+    }
+
+    let position = state.tick_state.to_tick_position();
+
+    Ok(HostStepResponse {
+        position,
+        events: all_events,
+        forward_complete,
+        events_truncated: all_events_truncated,
+    })
 }
 
 fn handle_host_update_probes(state: &mut WorkerState, request: &Request) -> Response {
