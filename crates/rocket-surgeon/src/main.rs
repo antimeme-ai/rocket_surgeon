@@ -11,10 +11,11 @@ use std::io::{self, BufReader};
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use crate::dispatch::{dispatch, handle_step};
+use crate::dispatch::{dispatch, handle_inspect, handle_step};
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
+use crate::tensor_store::TensorStore;
 use crate::trace_log::{Direction, TraceLog};
 
 use rocket_surgeon_protocol::messages::{AttachRequest, HostAttachRequest, method};
@@ -142,6 +143,33 @@ fn try_orchestrator_step(
     }
 }
 
+/// Try to inspect via the orchestrator. Returns `Some(HostInspectResponse)` on success.
+fn try_orchestrator_inspect(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Option<rocket_surgeon_protocol::messages::HostInspectResponse> {
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+    let inspect_req: rocket_surgeon_protocol::messages::InspectRequest = request
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p.clone()).ok())?;
+
+    let host_req = rocket_surgeon_protocol::messages::HostInspectRequest {
+        model_handle: mh,
+        target: inspect_req.target,
+        detail: inspect_req.detail,
+        slices: inspect_req.slices,
+    };
+    match orch.inspect(&host_req) {
+        Ok(hr) => Some(hr),
+        Err(e) => {
+            warn!("orchestrator inspect failed: {e}");
+            None
+        }
+    }
+}
+
 /// Send `_host/detach` to the orchestrator and drop it.
 fn detach_orchestrator(
     orchestrator: &mut Option<OrchestratorHandle>,
@@ -178,6 +206,7 @@ fn main() {
     let worker_bin = cli.worker_bin.or_else(|| find_sibling_binary("rs-worker"));
 
     let mut session = Session::new();
+    let mut tensor_store = TensorStore::new();
     let mut trace_log = TraceLog::new();
     let mut reader = BufReader::new(io::stdin().lock());
     let mut writer = io::stdout().lock();
@@ -219,6 +248,14 @@ fn main() {
         let response = if request.method == method::STEP {
             let host_response = try_orchestrator_step(&mut orchestrator, model_handle, &request);
             handle_step(&mut session, &request, host_response.as_ref())
+        } else if request.method == method::INSPECT {
+            let host_response = try_orchestrator_inspect(&mut orchestrator, model_handle, &request);
+            handle_inspect(
+                &session,
+                &request,
+                host_response.as_ref(),
+                &mut tensor_store,
+            )
         } else {
             dispatch(&mut session, &request)
         };
