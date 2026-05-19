@@ -189,6 +189,18 @@ fn handle_inspect_no_store(session: &Session, request: &Request) -> Response {
     )
 }
 
+fn read_from_shm(
+    consumer: Option<&rocket_surgeon_shm::ring::DoomRingConsumer>,
+    shm_offset: u64,
+    byte_length: u64,
+) -> Result<Vec<u8>, String> {
+    let consumer = consumer.ok_or("shm consumer not available")?;
+    let data_start = shm_offset as usize + rocket_surgeon_shm::PROBE_FRAME_HEADER_SIZE;
+    consumer
+        .read_absolute(data_start, byte_length as usize)
+        .map_err(|e| format!("shm read at offset {data_start}: {e}"))
+}
+
 fn parse_dtype(s: &str) -> Option<DType> {
     match s {
         "float16" => Some(DType::Float16),
@@ -210,6 +222,7 @@ pub fn handle_inspect(
     request: &Request,
     host_response: Option<&rocket_surgeon_protocol::messages::HostInspectResponse>,
     store: &mut TensorStore,
+    shm_consumer: Option<&rocket_surgeon_shm::ring::DoomRingConsumer>,
 ) -> Response {
     let req: InspectRequest = match parse_params(request) {
         Ok(r) => r,
@@ -252,47 +265,23 @@ pub fn handle_inspect(
         );
     }
 
-    ingest_and_respond(session, request, &req, captured, store)
+    ingest_and_respond(session, request, &req, captured, store, shm_consumer)
 }
 
+#[allow(clippy::too_many_lines)]
 fn ingest_and_respond(
     session: &Session,
     request: &Request,
     req: &InspectRequest,
     captured: &[rocket_surgeon_protocol::messages::CapturedTensor],
     store: &mut TensorStore,
+    shm_consumer: Option<&rocket_surgeon_shm::ring::DoomRingConsumer>,
 ) -> Response {
     let engine = base64::engine::general_purpose::STANDARD;
     let mut summaries = Vec::new();
     let mut first_tensor_id = None;
 
     for ct in captured {
-        let bytes = match &ct.data_base64 {
-            Some(b64) => match engine.decode(b64) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Response::error(
-                        request.id.clone(),
-                        RpcError {
-                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
-                            message: format!("base64 decode failed: {e}"),
-                            data: None,
-                        },
-                    );
-                }
-            },
-            None => {
-                return Response::error(
-                    request.id.clone(),
-                    RpcError {
-                        code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
-                        message: "CapturedTensor has neither data_base64 nor shm_offset".into(),
-                        data: None,
-                    },
-                );
-            }
-        };
-
         let Some(dtype) = parse_dtype(&ct.dtype) else {
             return Response::error(
                 request.id.clone(),
@@ -304,7 +293,52 @@ fn ingest_and_respond(
             );
         };
 
-        let handle = store.insert(bytes, ct.shape.clone(), dtype, ct.device.clone());
+        let handle = if let (Some(shm_offset), Some(byte_length)) = (ct.shm_offset, ct.byte_length)
+        {
+            match read_from_shm(shm_consumer, shm_offset, byte_length) {
+                Ok(bytes) => store.insert_with_id(
+                    ct.tensor_id.clone(),
+                    bytes,
+                    ct.shape.clone(),
+                    dtype,
+                    ct.device.clone(),
+                ),
+                Err(e) => {
+                    return Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("shm read failed: {e}"),
+                            data: None,
+                        },
+                    );
+                }
+            }
+        } else if let Some(ref b64) = ct.data_base64 {
+            match engine.decode(b64) {
+                Ok(bytes) => store.insert(bytes, ct.shape.clone(), dtype, ct.device.clone()),
+                Err(e) => {
+                    return Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("base64 decode failed: {e}"),
+                            data: None,
+                        },
+                    );
+                }
+            }
+        } else {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: "CapturedTensor has neither shm_offset nor data_base64".into(),
+                    data: None,
+                },
+            );
+        };
+
         if first_tensor_id.is_none() {
             first_tensor_id = Some(handle.tensor_id.clone());
         }
@@ -842,7 +876,7 @@ mod tests {
                 "detail": "summary"
             }),
         );
-        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store, None);
         assert!(
             resp.error.is_none(),
             "Expected success, got: {:?}",
@@ -870,7 +904,7 @@ mod tests {
                 "detail": "summary"
             }),
         );
-        let resp = handle_inspect(&session, &req, None, &mut store);
+        let resp = handle_inspect(&session, &req, None, &mut store, None);
         assert!(resp.error.is_some());
     }
 
@@ -908,7 +942,7 @@ mod tests {
                 "slices": [[0, 8]]
             }),
         );
-        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store, None);
         assert!(
             resp.error.is_none(),
             "Expected success, got: {:?}",
@@ -934,7 +968,7 @@ mod tests {
                 "detail": "summary"
             }),
         );
-        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store, None);
         assert!(resp.error.is_some());
         let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
         assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);
@@ -973,7 +1007,7 @@ mod tests {
                 "slices": [[0, 999_999_999]]
             }),
         );
-        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store, None);
         assert!(resp.error.is_some());
         let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
         assert_eq!(err_data.error_code, ErrorCode::SliceOutOfBounds);
@@ -993,7 +1027,7 @@ mod tests {
                 "detail": "summary"
             }),
         );
-        let resp = handle_inspect(&session, &req, None, &mut store);
+        let resp = handle_inspect(&session, &req, None, &mut store, None);
         assert!(resp.error.is_some());
         let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
         assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);

@@ -71,7 +71,7 @@ fn spawn_and_attach(
     orchestrator_bin: Option<&str>,
     worker_bin: Option<&str>,
     log_level: &str,
-) -> Option<(OrchestratorHandle, u64)> {
+) -> Option<(OrchestratorHandle, u64, Option<String>)> {
     let params = request.params.as_ref()?;
     let attach_req: AttachRequest = match serde_json::from_value(params.clone()) {
         Ok(r) => r,
@@ -113,7 +113,7 @@ fn spawn_and_attach(
                 module_count = host_resp.module_tree.len(),
                 "orchestrator attached model"
             );
-            Some((orch, host_resp.model_handle))
+            Some((orch, host_resp.model_handle, host_resp.shm_name))
         }
         Err(e) => {
             warn!("orchestrator attach failed: {e}");
@@ -398,6 +398,7 @@ fn main() {
     let mut writer = io::stdout().lock();
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
+    let mut shm_consumer: Option<rocket_surgeon_shm::ring::DoomRingConsumer> = None;
     let mut probe_registry = ProbeRegistry::new();
     let mut granularity_scopes: Vec<GranularityScope> = Vec::new();
     let mut events_enabled = false;
@@ -495,6 +496,7 @@ fn main() {
                     &request,
                     host_response.as_ref(),
                     &mut tensor_store,
+                    shm_consumer.as_ref(),
                 ),
                 Err(err_response) => *err_response,
             }
@@ -531,7 +533,7 @@ fn main() {
         };
 
         if response.error.is_none() && request.method == method::ATTACH {
-            if let Some((orch, handle)) = spawn_and_attach(
+            if let Some((orch, handle, worker_shm_name)) = spawn_and_attach(
                 &request,
                 orchestrator_bin.as_deref(),
                 worker_bin.as_deref(),
@@ -539,6 +541,18 @@ fn main() {
             ) {
                 orchestrator = Some(orch);
                 model_handle = Some(handle);
+                shm_consumer = worker_shm_name.and_then(|name| {
+                    match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
+                        Ok(c) => {
+                            info!(shm_name = %name, "opened shared memory ring buffer");
+                            Some(c)
+                        }
+                        Err(e) => {
+                            warn!("failed to open shm ring '{name}', using base64: {e}");
+                            None
+                        }
+                    }
+                });
             }
         }
 
