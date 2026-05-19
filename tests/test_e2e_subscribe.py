@@ -31,7 +31,9 @@ def assert_notification(msg: dict, method: str) -> None:
     assert "id" not in msg, f"Notification must not have 'id', got {msg.get('id')}"
     assert msg.get("method") == method, f"Expected method={method}, got {msg.get('method')}"
     assert "params" in msg, "Notification missing 'params'"
-    assert isinstance(msg["params"].get("seq"), int), f"Missing or non-int seq: {msg['params'].get('seq')}"
+    assert isinstance(msg["params"].get("seq"), int), (
+        f"Missing or non-int seq: {msg['params'].get('seq')}"
+    )
 
 
 def recv_response(proc: subprocess.Popen, req_id: int, timeout: float = TIMEOUT_SEC) -> dict:
@@ -49,11 +51,10 @@ def try_recv_notification(proc: subprocess.Popen, timeout: float = 2.0) -> dict 
     """Try to read a notification within timeout. Returns None on timeout."""
     try:
         msg = recv_message(proc, timeout=timeout)
-        if "id" not in msg:
-            return msg
-        return msg  # unexpected response — return it anyway for debugging
     except (TimeoutError, EOFError):
         return None
+    else:
+        return msg
 
 
 def run_test() -> None:  # noqa: PLR0915
@@ -62,7 +63,14 @@ def run_test() -> None:  # noqa: PLR0915
     try:
         # Step 1: initialize
         print("\n[test] Step 1: initialize")
-        send_message(proc, make_request("initialize", {"client_name": "e2e-subscribe-test", "protocol_version": "0.1.0"}, req_id=1))
+        send_message(
+            proc,
+            make_request(
+                "initialize",
+                {"client_name": "e2e-subscribe-test", "protocol_version": "0.1.0"},
+                req_id=1,
+            ),
+        )
         resp = recv_message(proc)
         assert_jsonrpc(resp, 1)
         assert resp.get("error") is None, f"Initialize error: {resp.get('error')}"
@@ -70,7 +78,19 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 2: attach
         print("\n[test] Step 2: attach")
-        send_message(proc, make_request("attach", {"model_path": MODEL_SOURCE, "model_family": MODEL_FAMILY, "device": "cpu", "num_ranks": 1}, req_id=2))
+        send_message(
+            proc,
+            make_request(
+                "attach",
+                {
+                    "model_path": MODEL_SOURCE,
+                    "model_family": MODEL_FAMILY,
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
+                req_id=2,
+            ),
+        )
         resp = recv_message(proc)
         assert_jsonrpc(resp, 2)
         assert resp.get("error") is None, f"Attach error: {resp.get('error')}"
@@ -78,7 +98,14 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 3: step without subscribe — no notifications
         print("\n[test] Step 3: step without subscribe (no notifications expected)")
-        send_message(proc, make_request("rocket/step", {"direction": "forward", "count": 1, "granularity": "component"}, req_id=3))
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {"direction": "forward", "count": 1, "granularity": "component"},
+                req_id=3,
+            ),
+        )
         resp = recv_message(proc)
         assert_jsonrpc(resp, 3)
         assert resp.get("error") is None
@@ -101,7 +128,14 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 5: step with subscribe — expect tick.stopped notification
         print("\n[test] Step 5: step with events enabled")
-        send_message(proc, make_request("rocket/step", {"direction": "forward", "count": 1, "granularity": "component"}, req_id=5))
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {"direction": "forward", "count": 1, "granularity": "component"},
+                req_id=5,
+            ),
+        )
         resp = recv_response(proc, 5)
         assert_jsonrpc(resp, 5)
         assert resp.get("error") is None
@@ -123,7 +157,14 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 7: step again — verify seq is monotonically increasing
         print("\n[test] Step 7: step again, check monotonic seq")
-        send_message(proc, make_request("rocket/step", {"direction": "forward", "count": 1, "granularity": "component"}, req_id=7))
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {"direction": "forward", "count": 1, "granularity": "component"},
+                req_id=7,
+            ),
+        )
         resp = recv_response(proc, 7)
         assert_jsonrpc(resp, 7)
         assert resp.get("error") is None
@@ -147,7 +188,14 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 9: step after unsubscribe — no notifications
         print("\n[test] Step 9: step after unsubscribe (no notifications)")
-        send_message(proc, make_request("rocket/step", {"direction": "forward", "count": 1, "granularity": "component"}, req_id=9))
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {"direction": "forward", "count": 1, "granularity": "component"},
+                req_id=9,
+            ),
+        )
         resp = recv_message(proc)
         assert_jsonrpc(resp, 9)
         assert resp.get("error") is None
@@ -195,7 +243,14 @@ def run_test() -> None:  # noqa: PLR0915
 
         # Step 12: notification wire format check
         print("\n[test] Step 12: notification wire format")
-        send_message(proc, make_request("rocket/step", {"direction": "forward", "count": 1, "granularity": "component"}, req_id=12))
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {"direction": "forward", "count": 1, "granularity": "component"},
+                req_id=12,
+            ),
+        )
         resp = recv_response(proc, 12)
         assert_jsonrpc(resp, 12)
 

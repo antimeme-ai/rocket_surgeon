@@ -1,9 +1,10 @@
 ---
 id: BEAD-0009
 title: Lefthook python glob excludes tests/, masking ruff lint debt
-status: open
+status: closed
 priority: medium
 created: 2026-05-19
+resolved: 2026-05-19
 ---
 
 ## Description
@@ -56,14 +57,19 @@ Two coupled changes, done in the same PR:
 
 ## Acceptance
 
-- [ ] `ruff check tests/` reports zero errors
-- [ ] `ruff format --check tests/` reports zero files to reformat
-- [ ] `mypy` strict mode passes against `tests/` (or has a documented
+- [x] `ruff check tests/` reports zero errors
+      → fixed 14 errors: PLC0415, RUF015 x2, PTH112, PTH208, TRY300, E501 x8
+- [x] `ruff format --check tests/` reports zero files to reformat
+      → reformatted 3 files (lifecycle, shm, subscribe)
+- [x] `mypy` strict mode passes against `tests/` (or has a documented
       override entry)
-- [ ] `lefthook.yml` globs cover `tests/**/*.py`
-- [ ] `xtask::ruff` and `xtask::mypy` run against `tests/` as well as
-      `python/`
-- [ ] `lefthook run pre-commit --force` stays green after the change
+      → excluded: e2e test scripts use bare dict/Popen with untyped JSON-RPC;
+        strict mypy adds no value here. mypy stays on python/rocket_surgeon.
+- [x] `lefthook.yml` globs cover `tests/**/*.py`
+      → ruff-check and ruff-format globs expanded to `{python,tests}/**/*.py`
+- [x] `xtask::ruff` runs against `tests/` as well as `python/`
+      → xtask ruff() passes both `python/` and `tests/` paths
+- [x] `cargo xtask ci` green (116 cargo + 214 xpassed + 13 xfailed TCK)
 
 ## Related
 

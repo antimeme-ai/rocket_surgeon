@@ -27,11 +27,11 @@ pre-commit:
       # interpreter regardless of whether the shell that ran git is activated.
       run: PATH="$PWD/.venv/bin:$PATH" cargo clippy --workspace --all-targets -- -D warnings
     python-ruff-check:
-      glob: "python/**/*.py"
-      run: .venv/bin/ruff check python/
+      glob: "{python,tests}/**/*.py"
+      run: .venv/bin/ruff check python/ tests/
     python-ruff-format:
-      glob: "python/**/*.py"
-      run: .venv/bin/ruff format --check python/
+      glob: "{python,tests}/**/*.py"
+      run: .venv/bin/ruff format --check python/ tests/
     python-mypy:
       glob: "python/**/*.py"
       run: .venv/bin/mypy python/rocket_surgeon

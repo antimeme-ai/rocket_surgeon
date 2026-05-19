@@ -136,7 +136,7 @@ def run_test() -> None:  # noqa: PLR0915
         assert_jsonrpc(resp, 6)
         assert resp.get("error") is None
         probes = resp["result"]["data"]["probes"]
-        p1 = [p for p in probes if p["id"] == "p-cap-1"][0]
+        p1 = next(p for p in probes if p["id"] == "p-cap-1")
         assert p1["enabled"] is False, f"Expected disabled, got {p1['enabled']}"
         print("  PASS")
 
@@ -154,7 +154,7 @@ def run_test() -> None:  # noqa: PLR0915
         assert_jsonrpc(resp, 7)
         assert resp.get("error") is None
         probes = resp["result"]["data"]["probes"]
-        p1 = [p for p in probes if p["id"] == "p-cap-1"][0]
+        p1 = next(p for p in probes if p["id"] == "p-cap-1")
         assert p1["enabled"] is True
         print("  PASS")
 

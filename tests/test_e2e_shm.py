@@ -11,8 +11,8 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import subprocess
+from pathlib import Path
 
 from e2e_harness import (
     MODEL_FAMILY,
@@ -180,11 +180,8 @@ def run_test() -> None:  # noqa: PLR0915
         assert resp.get("error") is None, f"detach error: {resp.get('error')}"
         assert resp["result"]["state"]["status"] == "initialized"
 
-        if os.path.isdir("/dev/shm"):
-            rs_regions = [
-                f for f in os.listdir("/dev/shm")
-                if f.startswith("rs-")
-            ]
+        if Path("/dev/shm").is_dir():
+            rs_regions = [f.name for f in Path("/dev/shm").iterdir() if f.name.startswith("rs-")]
             assert len(rs_regions) == 0, f"stale shm regions found: {rs_regions}"
             print("  /dev/shm clean — no stale rs- regions")
         else:
