@@ -1,8 +1,13 @@
+use base64::Engine;
+use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
-use rocket_surgeon_protocol::messages::{AttachRequest, InitializeRequest, StepRequest, method};
-use rocket_surgeon_protocol::types::{StepDirection, TickEvent, TickPosition};
+use rocket_surgeon_protocol::messages::{
+    AttachRequest, InitializeRequest, InspectRequest, StepRequest, method,
+};
+use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
 
 use crate::session::{Session, SessionError};
+use crate::tensor_store::TensorStore;
 
 fn session_error_to_response(id: RequestId, err: &SessionError) -> Response {
     let rpc_error = RpcError::from_error_data(err.error_data().clone());
@@ -30,8 +35,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::DETACH => handle_detach(session, request),
         method::STATUS => handle_status(session, request),
         method::STEP => handle_step(session, request, None),
-        method::INSPECT
-        | method::INTERVENE
+        method::INSPECT => handle_inspect_no_store(session, request),
+        method::INTERVENE
         | method::PROBE
         | method::CHECKPOINT
         | method::REPLAY
@@ -167,6 +172,175 @@ fn handle_stub_requires_stopped(session: &Session, request: &Request) -> Respons
     )
 }
 
+fn handle_inspect_no_store(session: &Session, request: &Request) -> Response {
+    if let Err(e) = session.require_stopped(&request.method) {
+        return session_error_to_response(request.id.clone(), &e);
+    }
+    Response::error(
+        request.id.clone(),
+        RpcError::from_error_data(ErrorData::new(
+            ErrorCode::TensorNotFound,
+            "No orchestrator available to capture tensors",
+        )),
+    )
+}
+
+#[allow(dead_code)]
+fn parse_dtype(s: &str) -> Option<DType> {
+    match s {
+        "float16" => Some(DType::Float16),
+        "bfloat16" => Some(DType::Bfloat16),
+        "float32" => Some(DType::Float32),
+        "float64" => Some(DType::Float64),
+        "int8" => Some(DType::Int8),
+        "int16" => Some(DType::Int16),
+        "int32" => Some(DType::Int32),
+        "int64" => Some(DType::Int64),
+        "uint8" => Some(DType::Uint8),
+        "bool" => Some(DType::Bool),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+pub fn handle_inspect(
+    session: &Session,
+    request: &Request,
+    host_response: Option<&rocket_surgeon_protocol::messages::HostInspectResponse>,
+    store: &mut TensorStore,
+) -> Response {
+    let req: InspectRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/inspect") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let captured = match host_response {
+        Some(hr) => &hr.tensors,
+        None => {
+            return Response::error(
+                request.id.clone(),
+                RpcError::from_error_data(ErrorData::new(
+                    ErrorCode::TensorNotFound,
+                    "No orchestrator available to capture tensors",
+                )),
+            );
+        }
+    };
+
+    if captured.is_empty() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(ErrorData::new(
+                ErrorCode::TensorNotFound,
+                "Target matched components but no tensors have been captured yet (step first)",
+            )),
+        );
+    }
+
+    ingest_and_respond(session, request, &req, captured, store)
+}
+
+#[allow(dead_code)]
+fn ingest_and_respond(
+    session: &Session,
+    request: &Request,
+    req: &InspectRequest,
+    captured: &[rocket_surgeon_protocol::messages::CapturedTensor],
+    store: &mut TensorStore,
+) -> Response {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut summaries = Vec::new();
+    let mut first_tensor_id = None;
+
+    for ct in captured {
+        let bytes = match engine.decode(&ct.data_base64) {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::error(
+                    request.id.clone(),
+                    RpcError {
+                        code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                        message: format!("base64 decode failed: {e}"),
+                        data: None,
+                    },
+                );
+            }
+        };
+
+        let Some(dtype) = parse_dtype(&ct.dtype) else {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("unknown dtype from worker: {}", ct.dtype),
+                    data: None,
+                },
+            );
+        };
+
+        let handle = store.insert(bytes, ct.shape.clone(), dtype, ct.device.clone());
+        if first_tensor_id.is_none() {
+            first_tensor_id = Some(handle.tensor_id.clone());
+        }
+
+        let summary = store.summarize(&handle.tensor_id).expect("just inserted");
+        summaries.push(summary);
+    }
+
+    let slice_data = if req.detail == rocket_surgeon_protocol::messages::InspectDetail::Slice {
+        if let (Some(slices), Some(tid)) = (&req.slices, &first_tensor_id) {
+            if let Some(&[offset, len]) = slices.first() {
+                match store.slice(tid, offset, len) {
+                    Ok(bytes) => Some(engine.encode(&bytes)),
+                    Err(crate::tensor_store::StoreError::SliceOutOfBounds { .. }) => {
+                        return Response::error(
+                            request.id.clone(),
+                            RpcError::from_error_data(ErrorData::new(
+                                ErrorCode::SliceOutOfBounds,
+                                "Slice indices exceed tensor data size",
+                            )),
+                        );
+                    }
+                    Err(e) => {
+                        return Response::error(
+                            request.id.clone(),
+                            RpcError {
+                                code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                                message: format!("slice failed: {e}"),
+                                data: None,
+                            },
+                        );
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match session.inspect(&summaries, slice_data) {
+        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,14 +447,14 @@ mod tests {
         dispatch(&mut session, &make_request("initialize", init_params()));
         dispatch(&mut session, &make_request("attach", attach_params()));
 
-        let req = make_request("rocket/inspect", serde_json::json!({}));
+        let req = make_request("rocket/intervene", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert!(result.get("state").is_some());
         let data = &result["data"];
         assert_eq!(data["stub"], true);
-        assert_eq!(data["method"], "rocket/inspect");
+        assert_eq!(data["method"], "rocket/intervene");
     }
 
     #[test]
@@ -288,7 +462,7 @@ mod tests {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
 
-        let req = make_request("rocket/inspect", serde_json::json!({}));
+        let req = make_request("rocket/intervene", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_some());
     }
@@ -439,5 +613,188 @@ mod tests {
         let req = make_request("initialize", init_params());
         let resp = dispatch(&mut session, &req);
         assert_eq!(resp.jsonrpc, JSONRPC_VERSION);
+    }
+
+    use crate::tensor_store::TensorStore;
+    use base64::Engine;
+    use rocket_surgeon_protocol::errors::ErrorCode;
+    use rocket_surgeon_protocol::messages::{CapturedTensor, HostInspectResponse};
+
+    #[test]
+    fn dispatch_inspect_from_stopped_with_host_response() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut store = TensorStore::new();
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let host_resp = HostInspectResponse {
+            tensors: vec![CapturedTensor {
+                module_path: "model.layers.0.self_attn.q_proj".to_owned(),
+                canonical: "q_proj".to_owned(),
+                layer: 0,
+                shape: vec![4],
+                dtype: "float32".to_owned(),
+                device: "cpu".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+            }],
+        };
+
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let data = &result["data"];
+        assert!(data["tensors"].is_array());
+        assert_eq!(data["tensors"].as_array().unwrap().len(), 1);
+        let tensor = &data["tensors"][0];
+        assert_eq!(tensor["tensor_id"].as_str().unwrap().len(), 64);
+        assert!(tensor["stats"]["mean"].is_number());
+    }
+
+    #[test]
+    fn dispatch_inspect_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let mut store = TensorStore::new();
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, None, &mut store);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn dispatch_inspect_with_slice() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut store = TensorStore::new();
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let host_resp = HostInspectResponse {
+            tensors: vec![CapturedTensor {
+                module_path: "model.layers.0.self_attn.q_proj".to_owned(),
+                canonical: "q_proj".to_owned(),
+                layer: 0,
+                shape: vec![4],
+                dtype: "float32".to_owned(),
+                device: "cpu".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+            }],
+        };
+
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "slice",
+                "slices": [[0, 8]]
+            }),
+        );
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert!(result["data"]["slice_data"].is_string());
+    }
+
+    #[test]
+    fn dispatch_inspect_empty_host_response_returns_tensor_not_found() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut store = TensorStore::new();
+        let host_resp = HostInspectResponse { tensors: vec![] };
+
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);
+    }
+
+    #[test]
+    fn dispatch_inspect_slice_out_of_bounds() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut store = TensorStore::new();
+        let data = vec![0u8; 16]; // 4 x f32
+
+        let host_resp = HostInspectResponse {
+            tensors: vec![CapturedTensor {
+                module_path: "model.layers.0.self_attn.q_proj".to_owned(),
+                canonical: "q_proj".to_owned(),
+                layer: 0,
+                shape: vec![4],
+                dtype: "float32".to_owned(),
+                device: "cpu".to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+            }],
+        };
+
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "slice",
+                "slices": [[0, 999_999_999]]
+            }),
+        );
+        let resp = handle_inspect(&session, &req, Some(&host_resp), &mut store);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::SliceOutOfBounds);
+    }
+
+    #[test]
+    fn dispatch_inspect_no_host_response_without_orchestrator() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut store = TensorStore::new();
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, None, &mut store);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);
     }
 }
