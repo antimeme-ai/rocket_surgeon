@@ -1,8 +1,10 @@
 use base64::Engine;
+use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, InitializeRequest, InspectRequest, StepRequest, method,
+    AttachRequest, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest,
+    method,
 };
 use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
 
@@ -36,11 +38,9 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::STATUS => handle_status(session, request),
         method::STEP => handle_step(session, request, None),
         method::INSPECT => handle_inspect_no_store(session, request),
-        method::INTERVENE
-        | method::PROBE
-        | method::CHECKPOINT
-        | method::REPLAY
-        | method::SUBSCRIBE => handle_stub_requires_stopped(session, request),
+        method::INTERVENE | method::CHECKPOINT | method::REPLAY | method::SUBSCRIBE => {
+            handle_stub_requires_stopped(session, request)
+        }
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -335,6 +335,91 @@ fn ingest_and_respond(
     match session.inspect(&summaries, slice_data) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
+}
+
+fn probe_success(
+    session: &Session,
+    id: RequestId,
+    registry: &ProbeRegistry,
+    probe_id: Option<String>,
+) -> Response {
+    let resp = ProbeResponse {
+        probes: registry.list(),
+        probe_id,
+    };
+    serialize_envelope(id, session.envelope(resp))
+}
+
+fn registry_error_to_response(id: RequestId, err: RegistryError) -> Response {
+    match err {
+        RegistryError::DuplicateId { id: pid } => Response::error(
+            id,
+            RpcError::from_error_data(ErrorData::new(
+                ErrorCode::DuplicateProbeId,
+                format!("Probe with id '{pid}' already exists"),
+            )),
+        ),
+        RegistryError::InvalidPoint(e) => Response::error(
+            id,
+            RpcError::from_error_data(ErrorData::new(
+                ErrorCode::InvalidPoint,
+                format!("Invalid probe point: {e}"),
+            )),
+        ),
+        RegistryError::NotFound { id: pid } => Response::error(
+            id,
+            RpcError::from_error_data(ErrorData::new(
+                ErrorCode::ProbeNotFound,
+                format!("Probe '{pid}' not found"),
+            )),
+        ),
+    }
+}
+
+pub fn handle_probe(
+    session: &Session,
+    request: &Request,
+    registry: &mut ProbeRegistry,
+) -> Response {
+    if let Err(ref e) = session.require_stopped("rocket/probe") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let req: ProbeRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    match req {
+        ProbeRequest::Define { probe } => match registry.define(*probe) {
+            Ok(id) => probe_success(session, request.id.clone(), registry, Some(id)),
+            Err(e) => registry_error_to_response(request.id.clone(), e),
+        },
+        ProbeRequest::List {} | ProbeRequest::SetGranularity { .. } => {
+            probe_success(session, request.id.clone(), registry, None)
+        }
+        ProbeRequest::Enable { probe_id } => match registry.enable(&probe_id) {
+            Ok(_) => probe_success(session, request.id.clone(), registry, Some(probe_id)),
+            Err(e) => registry_error_to_response(request.id.clone(), e),
+        },
+        ProbeRequest::Disable { probe_id } => match registry.disable(&probe_id) {
+            Ok(_) => probe_success(session, request.id.clone(), registry, Some(probe_id)),
+            Err(e) => registry_error_to_response(request.id.clone(), e),
+        },
+        ProbeRequest::Remove { probe_id } => match registry.remove(&probe_id) {
+            Ok(_) => probe_success(session, request.id.clone(), registry, Some(probe_id)),
+            Err(e) => registry_error_to_response(request.id.clone(), e),
+        },
     }
 }
 
@@ -793,5 +878,114 @@ mod tests {
         assert!(resp.error.is_some());
         let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
         assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);
+    }
+
+    // --- Probe tests ---
+
+    #[test]
+    fn dispatch_probe_define_returns_probe_id() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
+        let req = make_request(
+            "rocket/probe",
+            serde_json::json!({
+                "action": "define",
+                "probe": {
+                    "id": "p-test-1",
+                    "point": "llama:0:12:attn.o_proj:0:output",
+                    "action": "capture",
+                    "config": {"summary": true},
+                    "enabled": true,
+                    "priority": 0
+                }
+            }),
+        );
+        let resp = handle_probe(&session, &req, &mut registry);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let data = &result["data"];
+        assert_eq!(data["probe_id"], "p-test-1");
+        assert!(data["probes"].is_array());
+        assert_eq!(data["probes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_probe_list_returns_all() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
+        handle_probe(
+            &session,
+            &make_request(
+                "rocket/probe",
+                serde_json::json!({
+                    "action": "define",
+                    "probe": {
+                        "id": "p1",
+                        "point": "llama:0:12:attn.o_proj:0:output",
+                        "action": "capture"
+                    }
+                }),
+            ),
+            &mut registry,
+        );
+        handle_probe(
+            &session,
+            &make_request(
+                "rocket/probe",
+                serde_json::json!({
+                    "action": "define",
+                    "probe": {
+                        "id": "p2",
+                        "point": "llama:0:8:mlp:0:output",
+                        "action": "trace"
+                    }
+                }),
+            ),
+            &mut registry,
+        );
+
+        let resp = handle_probe(
+            &session,
+            &make_request("rocket/probe", serde_json::json!({"action": "list"})),
+            &mut registry,
+        );
+        assert!(resp.error.is_none());
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["probes"].as_array().unwrap().len(), 2);
+        assert!(data["probe_id"].is_null());
+    }
+
+    #[test]
+    fn dispatch_probe_enable_nonexistent_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
+        let resp = handle_probe(
+            &session,
+            &make_request(
+                "rocket/probe",
+                serde_json::json!({
+                    "action": "enable",
+                    "probe_id": "nonexistent"
+                }),
+            ),
+            &mut registry,
+        );
+        assert!(resp.error.is_some());
+        let err = resp.error.as_ref().unwrap();
+        let data = err.data.as_ref().unwrap();
+        assert_eq!(data.error_code, ErrorCode::ProbeNotFound);
     }
 }

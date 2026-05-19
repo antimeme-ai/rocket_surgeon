@@ -11,15 +11,18 @@ use std::io::{self, BufReader};
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use crate::dispatch::{dispatch, handle_inspect, handle_step};
+use crate::dispatch::{dispatch, handle_inspect, handle_probe, handle_step};
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
 use crate::tensor_store::TensorStore;
 use crate::trace_log::{Direction, TraceLog};
 
+use rocket_surgeon_probes::registry::ProbeRegistry;
 use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
-use rocket_surgeon_protocol::messages::{AttachRequest, HostAttachRequest, method};
+use rocket_surgeon_protocol::messages::{
+    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, method,
+};
 
 #[derive(Parser)]
 #[command(
@@ -230,6 +233,24 @@ fn detach_orchestrator(
     *orchestrator = None;
 }
 
+fn propagate_probes(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    registry: &ProbeRegistry,
+) {
+    let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle) else {
+        return;
+    };
+    let enabled = registry.list().into_iter().filter(|p| p.enabled).collect();
+    let req = HostUpdateProbesRequest {
+        model_handle: mh,
+        active_probes: enabled,
+    };
+    if let Err(e) = orch.update_probes(&req) {
+        warn!("failed to propagate probes to worker: {e}");
+    }
+}
+
 #[allow(clippy::significant_drop_tightening)]
 fn main() {
     let cli = Cli::parse();
@@ -256,6 +277,7 @@ fn main() {
     let mut writer = io::stdout().lock();
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
+    let mut probe_registry = ProbeRegistry::new();
 
     loop {
         let raw = match read_message(&mut reader) {
@@ -302,6 +324,12 @@ fn main() {
                 ),
                 Err(err_response) => *err_response,
             }
+        } else if request.method == method::PROBE {
+            let resp = handle_probe(&session, &request, &mut probe_registry);
+            if resp.error.is_none() {
+                propagate_probes(&mut orchestrator, model_handle, &probe_registry);
+            }
+            resp
         } else {
             dispatch(&mut session, &request)
         };
