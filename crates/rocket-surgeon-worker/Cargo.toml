@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 rocket-surgeon-transport.workspace = true
 rocket-surgeon-protocol.workspace = true
+rocket-surgeon-probes.workspace = true
 pyo3 = { version = "0.24", features = ["auto-initialize"] }
 serde.workspace = true
 serde_json.workspace = true

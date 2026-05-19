@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use rocket_surgeon_probes::grammar::ProbePoint;
+
 use crate::adapter::ComponentMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,8 +11,8 @@ pub enum CaptureMode {
     Full,
 }
 
-pub fn capture_mode(active_probes: &[String]) -> CaptureMode {
-    if active_probes.is_empty() {
+pub fn capture_mode(active_probes_count: usize) -> CaptureMode {
+    if active_probes_count == 0 {
         CaptureMode::None
     } else {
         CaptureMode::Summary
@@ -21,7 +23,7 @@ pub fn should_capture(
     map: &ComponentMap,
     module_path: &str,
     call_index: u32,
-    active_probes: &[String],
+    active_probes: &[(rocket_surgeon_protocol::types::ProbeDefinition, ProbePoint)],
 ) -> bool {
     let component = map
         .components
@@ -32,41 +34,28 @@ pub fn should_capture(
         return false;
     };
 
-    for probe_pattern in active_probes {
-        if probe_matches(&component.probe_point, probe_pattern) {
-            return true;
-        }
-    }
-    false
+    let Ok(target) = ProbePoint::parse(&component.probe_point) else {
+        return false;
+    };
+
+    active_probes.iter().any(|(_, pp)| pp.matches(&target))
 }
 
 pub fn probe_matches_target(probe_point: &str, target: &str) -> bool {
-    probe_matches(probe_point, target)
-}
-
-fn probe_matches(probe_point: &str, pattern: &str) -> bool {
-    let point_parts: Vec<&str> = probe_point.split(':').collect();
-    let pattern_parts: Vec<&str> = pattern.split(':').collect();
-
-    if point_parts.len() != pattern_parts.len() {
+    let Ok(point) = ProbePoint::parse(probe_point) else {
         return false;
-    }
-
-    for (pp, pat) in point_parts.iter().zip(pattern_parts.iter()) {
-        if *pat == "*" {
-            continue;
-        }
-        if pp != pat {
-            return false;
-        }
-    }
-    true
+    };
+    let Ok(tgt) = ProbePoint::parse(target) else {
+        return false;
+    };
+    point.matches(&tgt)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapter::{ComponentMap, MappedComponent, ModuleMapping};
+    use rocket_surgeon_protocol::types::{ProbeAction, ProbeDefinition};
 
     fn sample_component_map() -> ComponentMap {
         ComponentMap {
@@ -97,10 +86,23 @@ mod tests {
         }
     }
 
+    fn make_active(point: &str) -> (ProbeDefinition, ProbePoint) {
+        let def = ProbeDefinition {
+            id: "test".to_owned(),
+            point: point.to_owned(),
+            action: ProbeAction::Capture,
+            config: None,
+            enabled: true,
+            priority: 0,
+        };
+        let pp = ProbePoint::parse(point).unwrap();
+        (def, pp)
+    }
+
     #[test]
     fn probe_matches_exact_path() {
         let map = sample_component_map();
-        let active = vec!["model:0:0:q_proj:0:fwd".to_owned()];
+        let active = vec![make_active("model:0:0:q_proj:0:fwd")];
         assert!(should_capture(
             &map,
             "model.layers.0.self_attn.q_proj",
@@ -112,7 +114,7 @@ mod tests {
     #[test]
     fn probe_does_not_match_different_component() {
         let map = sample_component_map();
-        let active = vec!["model:0:0:q_proj:0:fwd".to_owned()];
+        let active = vec![make_active("model:0:0:q_proj:0:fwd")];
         assert!(!should_capture(
             &map,
             "model.layers.0.self_attn.k_proj",
@@ -124,7 +126,7 @@ mod tests {
     #[test]
     fn wildcard_layer_matches_any_layer() {
         let map = sample_component_map();
-        let active = vec!["model:0:*:q_proj:0:fwd".to_owned()];
+        let active = vec![make_active("model:0:*:q_proj:0:fwd")];
         assert!(should_capture(
             &map,
             "model.layers.0.self_attn.q_proj",
@@ -136,7 +138,7 @@ mod tests {
     #[test]
     fn wildcard_component_matches_all() {
         let map = sample_component_map();
-        let active = vec!["model:0:0:*:0:fwd".to_owned()];
+        let active = vec![make_active("model:0:0:*:0:fwd")];
         assert!(should_capture(
             &map,
             "model.layers.0.self_attn.q_proj",
@@ -154,7 +156,7 @@ mod tests {
     #[test]
     fn empty_active_probes_matches_nothing() {
         let map = sample_component_map();
-        let active: Vec<String> = vec![];
+        let active: Vec<(ProbeDefinition, ProbePoint)> = vec![];
         assert!(!should_capture(
             &map,
             "model.layers.0.self_attn.q_proj",
@@ -165,14 +167,23 @@ mod tests {
 
     #[test]
     fn capture_policy_none_for_inactive() {
-        assert_eq!(capture_mode(&[]), CaptureMode::None);
+        assert_eq!(capture_mode(0), CaptureMode::None);
     }
 
     #[test]
     fn capture_policy_summary_is_default() {
-        assert_eq!(
-            capture_mode(&["model:0:0:q_proj:0:fwd".to_owned()]),
-            CaptureMode::Summary
-        );
+        assert_eq!(capture_mode(1), CaptureMode::Summary);
+    }
+
+    #[test]
+    fn grammar_based_matching_works() {
+        assert!(probe_matches_target(
+            "model:0:0:q_proj:0:fwd",
+            "*:*:*:*:*:*"
+        ));
+        assert!(!probe_matches_target(
+            "model:0:0:q_proj:0:fwd",
+            "model:0:0:k_proj:0:fwd"
+        ));
     }
 }
