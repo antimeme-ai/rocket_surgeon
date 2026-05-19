@@ -645,8 +645,9 @@ fn main() {
 
         if response.error.is_none() && request.method == method::DETACH {
             if let Some(mut ps) = perfetto.take() {
+                let path = ps.path().to_owned();
                 match ps.close() {
-                    Ok(path) => info!(path = %path.display(), "perfetto trace flushed"),
+                    Ok(()) => info!(path = %path.display(), "perfetto trace flushed"),
                     Err(e) => warn!("perfetto: failed to close trace: {e}"),
                 }
             }
@@ -733,8 +734,9 @@ fn main() {
     }
 
     if let Some(mut ps) = perfetto.take() {
+        let path = ps.path().to_owned();
         match ps.close() {
-            Ok(path) => info!(path = %path.display(), "perfetto trace flushed on exit"),
+            Ok(()) => info!(path = %path.display(), "perfetto trace flushed on exit"),
             Err(e) => warn!("perfetto: failed to close trace on exit: {e}"),
         }
     }

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use perfetto_writer::intern::InternTable;
 use perfetto_writer::proto::DebugAnnotation;
-use perfetto_writer::writer::{TraceSink, WriteError};
+use perfetto_writer::writer::{TraceWriter, WriteError};
 use rocket_surgeon_protocol::messages::ProbeFiredEvent;
 use rocket_surgeon_protocol::types::TickPosition;
 
@@ -30,13 +30,17 @@ fn sequence_id(rank: u32) -> u32 {
     SEQUENCE_BASE + rank
 }
 
+struct OpenSlice {
+    rank: u32,
+}
+
 pub struct PerfettoSink {
-    sink: TraceSink<BufWriter<File>>,
+    writer: TraceWriter<BufWriter<File>>,
     intern: InternTable,
     epoch: Instant,
     path: PathBuf,
     component_uuids: HashMap<String, u64>,
-    open_slices: HashMap<u64, u64>,
+    open_slices: HashMap<u64, OpenSlice>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,13 +60,13 @@ impl PerfettoSink {
     ) -> Result<Self, PerfettoError> {
         let path = dir.join(format!("{session_id}.pftrace"));
         let file = File::create(&path)?;
-        let writer = BufWriter::with_capacity(256 * 1024, file);
-        let mut sink = TraceSink::new(writer);
+        let buf_writer = BufWriter::with_capacity(256 * 1024, file);
+        let mut writer = TraceWriter::new(buf_writer);
 
-        sink.write_process_track(PROCESS_UUID, session_id, 1, model_name)?;
+        writer.write_process_track(PROCESS_UUID, session_id, 1, model_name)?;
 
         Ok(Self {
-            sink,
+            writer,
             intern: InternTable::new(),
             epoch,
             path,
@@ -73,18 +77,18 @@ impl PerfettoSink {
 
     pub fn declare_rank(&mut self, rank: u32) -> Result<(), PerfettoError> {
         let name = format!("rank:{rank}");
-        self.sink
+        self.writer
             .write_thread_track(rank_uuid(rank), PROCESS_UUID, &name, 1, i64::from(rank))?;
         Ok(())
     }
 
     pub fn declare_layer(&mut self, rank: u32, layer: u32) -> Result<(), PerfettoError> {
         let name = format!("L{layer}");
-        self.sink.write_track(
+        self.writer.write_track(
             layer_uuid(rank, layer),
             rank_uuid(rank),
             &name,
-            layer as i32,
+            layer.min(i32::MAX as u32) as i32,
         )?;
         Ok(())
     }
@@ -98,11 +102,11 @@ impl PerfettoSink {
     ) -> Result<(), PerfettoError> {
         let uuid = component_uuid(rank, layer, component_index);
         let display_name = format!("L{layer}::{component_name}");
-        self.sink.write_track(
+        self.writer.write_track(
             uuid,
             layer_uuid(rank, layer),
             &display_name,
-            component_index as i32,
+            component_index.min(i32::MAX as u32) as i32,
         )?;
         self.intern.intern(&display_name);
         self.component_uuids.insert(display_name, uuid);
@@ -110,14 +114,9 @@ impl PerfettoSink {
     }
 
     pub fn emit_interned_names(&mut self, rank: u32) -> Result<(), PerfettoError> {
-        let entries: Vec<(u64, String)> = self
-            .intern
-            .entries()
-            .map(|(iid, name)| (iid, name.to_owned()))
-            .collect();
-        let refs: Vec<(u64, &str)> = entries.iter().map(|(iid, n)| (*iid, n.as_str())).collect();
+        let refs: Vec<(u64, &str)> = self.intern.entries().collect();
         if !refs.is_empty() {
-            self.sink.write_interned_names(sequence_id(rank), &refs)?;
+            self.writer.write_interned_names(sequence_id(rank), &refs)?;
         }
         Ok(())
     }
@@ -130,12 +129,12 @@ impl PerfettoSink {
         let seq = sequence_id(rank);
 
         if self.open_slices.remove(&track).is_some() {
-            self.sink.slice_end(seq, track, now_ns)?;
+            self.writer.slice_end(seq, track, now_ns)?;
         }
 
         let name_iid = self.intern.intern(&display_name);
-        self.sink.slice_begin(seq, track, now_ns, name_iid)?;
-        self.open_slices.insert(track, now_ns);
+        self.writer.slice_begin(seq, track, now_ns, name_iid)?;
+        self.open_slices.insert(track, OpenSlice { rank });
 
         Ok(())
     }
@@ -172,25 +171,24 @@ impl PerfettoSink {
         let probe_name = format!("probe:{}", event.probe_id);
 
         let track = self.find_track_for_point(&event.point);
-        self.sink
+        self.writer
             .instant(seq, track, now_ns, &probe_name, &annotations)?;
 
         Ok(())
     }
 
-    pub fn close(&mut self) -> Result<PathBuf, PerfettoError> {
+    pub fn close(&mut self) -> Result<(), PerfettoError> {
         let now_ns = self.epoch.elapsed().as_nanos() as u64;
         let open: Vec<(u64, u32)> = self
             .open_slices
-            .keys()
-            .map(|&track| (track, 0u32))
+            .drain()
+            .map(|(track, slice)| (track, slice.rank))
             .collect();
         for (track, rank) in open {
-            self.sink.slice_end(sequence_id(rank), track, now_ns)?;
+            self.writer.slice_end(sequence_id(rank), track, now_ns)?;
         }
-        self.open_slices.clear();
-        self.sink.flush()?;
-        Ok(self.path.clone())
+        self.writer.flush()?;
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -208,11 +206,11 @@ impl PerfettoSink {
         }
         let component_index = self.component_uuids.len() as u32;
         let uuid = component_uuid(rank, layer, component_index);
-        self.sink.write_track(
+        self.writer.write_track(
             uuid,
             layer_uuid(rank, layer),
             display_name,
-            component_index as i32,
+            component_index.min(i32::MAX as u32) as i32,
         )?;
         self.intern.intern(display_name);
         self.component_uuids.insert(display_name.to_owned(), uuid);
@@ -220,12 +218,19 @@ impl PerfettoSink {
     }
 
     fn find_track_for_point(&self, point: &str) -> u64 {
+        if let Some(&uuid) = self.component_uuids.get(point) {
+            return uuid;
+        }
+        let mut best: Option<(&str, u64)> = None;
         for (name, &uuid) in &self.component_uuids {
             if point.contains(name.as_str()) || name.contains(point) {
-                return uuid;
+                let is_longer = best.is_none_or(|(prev, _)| name.len() > prev.len());
+                if is_longer {
+                    best = Some((name, uuid));
+                }
             }
         }
-        rank_uuid(0)
+        best.map_or_else(|| rank_uuid(0), |(_, uuid)| uuid)
     }
 }
 
@@ -337,7 +342,8 @@ mod tests {
         let pos = make_position(0, "attn::q_proj");
         sink.on_tick_stopped(&pos).unwrap();
         sink.on_tick_stopped(&pos).unwrap();
-        let path = sink.close().unwrap();
+        let path = sink.path().to_owned();
+        sink.close().unwrap();
 
         let data = std::fs::read(&path).unwrap();
         let packets = decode_trace_packets(&data);
@@ -356,7 +362,8 @@ mod tests {
 
         let probe = make_probe_event("probe1");
         sink.on_probe_fired(&probe).unwrap();
-        let path = sink.close().unwrap();
+        let path = sink.path().to_owned();
+        sink.close().unwrap();
 
         let data = std::fs::read(&path).unwrap();
         let packets = decode_trace_packets(&data);
@@ -381,7 +388,8 @@ mod tests {
 
         let pos = make_position(0, "attn::q_proj");
         sink.on_tick_stopped(&pos).unwrap();
-        let path = sink.close().unwrap();
+        let path = sink.path().to_owned();
+        sink.close().unwrap();
 
         let data = std::fs::read(&path).unwrap();
         let packets = decode_trace_packets(&data);
@@ -414,7 +422,8 @@ mod tests {
         let probe = make_probe_event("p1");
         sink.on_probe_fired(&probe).unwrap();
 
-        let path = sink.close().unwrap();
+        let path = sink.path().to_owned();
+        sink.close().unwrap();
 
         let data = std::fs::read(&path).unwrap();
         let packets = decode_trace_packets(&data);
@@ -470,7 +479,8 @@ mod tests {
         sink.on_probe_fired(&make_probe_event("p1")).unwrap();
         sink.on_probe_fired(&make_probe_event("p2")).unwrap();
 
-        let path = sink.close().unwrap();
+        let path = sink.path().to_owned();
+        sink.close().unwrap();
 
         let text_out = dir.path().join("trace.textproto");
         let output = std::process::Command::new("python3")

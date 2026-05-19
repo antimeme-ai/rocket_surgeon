@@ -138,8 +138,9 @@ pub const TYPE_INSTANT: i32 = 3;
 pub const TYPE_COUNTER: i32 = 4;
 
 pub const SEQ_INCREMENTAL_STATE_CLEARED: u32 = 1;
+pub const SEQ_NEEDS_INCREMENTAL_STATE: u32 = 2;
 
-pub const CLOCK_MONOTONIC: u32 = 6;
+pub const CLOCK_MONOTONIC: u32 = 3;
 
 pub const CHILD_ORDERING_EXPLICIT: i32 = 3;
 

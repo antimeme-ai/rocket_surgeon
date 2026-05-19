@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 
 use prost::Message;
@@ -12,18 +13,22 @@ use crate::varint;
 pub enum WriteError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("encode error: {0}")]
+    Encode(#[from] prost::EncodeError),
 }
 
-pub struct TraceSink<W: Write> {
+pub struct TraceWriter<W: Write> {
     writer: W,
     buf: Vec<u8>,
+    seen_sequences: HashSet<u32>,
 }
 
-impl<W: Write> TraceSink<W> {
+impl<W: Write> TraceWriter<W> {
     pub fn new(writer: W) -> Self {
         Self {
             writer,
             buf: Vec::with_capacity(4096),
+            seen_sequences: HashSet::new(),
         }
     }
 
@@ -31,9 +36,7 @@ impl<W: Write> TraceSink<W> {
         self.buf.clear();
         let payload_len = packet.encoded_len();
         varint::field1_tag_and_length(payload_len, &mut self.buf);
-        packet
-            .encode(&mut self.buf)
-            .expect("encode into Vec never fails");
+        packet.encode(&mut self.buf)?;
         self.writer.write_all(&self.buf)?;
         Ok(())
     }
@@ -54,7 +57,6 @@ impl<W: Write> TraceSink<W> {
                     process_name: Some(process_name.to_owned()),
                     ..ProcessDescriptor::default()
                 }),
-                child_ordering: Some(proto::CHILD_ORDERING_EXPLICIT),
                 ..TrackDescriptor::default()
             }),
             ..TracePacket::default()
@@ -79,7 +81,6 @@ impl<W: Write> TraceSink<W> {
                     tid: Some(tid),
                     thread_name: Some(name.to_owned()),
                 }),
-                child_ordering: Some(proto::CHILD_ORDERING_EXPLICIT),
                 ..TrackDescriptor::default()
             }),
             ..TracePacket::default()
@@ -133,11 +134,12 @@ impl<W: Write> TraceSink<W> {
         sequence_id: u32,
         names: &[(u64, &str)],
     ) -> Result<(), WriteError> {
+        let first = self.seen_sequences.insert(sequence_id);
         self.write_packet(&TracePacket {
             timestamp_clock_id: Some(proto::CLOCK_MONOTONIC),
             trusted_packet_sequence_id: Some(sequence_id),
             sequence_flags: Some(proto::SEQ_INCREMENTAL_STATE_CLEARED),
-            first_packet_on_sequence: Some(true),
+            first_packet_on_sequence: Some(first),
             interned_data: Some(InternedData {
                 event_names: names
                     .iter()
@@ -161,7 +163,9 @@ impl<W: Write> TraceSink<W> {
     ) -> Result<(), WriteError> {
         self.write_packet(&TracePacket {
             timestamp: Some(timestamp_ns),
+            timestamp_clock_id: Some(proto::CLOCK_MONOTONIC),
             trusted_packet_sequence_id: Some(sequence_id),
+            sequence_flags: Some(proto::SEQ_NEEDS_INCREMENTAL_STATE),
             track_event: Some(TrackEvent {
                 r#type: Some(proto::TYPE_SLICE_BEGIN),
                 track_uuid: Some(track_uuid),
@@ -180,6 +184,7 @@ impl<W: Write> TraceSink<W> {
     ) -> Result<(), WriteError> {
         self.write_packet(&TracePacket {
             timestamp: Some(timestamp_ns),
+            timestamp_clock_id: Some(proto::CLOCK_MONOTONIC),
             trusted_packet_sequence_id: Some(sequence_id),
             track_event: Some(TrackEvent {
                 r#type: Some(proto::TYPE_SLICE_END),
@@ -200,6 +205,7 @@ impl<W: Write> TraceSink<W> {
     ) -> Result<(), WriteError> {
         self.write_packet(&TracePacket {
             timestamp: Some(timestamp_ns),
+            timestamp_clock_id: Some(proto::CLOCK_MONOTONIC),
             trusted_packet_sequence_id: Some(sequence_id),
             track_event: Some(TrackEvent {
                 r#type: Some(proto::TYPE_INSTANT),
@@ -221,6 +227,7 @@ impl<W: Write> TraceSink<W> {
     ) -> Result<(), WriteError> {
         self.write_packet(&TracePacket {
             timestamp: Some(timestamp_ns),
+            timestamp_clock_id: Some(proto::CLOCK_MONOTONIC),
             trusted_packet_sequence_id: Some(sequence_id),
             track_event: Some(TrackEvent {
                 r#type: Some(proto::TYPE_COUNTER),
@@ -278,13 +285,13 @@ mod tests {
     #[test]
     fn write_packet_produces_field1_framed_output() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
+        let mut w = TraceWriter::new(&mut out);
         let packet = TracePacket {
             timestamp: Some(42),
             ..TracePacket::default()
         };
-        sink.write_packet(&packet).unwrap();
-        drop(sink);
+        w.write_packet(&packet).unwrap();
+        drop(w);
 
         assert_eq!(out[0], 0x0A);
         let (len, consumed) = decode_varint(&out[1..]);
@@ -295,16 +302,17 @@ mod tests {
     #[test]
     fn write_process_track_creates_descriptor() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.write_process_track(1, "test-session", 42, "llama-3-8b")
+        let mut w = TraceWriter::new(&mut out);
+        w.write_process_track(1, "test-session", 42, "llama-3-8b")
             .unwrap();
-        drop(sink);
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         assert_eq!(packets.len(), 1);
         let td = packets[0].track_descriptor.as_ref().unwrap();
         assert_eq!(td.uuid, Some(1));
         assert_eq!(td.name.as_deref(), Some("test-session"));
+        assert_eq!(td.child_ordering, None);
         let proc = td.process.as_ref().unwrap();
         assert_eq!(proc.pid, Some(42));
         assert_eq!(proc.process_name.as_deref(), Some("llama-3-8b"));
@@ -313,14 +321,15 @@ mod tests {
     #[test]
     fn write_thread_track_creates_descriptor_with_parent() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.write_thread_track(100, 1, "rank:0", 1, 0).unwrap();
-        drop(sink);
+        let mut w = TraceWriter::new(&mut out);
+        w.write_thread_track(100, 1, "rank:0", 1, 0).unwrap();
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         let td = packets[0].track_descriptor.as_ref().unwrap();
         assert_eq!(td.uuid, Some(100));
         assert_eq!(td.parent_uuid, Some(1));
+        assert_eq!(td.child_ordering, None);
         let thread = td.thread.as_ref().unwrap();
         assert_eq!(thread.tid, Some(0));
         assert_eq!(thread.thread_name.as_deref(), Some("rank:0"));
@@ -329,9 +338,9 @@ mod tests {
     #[test]
     fn write_track_creates_ordered_child() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.write_track(1000, 100, "L0", 0).unwrap();
-        drop(sink);
+        let mut w = TraceWriter::new(&mut out);
+        w.write_track(1000, 100, "L0", 0).unwrap();
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         let td = packets[0].track_descriptor.as_ref().unwrap();
@@ -345,17 +354,22 @@ mod tests {
     #[test]
     fn slice_begin_end_pair() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.slice_begin(1001, 10000, 1_000_000, 1).unwrap();
-        sink.slice_end(1001, 10000, 2_000_000).unwrap();
-        drop(sink);
+        let mut w = TraceWriter::new(&mut out);
+        w.slice_begin(1001, 10000, 1_000_000, 1).unwrap();
+        w.slice_end(1001, 10000, 2_000_000).unwrap();
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         assert_eq!(packets.len(), 2);
 
         let begin = &packets[0];
         assert_eq!(begin.timestamp, Some(1_000_000));
+        assert_eq!(begin.timestamp_clock_id, Some(proto::CLOCK_MONOTONIC));
         assert_eq!(begin.trusted_packet_sequence_id, Some(1001));
+        assert_eq!(
+            begin.sequence_flags,
+            Some(proto::SEQ_NEEDS_INCREMENTAL_STATE)
+        );
         let ev = begin.track_event.as_ref().unwrap();
         assert_eq!(ev.r#type, Some(proto::TYPE_SLICE_BEGIN));
         assert_eq!(ev.track_uuid, Some(10000));
@@ -363,6 +377,7 @@ mod tests {
 
         let end = &packets[1];
         assert_eq!(end.timestamp, Some(2_000_000));
+        assert_eq!(end.timestamp_clock_id, Some(proto::CLOCK_MONOTONIC));
         let ev = end.track_event.as_ref().unwrap();
         assert_eq!(ev.r#type, Some(proto::TYPE_SLICE_END));
         assert_eq!(ev.track_uuid, Some(10000));
@@ -371,8 +386,8 @@ mod tests {
     #[test]
     fn instant_event_with_annotations() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.instant(
+        let mut w = TraceWriter::new(&mut out);
+        w.instant(
             1001,
             10000,
             5_000_000,
@@ -384,9 +399,10 @@ mod tests {
             }],
         )
         .unwrap();
-        drop(sink);
+        drop(w);
 
         let packets = decode_trace_packets(&out);
+        assert_eq!(packets[0].timestamp_clock_id, Some(proto::CLOCK_MONOTONIC));
         let ev = packets[0].track_event.as_ref().unwrap();
         assert_eq!(ev.r#type, Some(proto::TYPE_INSTANT));
         assert_eq!(ev.name.as_deref(), Some("probe:attn_weights"));
@@ -397,10 +413,10 @@ mod tests {
     #[test]
     fn write_interned_names_emits_seq_cleared() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.write_interned_names(1001, &[(1, "L0::attn::q_proj"), (2, "L0::attn::k_proj")])
+        let mut w = TraceWriter::new(&mut out);
+        w.write_interned_names(1001, &[(1, "L0::attn::q_proj"), (2, "L0::attn::k_proj")])
             .unwrap();
-        drop(sink);
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         let p = &packets[0];
@@ -418,13 +434,27 @@ mod tests {
     }
 
     #[test]
-    fn counter_double_event() {
+    fn first_packet_on_sequence_only_on_first_call() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.counter_double(1001, 20000, 7_000_000, 42.5).unwrap();
-        drop(sink);
+        let mut w = TraceWriter::new(&mut out);
+        w.write_interned_names(1001, &[(1, "a")]).unwrap();
+        w.write_interned_names(1001, &[(1, "a"), (2, "b")]).unwrap();
+        drop(w);
 
         let packets = decode_trace_packets(&out);
+        assert_eq!(packets[0].first_packet_on_sequence, Some(true));
+        assert_eq!(packets[1].first_packet_on_sequence, Some(false));
+    }
+
+    #[test]
+    fn counter_double_event() {
+        let mut out = Vec::new();
+        let mut w = TraceWriter::new(&mut out);
+        w.counter_double(1001, 20000, 7_000_000, 42.5).unwrap();
+        drop(w);
+
+        let packets = decode_trace_packets(&out);
+        assert_eq!(packets[0].timestamp_clock_id, Some(proto::CLOCK_MONOTONIC));
         let ev = packets[0].track_event.as_ref().unwrap();
         assert_eq!(ev.r#type, Some(proto::TYPE_COUNTER));
         assert_eq!(ev.double_counter_value, Some(42.5));
@@ -433,16 +463,16 @@ mod tests {
     #[test]
     fn multiple_packets_decode_as_valid_trace() {
         let mut out = Vec::new();
-        let mut sink = TraceSink::new(&mut out);
-        sink.write_process_track(1, "sess", 1, "model").unwrap();
-        sink.write_thread_track(100, 1, "rank:0", 1, 0).unwrap();
-        sink.write_track(1000, 100, "L0", 0).unwrap();
-        sink.write_interned_names(1001, &[(1, "L0::attn")]).unwrap();
-        sink.slice_begin(1001, 1000, 100, 1).unwrap();
-        sink.slice_end(1001, 1000, 200).unwrap();
-        sink.instant(1001, 1000, 150, "probe", &[]).unwrap();
-        sink.flush().unwrap();
-        drop(sink);
+        let mut w = TraceWriter::new(&mut out);
+        w.write_process_track(1, "sess", 1, "model").unwrap();
+        w.write_thread_track(100, 1, "rank:0", 1, 0).unwrap();
+        w.write_track(1000, 100, "L0", 0).unwrap();
+        w.write_interned_names(1001, &[(1, "L0::attn")]).unwrap();
+        w.slice_begin(1001, 1000, 100, 1).unwrap();
+        w.slice_end(1001, 1000, 200).unwrap();
+        w.instant(1001, 1000, 150, "probe", &[]).unwrap();
+        w.flush().unwrap();
+        drop(w);
 
         let packets = decode_trace_packets(&out);
         assert_eq!(packets.len(), 7);
