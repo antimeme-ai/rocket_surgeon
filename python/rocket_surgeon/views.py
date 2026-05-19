@@ -31,6 +31,8 @@ def compute_view(
             msg = "INVALID_PARAMS: attention_pattern requires 'layer' in params"
             raise ValueError(msg)
         head = params.get("head")
+        if head is not None:
+            head = int(head)
         return _attention_pattern(model_handle, last_outputs, int(layer), head)
     msg = f"INVALID_PARAMS: unknown view '{view_name}'"
     raise ValueError(msg)
@@ -56,7 +58,8 @@ def _residual_stream_norm(
     layer_paths.sort(key=lambda x: x[0])
 
     norms: list[float] = []
-    for _layer_idx, path in layer_paths:
+    layers: list[int] = []
+    for layer_idx, path in layer_paths:
         key = (path, 0)
         if key not in last_outputs:
             continue
@@ -65,6 +68,7 @@ def _residual_stream_norm(
             tensor = tensor[0]
         norm_val = torch.norm(tensor.float(), p=2).item()
         norms.append(norm_val)
+        layers.append(layer_idx)
 
     if not norms:
         msg = "VIEW_DATA_UNAVAILABLE: no layer outputs found in last_outputs"
@@ -72,6 +76,7 @@ def _residual_stream_norm(
 
     return {
         "norms": norms,
+        "layers": layers,
         "num_layers": len(norms),
         "norm_type": "l2",
     }

@@ -98,10 +98,10 @@ Feature: Built-in interpretability views
   # ── Capabilities ──────────────────────────────────────────────────
 
   Scenario: Available views are reported in capabilities at initialize
-    # Background already initializes — check the init response
-    # The capabilities.built_in_views array includes the Phase 1 views
-    When the client sends "rocket/view" with:
+    When the client sends "initialize" with:
       """json
-      {"view": "residual_stream_norm"}
+      {"client_name": "test", "protocol_version": "0.1.0"}
       """
-    Then the response data field "view" equals "residual_stream_norm"
+    Then the response data field "capabilities" contains "built_in_views" as an array
+    And the "built_in_views" array contains "residual_stream_norm"
+    And the "built_in_views" array contains "attention_pattern"

@@ -770,11 +770,10 @@ fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
             } else if msg.contains("INVALID_PARAMS") {
                 Response::error(
                     request.id.clone(),
-                    RpcError {
-                        code: INVALID_PARAMS,
-                        message: msg,
-                        data: None,
-                    },
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::InvalidParams,
+                        msg,
+                    )),
                 )
             } else {
                 internal_error(request.id.clone(), msg)
