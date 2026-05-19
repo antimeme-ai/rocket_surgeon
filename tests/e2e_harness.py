@@ -61,6 +61,7 @@ def _has_buffered_data(stream) -> bool:
     if not hasattr(stream, "peek") or not hasattr(stream, "fileno"):
         return False
     import os
+
     fd = stream.fileno()
     was_blocking = os.get_blocking(fd)
     try:
