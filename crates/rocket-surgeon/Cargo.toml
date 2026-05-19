@@ -28,6 +28,11 @@ uuid.workspace = true
 half.workspace = true
 blake3.workspace = true
 rocket-surgeon-shm.workspace = true
+perfetto-writer.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+prost = "0.14"
 
 [lints]
 workspace = true

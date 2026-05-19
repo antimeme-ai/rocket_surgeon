@@ -742,3 +742,228 @@ def then_response_matches_bundle(path: str, field: str) -> None:
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is not empty'))
 def then_response_not_empty(path: str) -> None:
     pass
+
+
+# ---------------------------------------------------------------------------
+# Perfetto trace — Given steps
+# ---------------------------------------------------------------------------
+
+
+@given('a PerfettoSink has been created for session "test-session" with model "gpt2"')
+def given_perfetto_sink_created() -> None:
+    pass
+
+
+@given(parsers.re(r"a TraceSink is opened for writing"))
+def given_trace_sink_opened() -> None:
+    pass
+
+
+@given(parsers.re(r"rank (?P<rank>\d+) has been declared"))
+def given_rank_declared(rank: str) -> None:
+    pass
+
+
+@given(parsers.re(r"layer (?P<layer>\d+) under rank (?P<rank>\d+) has been declared"))
+def given_layer_declared(layer: str, rank: str) -> None:
+    pass
+
+
+@given(
+    parsers.re(
+        r'component "(?P<name>[^"]+)" at index (?P<idx>\d+) '
+        r"under layer (?P<layer>\d+) rank (?P<rank>\d+) has been declared"
+    )
+)
+def given_component_declared(name: str, idx: str, layer: str, rank: str) -> None:
+    pass
+
+
+@given(parsers.re(r"interned names have been emitted for rank (?P<rank>\d+)"))
+def given_interned_names_emitted(rank: str) -> None:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Perfetto trace — When steps
+# ---------------------------------------------------------------------------
+
+
+@when(parsers.re(r"a TracePacket is written with timestamp (?P<ts>\d+)"))
+def when_trace_packet_written(ts: str) -> None:
+    pass
+
+
+@when(
+    parsers.re(
+        r"a process track is written with uuid (?P<uuid>\d+) "
+        r'and name "(?P<name>[^"]+)"'
+    )
+)
+def when_process_track_written(uuid: str, name: str) -> None:
+    pass
+
+
+@when(
+    parsers.re(
+        r"a thread track is written with uuid (?P<uuid>\d+) "
+        r"parent (?P<parent>\d+)"
+    )
+)
+def when_thread_track_written(uuid: str, parent: str) -> None:
+    pass
+
+
+@when(
+    parsers.re(
+        r"on_tick_stopped is called with layer (?P<layer>\d+) "
+        r'component "(?P<component>[^"]+)"'
+    )
+)
+def when_on_tick_stopped(layer: str, component: str) -> None:
+    pass
+
+
+@when(
+    parsers.re(
+        r'on_probe_fired is called with probe_id "(?P<pid>[^"]+)" '
+        r"and tensor summary"
+    )
+)
+def when_on_probe_fired(pid: str) -> None:
+    pass
+
+
+@when(parsers.re(r"close is called on the PerfettoSink"))
+def when_perfetto_close() -> None:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Perfetto trace — Then steps
+# ---------------------------------------------------------------------------
+
+
+@then(parsers.re(r"the output begins with byte 0x0A"))
+def then_output_begins_0a() -> None:
+    pass
+
+
+@then(parsers.re(r"the output is valid field-1 framed protobuf"))
+def then_output_valid_field1() -> None:
+    pass
+
+
+@then(parsers.re(r"each packet in the output decodes as a valid TracePacket"))
+def then_each_packet_valid() -> None:
+    pass
+
+
+@then(parsers.re(r"the re-encoded packet equals the original bytes"))
+def then_reencoded_equals_original() -> None:
+    pass
+
+
+@then(parsers.re(r"the output contains exactly (?P<n>\d+) TracePackets?"))
+def then_output_packet_count(n: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the output contains at least (?P<n>\d+) TracePackets?"))
+def then_output_min_packet_count(n: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"a TrackDescriptor packet exists with uuid (?P<uuid>\d+) "
+        r'and name "(?P<name>[^"]+)"'
+    )
+)
+def then_track_descriptor_exists(uuid: str, name: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"a TrackDescriptor packet exists with uuid (?P<uuid>\d+) "
+        r"and parent_uuid (?P<parent>\d+)"
+    )
+)
+def then_track_descriptor_parent(uuid: str, parent: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the process track has a ProcessDescriptor"))
+def then_process_track_has_descriptor() -> None:
+    pass
+
+
+@then(parsers.re(r"the rank track has a ThreadDescriptor"))
+def then_rank_track_has_descriptor() -> None:
+    pass
+
+
+@then(parsers.re(r"every child track has child_ordering set to EXPLICIT"))
+def then_child_ordering_explicit() -> None:
+    pass
+
+
+@then(parsers.re(r"a SLICE_BEGIN TrackEvent exists on the component track"))
+def then_slice_begin_exists() -> None:
+    pass
+
+
+@then(parsers.re(r"a SLICE_END TrackEvent exists on the component track"))
+def then_slice_end_exists() -> None:
+    pass
+
+
+@then(parsers.re(r'a TYPE_INSTANT TrackEvent exists with name "(?P<name>[^"]+)"'))
+def then_instant_event_exists(name: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"the instant event has DebugAnnotations for "
+        r'"(?P<fields>[^"]+)"'
+    )
+)
+def then_instant_has_annotations(fields: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"the InternedData packet has sequence_flags "
+        r"SEQ_INCREMENTAL_STATE_CLEARED"
+    )
+)
+def then_interned_data_flags() -> None:
+    pass
+
+
+@then(parsers.re(r"each interned name has a unique iid starting from 1"))
+def then_interned_iids_unique() -> None:
+    pass
+
+
+@then(parsers.re(r"all open slices have been terminated with SLICE_END"))
+def then_all_slices_closed() -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r'the trace file exists at "(?P<pattern>[^"]+)" '
+        r"with non-zero size"
+    )
+)
+def then_trace_file_exists(pattern: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the \.pftrace file is valid field-1 framed protobuf"))
+def then_pftrace_valid() -> None:
+    pass
