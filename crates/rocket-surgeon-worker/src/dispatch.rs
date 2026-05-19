@@ -13,7 +13,8 @@ use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
     CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
     HostDetachResponse, HostInspectRequest, HostInspectResponse, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, ProbeFiredEvent,
+    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, HostViewResponse,
+    ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -80,6 +81,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_STEP => handle_host_step(state, request),
         internal::HOST_UPDATE_PROBES => handle_host_update_probes(state, request),
         internal::HOST_INSPECT => handle_host_inspect(state, request),
+        internal::HOST_VIEW => handle_host_view(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -692,6 +694,113 @@ fn collect_tensors(
 
         Ok(result)
     })
+}
+
+fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
+    let req: HostViewRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    if state.model_handle.is_none() || state.model_handle != Some(req.model_handle) {
+        return internal_error(
+            request.id.clone(),
+            "model handle mismatch or no model loaded".to_owned(),
+        );
+    }
+
+    if state.last_outputs.is_none() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                rocket_surgeon_protocol::errors::ErrorCode::ViewDataUnavailable,
+                "No captured tensors — execute at least one step first",
+            )),
+        );
+    }
+
+    let result = Python::with_gil(|py| compute_view(py, state, &req));
+
+    match result {
+        Ok(data) => {
+            let resp = HostViewResponse {
+                view: req.view,
+                data,
+            };
+            match serde_json::to_value(resp) {
+                Ok(value) => Response::success(request.id.clone(), value),
+                Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("VIEW_DATA_UNAVAILABLE") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::ViewDataUnavailable,
+                        msg,
+                    )),
+                )
+            } else if msg.contains("CAPABILITY_NOT_SUPPORTED") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::CapabilityNotSupported,
+                        msg,
+                    )),
+                )
+            } else if msg.contains("INVALID_PARAMS") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError {
+                        code: INVALID_PARAMS,
+                        message: msg,
+                        data: None,
+                    },
+                )
+            } else {
+                internal_error(request.id.clone(), msg)
+            }
+        }
+    }
+}
+
+fn compute_view(
+    py: Python<'_>,
+    state: &WorkerState,
+    req: &HostViewRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let views_mod = py.import("rocket_surgeon.views")?;
+    let handle = state
+        .model_handle
+        .ok_or_else(|| anyhow::anyhow!("no model handle"))?;
+    let lo = state
+        .last_outputs
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("VIEW_DATA_UNAVAILABLE: no last_outputs"))?;
+
+    let view_name = serde_json::to_value(req.view)?;
+    let view_str = view_name
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("bad view name"))?;
+
+    let params_py = match &req.params {
+        Some(v) => {
+            let json_str = serde_json::to_string(v)?;
+            py.import("json")?.call_method1("loads", (json_str,))?
+        }
+        None => py.None().into_bound(py),
+    };
+
+    let result_py =
+        views_mod.call_method1("compute_view", (handle, lo.bind(py), view_str, params_py))?;
+
+    let json_mod = py.import("json")?;
+    let result_str: String = json_mod.call_method1("dumps", (result_py,))?.extract()?;
+
+    let data: serde_json::Value = serde_json::from_str(&result_str)?;
+    Ok(data)
 }
 
 #[cfg(test)]
