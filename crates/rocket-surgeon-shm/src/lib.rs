@@ -98,6 +98,43 @@ impl RingConfig {
     }
 }
 
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn serialize_probe_frame(
+    rank: u32,
+    layer: u32,
+    comp_id: u16,
+    dtype: u8,
+    ndim: u8,
+    shape: &[u32; 8],
+    tick_id: u64,
+    data_off: u64,
+    size: u64,
+    flags: u32,
+    generation: u32,
+) -> [u8; PROBE_FRAME_HEADER_SIZE] {
+    let mut buf = [0u8; PROBE_FRAME_HEADER_SIZE];
+
+    buf[0..4].copy_from_slice(&rank.to_le_bytes());
+    buf[4..8].copy_from_slice(&layer.to_le_bytes());
+    buf[8..10].copy_from_slice(&comp_id.to_le_bytes());
+    buf[10] = dtype;
+    buf[11] = ndim;
+
+    for (i, &dim) in shape.iter().enumerate() {
+        let start = 12 + i * 4;
+        buf[start..start + 4].copy_from_slice(&dim.to_le_bytes());
+    }
+
+    buf[48..56].copy_from_slice(&tick_id.to_le_bytes());
+    buf[56..64].copy_from_slice(&data_off.to_le_bytes());
+    buf[64..72].copy_from_slice(&size.to_le_bytes());
+    buf[72..76].copy_from_slice(&flags.to_le_bytes());
+    buf[76..80].copy_from_slice(&generation.to_le_bytes());
+
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

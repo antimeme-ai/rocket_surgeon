@@ -49,6 +49,7 @@ pub struct WorkerState {
         rocket_surgeon_protocol::types::ProbeDefinition,
         rocket_surgeon_probes::grammar::ProbePoint,
     )>,
+    pub shm_ring: Option<rocket_surgeon_shm::ring::DoomRingProducer>,
 }
 
 impl WorkerState {
@@ -64,6 +65,7 @@ impl WorkerState {
             forward_pass: None,
             last_outputs: None,
             active_probes: Vec::new(),
+            shm_ring: None,
         }
     }
 
@@ -125,6 +127,7 @@ fn internal_error(id: RequestId, message: String) -> Response {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     let req: HostAttachRequest = match parse_params(request) {
         Ok(r) => r,
@@ -208,6 +211,24 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     state.tick_state = TickState::new(req.rank);
     state.forward_pass = None;
 
+    let shm_ring = {
+        let session_id = format!("{:08x}", std::process::id());
+        let name = format!("/rs-{session_id}-0");
+        let config = rocket_surgeon_shm::RingConfig::new(16, 64 * 1024 * 1024)
+            .expect("ring config is valid");
+        match rocket_surgeon_shm::ring::DoomRingProducer::create(&name, config) {
+            Ok(ring) => {
+                tracing::info!(shm_name = %name, "created shared memory ring buffer");
+                Some(ring)
+            }
+            Err(e) => {
+                tracing::warn!("failed to create shm ring, falling back to base64: {e}");
+                None
+            }
+        }
+    };
+    state.shm_ring = shm_ring;
+
     let resp = HostAttachResponse {
         model_handle: info.handle,
         num_layers: info.num_layers,
@@ -216,7 +237,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         module_tree: info.module_tree,
         model_type: config.model_type,
         component_vocabulary: component_map.vocabulary,
-        shm_name: None,
+        shm_name: state.shm_ring.as_ref().map(|r| r.shm_name().to_owned()),
     };
 
     match serde_json::to_value(resp) {
@@ -610,7 +631,7 @@ fn handle_host_update_probes(state: &mut WorkerState, request: &Request) -> Resp
     }
 }
 
-fn handle_host_inspect(state: &WorkerState, request: &Request) -> Response {
+fn handle_host_inspect(state: &mut WorkerState, request: &Request) -> Response {
     let req: HostInspectRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
@@ -630,15 +651,17 @@ fn handle_host_inspect(state: &WorkerState, request: &Request) -> Response {
         );
     }
 
-    let Some(ref component_map) = state.component_map else {
-        return internal_error(request.id.clone(), "No component map available".to_owned());
+    let matched_components: Vec<_> = match state.component_map {
+        Some(ref component_map) => component_map
+            .components
+            .iter()
+            .filter(|c| crate::capture::probe_matches_target(&c.probe_point, &req.target))
+            .cloned()
+            .collect(),
+        None => {
+            return internal_error(request.id.clone(), "No component map available".to_owned());
+        }
     };
-
-    let matched_components: Vec<_> = component_map
-        .components
-        .iter()
-        .filter(|c| crate::capture::probe_matches_target(&c.probe_point, &req.target))
-        .collect();
 
     if matched_components.is_empty() {
         return Response::error(
@@ -666,8 +689,8 @@ fn handle_host_inspect(state: &WorkerState, request: &Request) -> Response {
 }
 
 fn collect_tensors(
-    state: &WorkerState,
-    matched_components: &[&crate::adapter::MappedComponent],
+    state: &mut WorkerState,
+    matched_components: &[crate::adapter::MappedComponent],
 ) -> anyhow::Result<Vec<CapturedTensor>> {
     use base64::Engine;
 
@@ -696,27 +719,95 @@ fn collect_tensors(
                 let dtype = bridge::get_tensor_dtype(py, &tensor_obj)?;
                 let device = bridge::get_tensor_device(py, &tensor_obj)?;
 
-                let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes_result);
-
                 let tensor_id = blake3::hash(&bytes_result).to_hex().to_string();
-                result.push(CapturedTensor {
-                    module_path: comp.module_path.clone(),
-                    canonical: comp.canonical.clone(),
-                    layer: comp.layer_index.unwrap_or(0),
-                    shape,
-                    dtype,
-                    device,
-                    tensor_id,
-                    shm_name: None,
-                    shm_offset: None,
-                    byte_length: None,
-                    data_base64: Some(data_base64),
+
+                let ct = try_shm_publish(
+                    &mut state.shm_ring,
+                    &bytes_result,
+                    &tensor_id,
+                    comp,
+                    &shape,
+                    &dtype,
+                    &device,
+                )
+                .unwrap_or_else(|| {
+                    let data_base64 =
+                        base64::engine::general_purpose::STANDARD.encode(&bytes_result);
+                    CapturedTensor {
+                        module_path: comp.module_path.clone(),
+                        canonical: comp.canonical.clone(),
+                        layer: comp.layer_index.unwrap_or(0),
+                        shape,
+                        dtype,
+                        device,
+                        tensor_id,
+                        shm_name: None,
+                        shm_offset: None,
+                        byte_length: None,
+                        data_base64: Some(data_base64),
+                    }
                 });
+
+                result.push(ct);
             }
         }
 
         Ok(result)
     })
+}
+
+fn try_shm_publish(
+    shm_ring: &mut Option<rocket_surgeon_shm::ring::DoomRingProducer>,
+    bytes: &[u8],
+    tensor_id: &str,
+    comp: &crate::adapter::MappedComponent,
+    shape: &[u64],
+    dtype: &str,
+    device: &str,
+) -> Option<CapturedTensor> {
+    let ring = shm_ring.as_mut()?;
+
+    let mut shape_arr = [0u32; 8];
+    for (i, &dim) in shape.iter().enumerate().take(8) {
+        shape_arr[i] = dim as u32;
+    }
+
+    let header_bytes = rocket_surgeon_shm::serialize_probe_frame(
+        0,
+        comp.layer_index.unwrap_or(0),
+        0,
+        0,
+        shape.len().min(8) as u8,
+        &shape_arr,
+        0,
+        0,
+        bytes.len() as u64,
+        0,
+        (ring.maketic() & 0xFFFF_FFFF) as u32,
+    );
+
+    match ring.publish(&header_bytes, bytes) {
+        Ok(slot_maketic) => {
+            let slot_offset = ring.config().slot_offset(slot_maketic) as u64;
+            Some(CapturedTensor {
+                module_path: comp.module_path.clone(),
+                canonical: comp.canonical.clone(),
+                layer: comp.layer_index.unwrap_or(0),
+                shape: shape.to_vec(),
+                dtype: dtype.to_owned(),
+                device: device.to_owned(),
+                tensor_id: tensor_id.to_owned(),
+                shm_name: Some(ring.shm_name().to_owned()),
+                shm_offset: Some(slot_offset),
+                byte_length: Some(bytes.len() as u64),
+                data_base64: None,
+            })
+        }
+        Err(e) => {
+            tracing::debug!("shm publish failed, falling back to base64: {e}");
+            None
+        }
+    }
 }
 
 fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
