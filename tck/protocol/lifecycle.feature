@@ -125,3 +125,56 @@ Feature: Session lifecycle — initialize, attach, detach
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "MODEL_NOT_ATTACHED"
     And the error "data.severity" is "recoverable"
+
+  # ── Backend integration (BEAD-0008) ─────────────────────────────────
+
+  Scenario: Attach response carries real backend model metadata
+    Given the session is in "initialized" state
+    And the backend worker reports a model with 2 layers and 4 heads
+    When the client sends "attach" with:
+      | model_path   | hf-internal-testing/tiny-random-LlamaForCausalLM |
+      | model_family | llama                                            |
+    Then the response status is "stopped"
+    And the response "data.num_layers" is 2
+    And the response "data.num_heads" is 4
+    And the response "data.hidden_dim" matches the backend report
+
+  Scenario: Attach with broken backend returns BACKEND_ATTACH_FAILED error
+    Given the session is in "initialized" state
+    And the backend worker cannot load the requested model
+    When the client sends "attach" with:
+      | model_path   | /models/does-not-exist |
+      | model_family | llama                  |
+    Then the response is a JSON-RPC error
+    And the error "data.error_code" is "BACKEND_ATTACH_FAILED"
+    And the error "data.severity" is "recoverable"
+    And the error "data.context" includes the backend error message
+    And the session remains in "initialized" state
+
+  Scenario: Attach response model_family reflects worker, not client claim
+    Given the session is in "initialized" state
+    And the backend worker reports model_type "mixtral"
+    When the client sends "attach" with:
+      | model_path   | hf-internal-testing/tiny-random-LlamaForCausalLM |
+      | model_family | llama                                            |
+    Then the response status is "stopped"
+    And the response "data.model_family" is "mixtral"
+
+  Scenario: Worker returning zero-valued metadata is rejected
+    Given the session is in "initialized" state
+    And the backend worker reports num_layers=0
+    When the client sends "attach" with:
+      | model_path   | /models/buggy-worker |
+      | model_family | llama                |
+    Then the response is a JSON-RPC error
+    And the error "data.error_code" is "BACKEND_ATTACH_FAILED"
+    And the error "data.context.backend_error" mentions "invalid metadata"
+
+  Scenario: Duplicate attach rejected without spawning a new worker
+    Given the session is in "stopped" state with model "llama"
+    When the client sends "attach" with:
+      | model_path   | /models/some-other-model |
+      | model_family | llama                    |
+    Then the response is a JSON-RPC error
+    And the error "data.error_code" is "MODEL_ALREADY_ATTACHED"
+    And no orchestrator subprocess was spawned for the duplicate request

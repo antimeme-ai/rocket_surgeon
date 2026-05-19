@@ -166,10 +166,11 @@ impl Session {
         Ok(self.envelope(InitializeResponse { capabilities }))
     }
 
-    pub fn attach(
-        &mut self,
-        req: &AttachRequest,
-    ) -> Result<ResponseEnvelope<AttachResponse>, SessionError> {
+    /// Cheap state-machine validation for an attach request. Used by the
+    /// daemon main loop to reject obviously-bad attaches before paying to
+    /// spawn the orchestrator/worker (BEAD-0008 review finding H-1).
+    /// Returns `Ok(())` if `commit_attach` would currently succeed.
+    pub fn validate_attach(&self, req: &AttachRequest) -> Result<(), SessionError> {
         if self.state.status == Status::Stopped || self.state.model_id.is_some() {
             return Err(SessionError::ModelAlreadyAttached(ErrorData {
                 error_code: ErrorCode::ModelAlreadyAttached,
@@ -217,6 +218,24 @@ impl Session {
             }));
         }
 
+        Ok(())
+    }
+
+    /// Commit a validated attach with real worker metadata.
+    ///
+    /// Callers MUST have called `validate_attach` first; this method assumes
+    /// validation already passed and only performs state mutation +
+    /// response building. `model_family` reflects what the worker actually
+    /// loaded (`HostAttachResponse.model_type`), not what the client claimed
+    /// — BEAD-0008 review finding H-2.
+    pub fn commit_attach(
+        &mut self,
+        req: &AttachRequest,
+        worker_model_type: &str,
+        num_layers: u32,
+        num_heads: u32,
+        hidden_dim: u32,
+    ) -> ResponseEnvelope<AttachResponse> {
         let model_id = format!("model-{}", uuid::Uuid::new_v4());
         self.state.model_id = Some(model_id.clone());
         self.state.status = Status::Stopped;
@@ -224,17 +243,32 @@ impl Session {
         self.state.tick_id = None;
         self.update_available_actions();
 
-        let (num_layers, num_heads, hidden_dim) = stub_model_info(&req.model_family);
-
-        Ok(self.envelope(AttachResponse {
+        self.envelope(AttachResponse {
             model_id,
-            model_family: req.model_family.clone(),
+            model_family: worker_model_type.to_owned(),
             num_layers,
             num_heads,
             hidden_dim,
             num_ranks: req.num_ranks,
             capabilities: Capabilities::phase1_defaults(),
-        }))
+        })
+    }
+
+    /// Convenience for tests: validate + commit in one call.
+    ///
+    /// Production code (the daemon main loop) calls `validate_attach` and
+    /// `commit_attach` separately so it can run the validation before
+    /// paying to spawn the backend.
+    #[cfg(test)]
+    pub fn attach(
+        &mut self,
+        req: &AttachRequest,
+        num_layers: u32,
+        num_heads: u32,
+        hidden_dim: u32,
+    ) -> Result<ResponseEnvelope<AttachResponse>, SessionError> {
+        self.validate_attach(req)?;
+        Ok(self.commit_attach(req, &req.model_family, num_layers, num_heads, hidden_dim))
     }
 
     pub fn detach(&mut self) -> Result<ResponseEnvelope<DetachResponse>, SessionError> {
@@ -371,15 +405,6 @@ impl Session {
     }
 }
 
-fn stub_model_info(family: &str) -> (u32, u32, u32) {
-    match family {
-        "llama" | "mixtral" => (32, 32, 4096),
-        "gpt-neox" => (44, 64, 6144),
-        "gpt2" => (12, 12, 768),
-        _ => (1, 1, 1),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +434,26 @@ mod tests {
         }
     }
 
+    // Stand-in metadata for unit tests. Production code receives these values
+    // from the worker's `HostAttachResponse` (BEAD-0008). Distinctive numbers
+    // (not the old "llama" stub 32/32/4096) so a future copy-paste can't
+    // accidentally re-encode the deleted per-family stub assumption.
+    const TEST_NUM_LAYERS: u32 = 7;
+    const TEST_NUM_HEADS: u32 = 3;
+    const TEST_HIDDEN_DIM: u32 = 256;
+
+    fn test_attach(
+        session: &mut Session,
+        family: &str,
+    ) -> Result<ResponseEnvelope<AttachResponse>, SessionError> {
+        session.attach(
+            &attach_request(family),
+            TEST_NUM_LAYERS,
+            TEST_NUM_HEADS,
+            TEST_HIDDEN_DIM,
+        )
+    }
+
     fn initialized_session() -> Session {
         let mut session = Session::new();
         session.initialize(&init_request()).unwrap();
@@ -417,7 +462,7 @@ mod tests {
 
     fn stopped_session() -> Session {
         let mut session = initialized_session();
-        session.attach(&attach_request("llama")).unwrap();
+        test_attach(&mut session, "llama").unwrap();
         session
     }
 
@@ -474,7 +519,7 @@ mod tests {
     #[test]
     fn attach_from_initialized_transitions_to_stopped() {
         let mut session = initialized_session();
-        let resp = session.attach(&attach_request("llama")).unwrap();
+        let resp = test_attach(&mut session, "llama").unwrap();
         assert_eq!(resp.state.status, Status::Stopped);
         assert!(resp.state.model_id.is_some());
         assert_eq!(resp.data.as_ref().unwrap().model_family, "llama");
@@ -483,7 +528,7 @@ mod tests {
     #[test]
     fn attach_from_uninitialized_returns_invalid_state() {
         let mut session = Session::new();
-        let err = session.attach(&attach_request("llama")).unwrap_err();
+        let err = test_attach(&mut session, "llama").unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::InvalidState);
         assert_eq!(data.current_state, Some(Status::Uninitialized));
@@ -492,7 +537,7 @@ mod tests {
     #[test]
     fn attach_while_stopped_returns_model_already_attached() {
         let mut session = stopped_session();
-        let err = session.attach(&attach_request("gpt2")).unwrap_err();
+        let err = test_attach(&mut session, "gpt2").unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::ModelAlreadyAttached);
     }
@@ -522,7 +567,7 @@ mod tests {
         assert_eq!(sid.len(), 36);
         assert!(sid.contains('-'));
 
-        let resp2 = session.attach(&attach_request("llama")).unwrap();
+        let resp2 = test_attach(&mut session, "llama").unwrap();
         assert_eq!(resp2.state.session_id, sid);
 
         let resp3 = session.detach().unwrap();
@@ -535,7 +580,7 @@ mod tests {
         let resp = session.initialize(&init_request()).unwrap();
         assert!(resp.state.model_id.is_none());
 
-        let resp = session.attach(&attach_request("llama")).unwrap();
+        let resp = test_attach(&mut session, "llama").unwrap();
         assert!(resp.state.model_id.is_some());
     }
 
@@ -563,7 +608,7 @@ mod tests {
     #[test]
     fn unsupported_model_family_returns_error() {
         let mut session = initialized_session();
-        let err = session.attach(&attach_request("unknown_arch")).unwrap_err();
+        let err = test_attach(&mut session, "unknown_arch").unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::UnsupportedModel);
     }
@@ -573,7 +618,9 @@ mod tests {
         let mut session = initialized_session();
         let mut req = attach_request("llama");
         req.config = Some(serde_json::json!({"execution_mode": "compiled"}));
-        let err = session.attach(&req).unwrap_err();
+        let err = session
+            .attach(&req, TEST_NUM_LAYERS, TEST_NUM_HEADS, TEST_HIDDEN_DIM)
+            .unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::CompiledModel);
     }
@@ -582,7 +629,7 @@ mod tests {
     fn re_attach_after_detach_succeeds() {
         let mut session = stopped_session();
         session.detach().unwrap();
-        let resp = session.attach(&attach_request("mixtral")).unwrap();
+        let resp = test_attach(&mut session, "mixtral").unwrap();
         assert_eq!(resp.state.status, Status::Stopped);
         assert_eq!(resp.data.as_ref().unwrap().model_family, "mixtral");
     }
@@ -619,7 +666,7 @@ mod tests {
         assert_eq!(resp.state.status, Status::Initialized);
         let sid = resp.state.session_id;
 
-        let resp = session.attach(&attach_request("llama")).unwrap();
+        let resp = test_attach(&mut session, "llama").unwrap();
         assert_eq!(resp.state.status, Status::Stopped);
         assert_eq!(resp.state.session_id, sid);
 
@@ -627,7 +674,7 @@ mod tests {
         assert_eq!(resp.state.status, Status::Initialized);
         assert_eq!(resp.state.session_id, sid);
 
-        let resp = session.attach(&attach_request("llama")).unwrap();
+        let resp = test_attach(&mut session, "llama").unwrap();
         assert_eq!(resp.state.status, Status::Stopped);
         assert_eq!(resp.state.session_id, sid);
     }

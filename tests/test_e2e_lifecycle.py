@@ -96,10 +96,13 @@ def run_test() -> None:  # noqa: PLR0915
         assert data["model_family"] == MODEL_FAMILY, (
             f"Expected {MODEL_FAMILY}, got: {data['model_family']}"
         )
-        assert data["num_layers"] == 32, f"Expected 32 stub layers, got: {data['num_layers']}"
-        assert data["num_heads"] == 32, f"Expected 32 stub heads, got: {data['num_heads']}"
-        assert data["hidden_dim"] == 4096, (
-            f"Expected 4096 stub hidden_dim, got: {data['hidden_dim']}"
+        # BEAD-0008: attach response now carries real model metadata from
+        # the worker, not per-family stubs. tiny-random-LlamaForCausalLM
+        # config: 2 hidden layers, 4 attention heads, hidden_size 16.
+        assert data["num_layers"] == 2, f"Expected 2 real layers, got: {data['num_layers']}"
+        assert data["num_heads"] == 4, f"Expected 4 real heads, got: {data['num_heads']}"
+        assert data["hidden_dim"] == 16, (
+            f"Expected 16 real hidden_dim, got: {data['hidden_dim']}"
         )
 
         model_id = state["model_id"]
@@ -141,6 +144,59 @@ def run_test() -> None:  # noqa: PLR0915
         print(f"  status: {state['status']}")
         print(f"  model_id: {state['model_id']}")
         print(f"  detached_model_id: {data['detached_model_id']}")
+        print("  PASS")
+
+        # ------------------------------------------------------------------
+        # Step 4: BEAD-0008 — attach with broken backend returns
+        # BACKEND_ATTACH_FAILED, session stays in initialized state
+        # ------------------------------------------------------------------
+        print("\n[test] Step 4: attach with broken backend returns error")
+        send_message(
+            proc,
+            make_request(
+                "attach",
+                {
+                    "model_path": "/models/does-not-exist-anywhere",
+                    "model_family": "llama",
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
+                req_id=4,
+            ),
+        )
+        resp = recv_message(proc)
+        print(f"  response id: {resp.get('id')}")
+
+        err = resp.get("error")
+        assert err is not None, f"Expected error, got success: {resp}"
+        err_data = err.get("data") or {}
+        assert err_data.get("error_code") == "BACKEND_ATTACH_FAILED", (
+            f"Expected BACKEND_ATTACH_FAILED, got: {err_data.get('error_code')}"
+        )
+        assert err_data.get("severity") == "recoverable", (
+            f"Expected recoverable, got: {err_data.get('severity')}"
+        )
+        ctx = err_data.get("context") or {}
+        assert "backend_error" in ctx, (
+            f"Expected backend_error in context, got: {ctx}"
+        )
+
+        # Confirm session state did not mutate — a follow-up status call
+        # should still show initialized (unit test covers this too, but the
+        # e2e proves the wiring all the way through).
+        send_message(proc, make_request("rocket/status", {}, req_id=5))
+        status_resp = recv_message(proc)
+        status_state = status_resp["result"]["state"]
+        assert status_state["status"] == "initialized", (
+            f"Session must remain initialized, got: {status_state['status']}"
+        )
+        assert status_state["model_id"] is None, (
+            f"model_id must be null, got: {status_state['model_id']}"
+        )
+
+        print(f"  error_code: {err_data.get('error_code')}")
+        print(f"  backend_error: {ctx.get('backend_error')}")
+        print(f"  session.status after failure: {status_state['status']}")
         print("  PASS")
 
     finally:
