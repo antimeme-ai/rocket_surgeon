@@ -34,6 +34,7 @@ PY_VERSION="$(tr -d '[:space:]' < "$PY_VERSION_FILE")"
 
 command -v cargo >/dev/null || die "cargo not found in PATH"
 command -v uv >/dev/null || die "uv not found — install from https://docs.astral.sh/uv/"
+command -v lefthook >/dev/null || die "lefthook not found — install with 'brew install lefthook' or see https://lefthook.dev/installation/"
 
 log "Python pin: $PY_VERSION"
 log "Repo root:  $REPO_ROOT"
@@ -120,6 +121,15 @@ log "Smoke check: Python extension imports"
 VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c 'import rocket_surgeon._rs; print(f"rocket_surgeon._rs OK from {rocket_surgeon._rs.__file__}")'
 
 # ----------------------------------------------------------------------------
+# 7. Install lefthook git hooks (idempotent — lefthook handles its own state).
+# ----------------------------------------------------------------------------
+
+if [[ -d "$REPO_ROOT/.git" ]]; then
+    log "Installing lefthook git hooks"
+    lefthook install
+fi
+
+# ----------------------------------------------------------------------------
 # Done.
 # ----------------------------------------------------------------------------
 
@@ -130,8 +140,11 @@ $(printf '\033[1;32m==>\033[0m') Bootstrap complete.
 Activate the venv:
     source .venv/bin/activate
 
-Run the e2e suite:
-    pytest tests/ -v
+Run Python unit tests:
+    pytest python/tests/ -v
+
+Run the end-to-end lifecycle test:
+    python tests/test_e2e_lifecycle.py
 
 Run the full CI checks:
     cargo xtask ci

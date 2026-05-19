@@ -61,7 +61,7 @@ One command, idempotent — pins Python via `.python-version`, creates `.venv`, 
 cargo xtask setup
 ```
 
-Prerequisites: Rust 1.85+ (edition 2024) and [`uv`](https://docs.astral.sh/uv/). Everything else (Python interpreter included) is provisioned by `uv` into the project venv.
+Prerequisites: Rust 1.85+ (edition 2024), [`uv`](https://docs.astral.sh/uv/), and [`lefthook`](https://lefthook.dev/installation/). Everything else (Python interpreter included) is provisioned by `uv` into the project venv. `lefthook install` is wired up by the bootstrap, so git hooks run automatically on commit and push.
 
 After bootstrap:
 

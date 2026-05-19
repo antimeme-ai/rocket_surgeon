@@ -1,0 +1,41 @@
+# lefthook — git hook manager
+# https://lefthook.dev/
+#
+# Installed by `cargo xtask setup`. Run `lefthook install` manually if you
+# skipped bootstrap. Heavy tests live in pre-push so pre-commit stays fast.
+
+pre-commit:
+  parallel: true
+  commands:
+    python-version-guard:
+      run: |
+        PIN=$(tr -d '[:space:]' < .python-version)
+        ACTUAL=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo unknown)
+        if [ "$ACTUAL" != "$PIN" ]; then
+          echo "python3 is $ACTUAL but .python-version pins $PIN" >&2
+          echo "run 'cargo xtask setup' and 'source .venv/bin/activate'" >&2
+          exit 1
+        fi
+    rust-fmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+    rust-clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    python-ruff-check:
+      glob: "python/**/*.py"
+      run: ruff check python/
+    python-ruff-format:
+      glob: "python/**/*.py"
+      run: ruff format --check python/
+    python-mypy:
+      glob: "python/**/*.py"
+      run: mypy python/rocket_surgeon
+
+pre-push:
+  parallel: true
+  commands:
+    cargo-test:
+      run: cargo xtask test
+    pytest:
+      run: pytest python/tests/

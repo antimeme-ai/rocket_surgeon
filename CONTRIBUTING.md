@@ -15,7 +15,10 @@
 - Python lint: `ruff check python/ && ruff format --check python/`
 - Tests must pass: `cargo test --workspace --all-targets`
 
-The pre-commit hook runs all of the above. If the hook fails, the commit fails.
+Git hooks are managed by [lefthook](https://lefthook.dev/) (`lefthook.yml`).
+`cargo xtask setup` installs them. Pre-commit runs fmt + clippy + ruff + mypy
+in parallel with file-glob scoping; pre-push runs the test suites. If a hook
+fails, the action fails — fix the issue and try again.
 
 ## Commits
 
