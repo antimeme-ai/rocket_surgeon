@@ -44,6 +44,14 @@ pub enum ErrorCode {
     InvalidPoint,
     #[serde(rename = "VIEW_DATA_UNAVAILABLE")]
     ViewDataUnavailable,
+    /// The worker subprocess could not load the model. `data.context
+    /// .backend_error` carries the worker's verbatim error message —
+    /// callers SHOULD treat that string as potentially containing
+    /// filesystem paths, `HuggingFace` repo ids, or other tenant-identifying
+    /// substrings, and scrub it before displaying to untrusted audiences.
+    /// `BEAD-0008`.
+    #[serde(rename = "BACKEND_ATTACH_FAILED")]
+    BackendAttachFailed,
 }
 
 impl ErrorCode {
@@ -71,6 +79,7 @@ impl ErrorCode {
             Self::DuplicateProbeId => -32018,
             Self::InvalidPoint => -32019,
             Self::ViewDataUnavailable => -32020,
+            Self::BackendAttachFailed => -32021,
         }
     }
 
@@ -153,6 +162,24 @@ mod tests {
         let code = ErrorCode::InvalidPoint;
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"INVALID_POINT\"");
+        let parsed: ErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, code);
+    }
+
+    #[test]
+    fn backend_attach_failed_error_code() {
+        assert_eq!(ErrorCode::BackendAttachFailed.numeric_code(), -32021);
+        assert_eq!(
+            ErrorCode::BackendAttachFailed.severity(),
+            Severity::Recoverable
+        );
+    }
+
+    #[test]
+    fn backend_attach_failed_serde() {
+        let code = ErrorCode::BackendAttachFailed;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"BACKEND_ATTACH_FAILED\"");
         let parsed: ErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, code);
     }

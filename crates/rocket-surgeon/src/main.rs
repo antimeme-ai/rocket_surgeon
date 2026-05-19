@@ -16,8 +16,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_inspect, handle_probe, handle_step, handle_subscribe, handle_unsubscribe,
-    handle_view,
+    dispatch, handle_attach, handle_inspect, handle_probe, handle_step, handle_subscribe,
+    handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -64,22 +64,29 @@ fn find_sibling_binary(name: &str) -> Option<String> {
     }
 }
 
-/// Spawn an orchestrator and send `_host/attach`. Returns the handle and
-/// model handle on success, or logs a warning and returns `None`.
+/// Spawn the orchestrator and send `_host/attach`. Returns the handle and
+/// the full `HostAttachResponse` on success, or a human-readable error
+/// message on failure (parse failure, missing binaries, spawn failure,
+/// backend rejection). BEAD-0008: the error string becomes the body of a
+/// `BACKEND_ATTACH_FAILED` response to the client.
 fn spawn_and_attach(
     request: &rocket_surgeon_protocol::jsonrpc::Request,
     orchestrator_bin: Option<&str>,
     worker_bin: Option<&str>,
     log_level: &str,
-) -> Option<(OrchestratorHandle, u64, Option<String>)> {
-    let params = request.params.as_ref()?;
-    let attach_req: AttachRequest = match serde_json::from_value(params.clone()) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("failed to parse attach params for orchestrator: {e}");
-            return None;
-        }
-    };
+) -> Result<
+    (
+        OrchestratorHandle,
+        rocket_surgeon_protocol::messages::HostAttachResponse,
+    ),
+    String,
+> {
+    let params = request
+        .params
+        .as_ref()
+        .ok_or_else(|| "attach request missing params".to_owned())?;
+    let attach_req: AttachRequest = serde_json::from_value(params.clone())
+        .map_err(|e| format!("failed to parse attach params: {e}"))?;
 
     let host_req = HostAttachRequest {
         model_source: attach_req.model_path,
@@ -91,17 +98,11 @@ fn spawn_and_attach(
     };
 
     let (Some(orch_bin), Some(wrk_bin)) = (orchestrator_bin, worker_bin) else {
-        warn!("orchestrator or worker binary not found; running without backend");
-        return None;
+        return Err("orchestrator or worker binary not found".to_owned());
     };
 
-    let mut orch = match OrchestratorHandle::spawn(orch_bin, wrk_bin, log_level) {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("failed to spawn orchestrator: {e}");
-            return None;
-        }
-    };
+    let mut orch = OrchestratorHandle::spawn(orch_bin, wrk_bin, log_level)
+        .map_err(|e| format!("failed to spawn orchestrator: {e}"))?;
 
     match orch.attach(&host_req) {
         Ok(host_resp) => {
@@ -113,12 +114,9 @@ fn spawn_and_attach(
                 module_count = host_resp.module_tree.len(),
                 "orchestrator attached model"
             );
-            Some((orch, host_resp.model_handle, host_resp.shm_name))
+            Ok((orch, host_resp))
         }
-        Err(e) => {
-            warn!("orchestrator attach failed: {e}");
-            None
-        }
+        Err(e) => Err(format!("orchestrator attach failed: {e}")),
     }
 }
 
@@ -490,7 +488,65 @@ fn main() {
         };
 
         let mut step_host_response = None;
-        let response = if request.method == method::STEP {
+        // ATTACH: capture the host response so we can wire shm + orchestrator
+        // state below if the response ends up successful. BEAD-0008 — the
+        // client-facing response now reflects real backend metadata; failed
+        // backend attaches surface as BACKEND_ATTACH_FAILED.
+        let mut attach_committed: Option<(
+            OrchestratorHandle,
+            rocket_surgeon_protocol::messages::HostAttachResponse,
+        )> = None;
+        let response = if request.method == method::ATTACH {
+            // BEAD-0008 review (H-1): cheap session-state validation BEFORE
+            // we pay to spawn the orchestrator and load the model. Without
+            // this precheck, a duplicate attach for a 70B model would spawn
+            // a worker, load weights, allocate shm, then get rejected.
+            let parsed = request
+                .params
+                .as_ref()
+                .map(|p| serde_json::from_value::<AttachRequest>(p.clone()));
+            match parsed {
+                Some(Ok(attach_req)) => {
+                    if let Err(ref e) = session.validate_attach(&attach_req) {
+                        // Build a session-error response directly — no backend spawn.
+                        let rpc_err = rocket_surgeon_protocol::jsonrpc::RpcError::from_error_data(
+                            e.error_data().clone(),
+                        );
+                        Response::error(request.id.clone(), rpc_err)
+                    } else {
+                        match spawn_and_attach(
+                            &request,
+                            orchestrator_bin.as_deref(),
+                            worker_bin.as_deref(),
+                            &cli.log_level,
+                        ) {
+                            Ok((orch, host_resp)) => {
+                                let resp = handle_attach(&mut session, &request, Ok(&host_resp));
+                                if resp.error.is_none() {
+                                    attach_committed = Some((orch, host_resp));
+                                } else {
+                                    // Shouldn't happen — we just validated.
+                                    // Drop orch to kill the worker subprocess.
+                                    drop(orch);
+                                }
+                                resp
+                            }
+                            Err(msg) => {
+                                warn!("backend attach failed: {msg}");
+                                handle_attach(&mut session, &request, Err(msg.as_str()))
+                            }
+                        }
+                    }
+                }
+                // Bad params (missing or malformed) — let handle_attach build
+                // the INVALID_PARAMS response. No backend spawn either way.
+                _ => handle_attach(
+                    &mut session,
+                    &request,
+                    Err("attach params missing or malformed"),
+                ),
+            }
+        } else if request.method == method::STEP {
             step_host_response = try_orchestrator_step(
                 &mut orchestrator,
                 model_handle,
@@ -541,28 +597,29 @@ fn main() {
             dispatch(&mut session, &request)
         };
 
-        if response.error.is_none() && request.method == method::ATTACH {
-            if let Some((orch, handle, worker_shm_name)) = spawn_and_attach(
-                &request,
-                orchestrator_bin.as_deref(),
-                worker_bin.as_deref(),
-                &cli.log_level,
-            ) {
-                orchestrator = Some(orch);
-                model_handle = Some(handle);
-                shm_consumer = worker_shm_name.and_then(|name| {
-                    match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
-                        Ok(c) => {
-                            info!(shm_name = %name, "opened shared memory ring buffer");
-                            Some(c)
-                        }
-                        Err(e) => {
-                            warn!("failed to open shm ring '{name}', using base64: {e}");
-                            None
-                        }
-                    }
-                });
+        if let Some((orch, host_resp)) = attach_committed {
+            // Tripwire: validate_attach should have rejected a duplicate
+            // attach before we ever got here. If somehow we have both an
+            // existing orchestrator and a freshly-attached one, the old one
+            // would leak. Kill the old one explicitly.
+            if let Some(old) = orchestrator.take() {
+                warn!("replacing existing orchestrator on re-attach (unexpected)");
+                drop(old);
             }
+            orchestrator = Some(orch);
+            model_handle = Some(host_resp.model_handle);
+            shm_consumer = host_resp.shm_name.and_then(|name| {
+                match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
+                    Ok(c) => {
+                        info!(shm_name = %name, "opened shared memory ring buffer");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        warn!("failed to open shm ring '{name}', using base64: {e}");
+                        None
+                    }
+                }
+            });
         }
 
         if response.error.is_none() && request.method == method::DETACH {

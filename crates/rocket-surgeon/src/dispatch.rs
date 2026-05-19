@@ -3,9 +3,9 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, EventType, HostViewResponse, InitializeRequest, InspectRequest, ProbeRequest,
-    ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    UnsubscribeResponse, ViewRequest, ViewResponse, method,
+    AttachRequest, EventType, HostAttachResponse, HostViewResponse, InitializeRequest,
+    InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest, UnsubscribeResponse, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
 
@@ -34,7 +34,17 @@ fn serialize_envelope<T: serde::Serialize>(id: RequestId, envelope: T) -> Respon
 pub fn dispatch(session: &mut Session, request: &Request) -> Response {
     match request.method.as_str() {
         method::INITIALIZE => handle_initialize(session, request),
-        method::ATTACH => handle_attach(session, request),
+        // ATTACH is routed by main.rs, which supplies the backend result.
+        // dispatch() never builds the attach response itself — see
+        // `handle_attach` for the full flow.
+        method::ATTACH => Response::error(
+            request.id.clone(),
+            RpcError {
+                code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                message: "attach must be dispatched via main loop".to_owned(),
+                data: None,
+            },
+        ),
         method::DETACH => handle_detach(session, request),
         method::STATUS => handle_status(session, request),
         method::STEP => handle_step(session, request, None),
@@ -85,7 +95,22 @@ fn handle_initialize(session: &mut Session, request: &Request) -> Response {
     }
 }
 
-fn handle_attach(session: &mut Session, request: &Request) -> Response {
+/// Build the client-facing `attach` response.
+///
+/// `backend_result` is the outcome of the worker round-trip:
+/// - `Ok(host)` → validate (cheap), then commit with real metadata.
+/// - `Err(msg)` → return `BACKEND_ATTACH_FAILED` carrying the backend's
+///   error message in `data.context.backend_error`. No session mutation.
+///
+/// Per BEAD-0008 review (H-2), the response's `model_family` is taken from
+/// `host.model_type` (what the worker loaded), not the client's claim.
+/// Per BEAD-0008 review (M-4), worker metadata is sanity-checked; zero
+/// values trigger `BACKEND_ATTACH_FAILED`.
+pub fn handle_attach(
+    session: &mut Session,
+    request: &Request,
+    backend_result: Result<&HostAttachResponse, &str>,
+) -> Response {
     let req: AttachRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => {
@@ -100,10 +125,37 @@ fn handle_attach(session: &mut Session, request: &Request) -> Response {
         }
     };
 
-    match session.attach(&req) {
-        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
-        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    let host = match backend_result {
+        Ok(h) => h,
+        Err(message) => {
+            let mut data = ErrorData::new(ErrorCode::BackendAttachFailed, message.to_owned());
+            data.context = Some(serde_json::json!({ "backend_error": message }));
+            return Response::error(request.id.clone(), RpcError::from_error_data(data));
+        }
+    };
+
+    if host.num_layers == 0 || host.num_heads == 0 || host.hidden_dim == 0 {
+        let message = format!(
+            "worker returned invalid metadata: num_layers={}, num_heads={}, hidden_dim={}",
+            host.num_layers, host.num_heads, host.hidden_dim
+        );
+        let mut data = ErrorData::new(ErrorCode::BackendAttachFailed, message.clone());
+        data.context = Some(serde_json::json!({ "backend_error": message }));
+        return Response::error(request.id.clone(), RpcError::from_error_data(data));
     }
+
+    if let Err(ref e) = session.validate_attach(&req) {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let envelope = session.commit_attach(
+        &req,
+        &host.model_type,
+        host.num_layers,
+        host.num_heads,
+        host.hidden_dim,
+    );
+    serialize_envelope(request.id.clone(), envelope)
 }
 
 fn handle_detach(session: &mut Session, request: &Request) -> Response {
@@ -624,6 +676,29 @@ mod tests {
         })
     }
 
+    // BEAD-0008: attach now goes through `handle_attach` directly with a
+    // backend response, not through `dispatch`. Distinctive numerics (not
+    // the deleted llama stub 32/32/4096) so reviewers can tell at a glance
+    // that the tests care about the *flow*, not specific magic numbers.
+    fn fake_host_attach_response() -> HostAttachResponse {
+        HostAttachResponse {
+            model_handle: 1,
+            num_layers: 7,
+            num_heads: 3,
+            hidden_dim: 256,
+            module_tree: vec![],
+            model_type: "llama".to_owned(),
+            component_vocabulary: vec![],
+            shm_name: None,
+        }
+    }
+
+    fn test_attach_dispatch(session: &mut Session) -> Response {
+        let req = make_request("attach", attach_params());
+        let host = fake_host_attach_response();
+        handle_attach(session, &req, Ok(&host))
+    }
+
     #[test]
     fn unknown_method_returns_method_not_found() {
         let mut session = Session::new();
@@ -660,21 +735,106 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_attach_succeeds() {
+    fn dispatch_attach_returns_internal_error_because_routing_lives_in_main() {
+        // BEAD-0008: dispatch() refuses ATTACH because the daemon's main loop
+        // routes it directly to handle_attach with the backend response.
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let resp = dispatch(&mut session, &make_request("attach", attach_params()));
+        assert!(resp.error.is_some());
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR
+        );
+    }
+
+    #[test]
+    fn handle_attach_with_host_response_succeeds() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let resp = test_attach_dispatch(&mut session);
+        assert!(resp.error.is_none());
+        assert_eq!(session.state().status, Status::Stopped);
+
+        // Real metadata flowed through from the fake HostAttachResponse —
+        // not the stub-fabricated values that the old code path produced.
+        let result = resp.result.as_ref().unwrap();
+        assert_eq!(result["data"]["num_layers"], 7);
+        assert_eq!(result["data"]["num_heads"], 3);
+        assert_eq!(result["data"]["hidden_dim"], 256);
+        // H-2: model_family in the response comes from the worker's
+        // model_type, not the client's claimed family.
+        assert_eq!(result["data"]["model_family"], "llama");
+    }
+
+    #[test]
+    fn handle_attach_rejects_zero_metadata_as_backend_attach_failed() {
+        // M-4: worker that returns garbage metadata (e.g. 0 layers) should
+        // be treated the same as a failed attach, not let through to clients.
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let bad_host = HostAttachResponse {
+            num_layers: 0,
+            ..fake_host_attach_response()
+        };
+        let req = make_request("attach", attach_params());
+        let resp = handle_attach(&mut session, &req, Ok(&bad_host));
+
+        let err = resp.error.as_ref().expect("expected error response");
+        assert_eq!(err.code, ErrorCode::BackendAttachFailed.numeric_code());
+        assert_eq!(session.state().status, Status::Initialized);
+    }
+
+    #[test]
+    fn handle_attach_uses_worker_model_type_over_client_claim() {
+        // H-2: when the client claims "llama" but the worker reports
+        // model_type "mixtral", the response reflects the worker.
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let host_mixtral = HostAttachResponse {
+            model_type: "mixtral".to_owned(),
+            ..fake_host_attach_response()
+        };
+        let req = make_request("attach", attach_params()); // claims "llama"
+        let resp = handle_attach(&mut session, &req, Ok(&host_mixtral));
+
+        assert!(resp.error.is_none());
+        let result = resp.result.as_ref().unwrap();
+        assert_eq!(result["data"]["model_family"], "mixtral");
+    }
+
+    #[test]
+    fn handle_attach_returns_backend_attach_failed_when_backend_missing() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
 
         let req = make_request("attach", attach_params());
-        let resp = dispatch(&mut session, &req);
-        assert!(resp.error.is_none());
-        assert_eq!(session.state().status, Status::Stopped);
+        let resp = handle_attach(&mut session, &req, Err("worker died loading torch"));
+
+        let err = resp.error.as_ref().expect("expected error response");
+        assert_eq!(err.code, ErrorCode::BackendAttachFailed.numeric_code());
+        let data = err.data.as_ref().expect("error data present");
+        assert_eq!(data.error_code, ErrorCode::BackendAttachFailed);
+        assert_eq!(
+            data.severity,
+            rocket_surgeon_protocol::errors::Severity::Recoverable
+        );
+        let context = data.context.as_ref().expect("context present");
+        assert!(context["backend_error"].as_str().unwrap().contains("torch"));
+        // Session state was not mutated by the failed attach.
+        assert_eq!(session.state().status, Status::Initialized);
+        assert!(session.state().model_id.is_none());
     }
 
     #[test]
     fn dispatch_detach_succeeds() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("detach", serde_json::Value::Null);
         let resp = dispatch(&mut session, &req);
@@ -686,7 +846,7 @@ mod tests {
     fn dispatch_status_from_stopped() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/status", serde_json::Value::Null);
         let resp = dispatch(&mut session, &req);
@@ -697,7 +857,7 @@ mod tests {
     fn dispatch_stub_method_from_stopped() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/intervene", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
@@ -723,7 +883,7 @@ mod tests {
     fn dispatch_step_from_stopped_returns_step_response() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request(
             "rocket/step",
@@ -753,7 +913,7 @@ mod tests {
     fn dispatch_step_backward_returns_capability_error() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request(
             "rocket/step",
@@ -771,7 +931,7 @@ mod tests {
     fn dispatch_step_invalid_params_returns_error() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/step", serde_json::json!({"wrong": true}));
         let resp = dispatch(&mut session, &req);
@@ -802,7 +962,7 @@ mod tests {
     fn dispatch_step_tick_id_increments() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let step_params = serde_json::json!({
             "direction": "forward",
@@ -876,7 +1036,7 @@ mod tests {
     fn dispatch_inspect_from_stopped_with_host_response() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut store = TensorStore::new();
         let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
@@ -941,7 +1101,7 @@ mod tests {
     fn dispatch_inspect_with_slice() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut store = TensorStore::new();
         let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
@@ -985,7 +1145,7 @@ mod tests {
     fn dispatch_inspect_empty_host_response_returns_tensor_not_found() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut store = TensorStore::new();
         let host_resp = HostInspectResponse { tensors: vec![] };
@@ -1007,7 +1167,7 @@ mod tests {
     fn dispatch_inspect_slice_out_of_bounds() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut store = TensorStore::new();
         let data = vec![0u8; 16]; // 4 x f32
@@ -1046,7 +1206,7 @@ mod tests {
     fn dispatch_inspect_no_host_response_without_orchestrator() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut store = TensorStore::new();
         let req = make_request(
@@ -1068,7 +1228,7 @@ mod tests {
     fn dispatch_probe_define_returns_probe_id() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
         let req = make_request(
@@ -1102,7 +1262,7 @@ mod tests {
     fn dispatch_probe_list_returns_all() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
         handle_probe(
@@ -1151,7 +1311,7 @@ mod tests {
     fn handle_subscribe_from_stopped_returns_available_events() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/subscribe", serde_json::json!({}));
         let resp = handle_subscribe(&session, &req);
@@ -1186,7 +1346,7 @@ mod tests {
     fn handle_unsubscribe_from_stopped_returns_status() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/unsubscribe", serde_json::json!({}));
         let resp = handle_unsubscribe(&session, &req);
@@ -1214,7 +1374,7 @@ mod tests {
     fn dispatch_probe_enable_nonexistent_returns_error() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let mut registry = rocket_surgeon_probes::registry::ProbeRegistry::new();
         let resp = handle_probe(
@@ -1243,7 +1403,7 @@ mod tests {
     fn handle_view_from_stopped_returns_view_response() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request(
             "rocket/view",
@@ -1272,7 +1432,7 @@ mod tests {
     fn handle_view_with_invalid_params_returns_error() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/view", serde_json::json!("not an object"));
         let resp = handle_view(&session, &req, None);
@@ -1283,7 +1443,7 @@ mod tests {
     fn handle_view_with_host_response_returns_success() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
-        dispatch(&mut session, &make_request("attach", attach_params()));
+        test_attach_dispatch(&mut session);
 
         let host_resp = HostViewResponse {
             view: BuiltInView::ResidualStreamNorm,
