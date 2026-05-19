@@ -3,8 +3,8 @@ use std::process::{Child, Command, Stdio};
 
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
-    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest,
-    HostInspectResponse, HostStepRequest, HostStepResponse, internal,
+    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest, HostStepRequest,
+    HostStepResponse, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -122,29 +122,15 @@ impl OrchestratorHandle {
         Ok(host_resp)
     }
 
-    /// Send `_host/inspect` to the orchestrator and parse the response.
-    #[allow(dead_code)]
-    pub fn inspect(&mut self, req: &HostInspectRequest) -> anyhow::Result<HostInspectResponse> {
+    /// Send `_host/inspect` to the orchestrator and return the raw response.
+    /// The caller decides how to handle errors vs success.
+    pub fn inspect_raw(&mut self, req: &HostInspectRequest) -> anyhow::Result<Response> {
         let id = self.next_id();
         let params = serde_json::to_value(req)?;
         let request = Request::new(RequestId::Number(id), internal::HOST_INSPECT, params);
 
         self.send(&request)?;
-        let response = self.recv()?;
-
-        if let Some(err) = response.error {
-            anyhow::bail!(
-                "orchestrator inspect failed (code {}): {}",
-                err.code,
-                err.message
-            );
-        }
-
-        let result = response
-            .result
-            .ok_or_else(|| anyhow::anyhow!("orchestrator inspect: missing result"))?;
-        let host_resp: HostInspectResponse = serde_json::from_value(result)?;
-        Ok(host_resp)
+        self.recv()
     }
 
     /// Kill the orchestrator child process and wait for it to exit.
@@ -254,7 +240,7 @@ mod tests {
             detail: InspectDetail::Summary,
             slices: None,
         };
-        let result = handle.inspect(&req);
+        let result = handle.inspect_raw(&req);
         assert!(result.is_err());
     }
 }

@@ -18,6 +18,7 @@ use crate::session::Session;
 use crate::tensor_store::TensorStore;
 use crate::trace_log::{Direction, TraceLog};
 
+use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
 use rocket_surgeon_protocol::messages::{AttachRequest, HostAttachRequest, method};
 
 #[derive(Parser)]
@@ -143,17 +144,28 @@ fn try_orchestrator_step(
     }
 }
 
-/// Try to inspect via the orchestrator. Returns `Some(HostInspectResponse)` on success.
+/// Try to inspect via the orchestrator.
+/// Returns the `HostInspectResponse` on success, a forwarded error `Response` if
+/// the orchestrator returned an RPC error, or `None` if no orchestrator is available.
 fn try_orchestrator_inspect(
     orchestrator: &mut Option<OrchestratorHandle>,
     model_handle: Option<u64>,
     request: &rocket_surgeon_protocol::jsonrpc::Request,
-) -> Option<rocket_surgeon_protocol::messages::HostInspectResponse> {
-    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
-    let inspect_req: rocket_surgeon_protocol::messages::InspectRequest = request
+) -> Result<Option<rocket_surgeon_protocol::messages::HostInspectResponse>, Box<Response>> {
+    let Some(orch) = orchestrator.as_mut() else {
+        return Ok(None);
+    };
+    let Some(mh) = model_handle else {
+        return Ok(None);
+    };
+    let inspect_req: rocket_surgeon_protocol::messages::InspectRequest = match request
         .params
         .as_ref()
-        .and_then(|p| serde_json::from_value(p.clone()).ok())?;
+        .map(|p| serde_json::from_value(p.clone()))
+    {
+        Some(Ok(r)) => r,
+        _ => return Ok(None),
+    };
 
     let host_req = rocket_surgeon_protocol::messages::HostInspectRequest {
         model_handle: mh,
@@ -161,12 +173,43 @@ fn try_orchestrator_inspect(
         detail: inspect_req.detail,
         slices: inspect_req.slices,
     };
-    match orch.inspect(&host_req) {
-        Ok(hr) => Some(hr),
+
+    let raw_response = match orch.inspect_raw(&host_req) {
+        Ok(r) => r,
         Err(e) => {
-            warn!("orchestrator inspect failed: {e}");
-            None
+            warn!("orchestrator inspect transport error: {e}");
+            return Err(Box::new(Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("orchestrator transport error: {e}"),
+                    data: None,
+                },
+            )));
         }
+    };
+
+    if let Some(err) = raw_response.error {
+        warn!("orchestrator inspect failed: {}", err.message);
+        return Err(Box::new(Response::error(request.id.clone(), err)));
+    }
+
+    match raw_response.result {
+        Some(value) => {
+            let hr: rocket_surgeon_protocol::messages::HostInspectResponse =
+                serde_json::from_value(value).map_err(|e| {
+                    Box::new(Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("failed to parse orchestrator response: {e}"),
+                            data: None,
+                        },
+                    ))
+                })?;
+            Ok(Some(hr))
+        }
+        None => Ok(None),
     }
 }
 
@@ -249,13 +292,15 @@ fn main() {
             let host_response = try_orchestrator_step(&mut orchestrator, model_handle, &request);
             handle_step(&mut session, &request, host_response.as_ref())
         } else if request.method == method::INSPECT {
-            let host_response = try_orchestrator_inspect(&mut orchestrator, model_handle, &request);
-            handle_inspect(
-                &session,
-                &request,
-                host_response.as_ref(),
-                &mut tensor_store,
-            )
+            match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {
+                Ok(host_response) => handle_inspect(
+                    &session,
+                    &request,
+                    host_response.as_ref(),
+                    &mut tensor_store,
+                ),
+                Err(err_response) => *err_response,
+            }
         } else {
             dispatch(&mut session, &request)
         };
