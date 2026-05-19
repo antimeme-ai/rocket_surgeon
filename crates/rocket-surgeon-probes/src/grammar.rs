@@ -13,6 +13,7 @@ pub struct ProbePoint {
     pub rank: NumOrWild,
     pub layer: NumOrWild,
     pub component: ComponentOrWild,
+    pub call_index: NumOrWild,
     pub event: NameOrWild,
 }
 
@@ -60,6 +61,7 @@ impl ProbePoint {
             && num_matches(&self.rank, &other.rank)
             && num_matches(&self.layer, &other.layer)
             && component_matches(&self.component, &other.component)
+            && num_matches(&self.call_index, &other.call_index)
             && name_matches(&self.event, &other.event)
     }
 }
@@ -89,8 +91,8 @@ impl fmt::Display for ProbePoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}:{}:{}:{}:{}",
-            self.model, self.rank, self.layer, self.component, self.event
+            "{}:{}:{}:{}:{}:{}",
+            self.model, self.rank, self.layer, self.component, self.call_index, self.event
         )
     }
 }
@@ -207,12 +209,15 @@ fn probe_point(input: &mut &str) -> ModalResult<ProbePoint> {
     ':'.void().parse_next(input)?;
     let component = component_or_wild.parse_next(input)?;
     ':'.void().parse_next(input)?;
+    let call_index = num_or_wild.parse_next(input)?;
+    ':'.void().parse_next(input)?;
     let event = name_or_wild.parse_next(input)?;
     Ok(ProbePoint {
         model,
         rank,
         layer,
         component,
+        call_index,
         event,
     })
 }
@@ -221,11 +226,11 @@ fn probe_point(input: &mut &str) -> ModalResult<ProbePoint> {
 mod tests {
     use super::*;
 
-    // --- Design doc §8 examples ---
+    // --- 6-segment parsing ---
 
     #[test]
     fn parse_attn_output_all_ranks() {
-        let p = ProbePoint::parse("llama:*:12:attn.o_proj:output").unwrap();
+        let p = ProbePoint::parse("llama:*:12:attn.o_proj:0:output").unwrap();
         assert_eq!(p.model, NameOrWild::Name("llama".into()));
         assert_eq!(p.rank, NumOrWild::Wildcard);
         assert_eq!(p.layer, NumOrWild::Num(12));
@@ -236,12 +241,13 @@ mod tests {
                 ComponentSeg::Named("o_proj".into()),
             ])
         );
+        assert_eq!(p.call_index, NumOrWild::Num(0));
         assert_eq!(p.event, NameOrWild::Name("output".into()));
     }
 
     #[test]
     fn parse_mlp_input_rank0() {
-        let p = ProbePoint::parse("llama:0:*:mlp:input").unwrap();
+        let p = ProbePoint::parse("llama:0:*:mlp:*:input").unwrap();
         assert_eq!(p.model, NameOrWild::Name("llama".into()));
         assert_eq!(p.rank, NumOrWild::Num(0));
         assert_eq!(p.layer, NumOrWild::Wildcard);
@@ -249,12 +255,13 @@ mod tests {
             p.component,
             ComponentOrWild::Path(vec![ComponentSeg::Named("mlp".into())])
         );
+        assert_eq!(p.call_index, NumOrWild::Wildcard);
         assert_eq!(p.event, NameOrWild::Name("input".into()));
     }
 
     #[test]
     fn parse_moe_router_pre_topk() {
-        let p = ProbePoint::parse("mixtral:*:8:router:pre_topk").unwrap();
+        let p = ProbePoint::parse("mixtral:*:8:router:0:pre_topk").unwrap();
         assert_eq!(p.model, NameOrWild::Name("mixtral".into()));
         assert_eq!(p.rank, NumOrWild::Wildcard);
         assert_eq!(p.layer, NumOrWild::Num(8));
@@ -262,12 +269,13 @@ mod tests {
             p.component,
             ComponentOrWild::Path(vec![ComponentSeg::Named("router".into())])
         );
+        assert_eq!(p.call_index, NumOrWild::Num(0));
         assert_eq!(p.event, NameOrWild::Name("pre_topk".into()));
     }
 
     #[test]
     fn parse_all_wildcards() {
-        let p = ProbePoint::parse("llama:*:*:residual_post:*").unwrap();
+        let p = ProbePoint::parse("llama:*:*:residual_post:*:*").unwrap();
         assert_eq!(p.model, NameOrWild::Name("llama".into()));
         assert_eq!(p.rank, NumOrWild::Wildcard);
         assert_eq!(p.layer, NumOrWild::Wildcard);
@@ -275,12 +283,13 @@ mod tests {
             p.component,
             ComponentOrWild::Path(vec![ComponentSeg::Named("residual_post".into())])
         );
+        assert_eq!(p.call_index, NumOrWild::Wildcard);
         assert_eq!(p.event, NameOrWild::Wildcard);
     }
 
     #[test]
     fn parse_attn_scores_virtual() {
-        let p = ProbePoint::parse("llama:0:12:attn.scores:*").unwrap();
+        let p = ProbePoint::parse("llama:0:12:attn.scores:*:*").unwrap();
         assert_eq!(p.rank, NumOrWild::Num(0));
         assert_eq!(p.layer, NumOrWild::Num(12));
         assert_eq!(
@@ -290,11 +299,12 @@ mod tests {
                 ComponentSeg::Named("scores".into()),
             ])
         );
+        assert_eq!(p.call_index, NumOrWild::Wildcard);
     }
 
     #[test]
     fn parse_indexed_expert() {
-        let p = ProbePoint::parse("mixtral:*:8:experts[3]:output").unwrap();
+        let p = ProbePoint::parse("mixtral:*:8:experts[3]:0:output").unwrap();
         assert_eq!(
             p.component,
             ComponentOrWild::Path(vec![ComponentSeg::Indexed {
@@ -302,11 +312,12 @@ mod tests {
                 index: 3,
             }])
         );
+        assert_eq!(p.call_index, NumOrWild::Num(0));
     }
 
     #[test]
     fn parse_indexed_expert_with_subcomponent() {
-        let p = ProbePoint::parse("mixtral:*:8:experts[3].gate_proj:output").unwrap();
+        let p = ProbePoint::parse("mixtral:*:8:experts[3].gate_proj:0:output").unwrap();
         assert_eq!(
             p.component,
             ComponentOrWild::Path(vec![
@@ -317,21 +328,24 @@ mod tests {
                 ComponentSeg::Named("gate_proj".into()),
             ])
         );
+        assert_eq!(p.call_index, NumOrWild::Num(0));
     }
 
     #[test]
     fn parse_wildcard_component() {
-        let p = ProbePoint::parse("llama:*:12:*:output").unwrap();
+        let p = ProbePoint::parse("llama:*:12:*:0:output").unwrap();
         assert_eq!(p.component, ComponentOrWild::Wildcard);
+        assert_eq!(p.call_index, NumOrWild::Num(0));
     }
 
     #[test]
     fn parse_full_wildcard() {
-        let p = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let p = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         assert_eq!(p.model, NameOrWild::Wildcard);
         assert_eq!(p.rank, NumOrWild::Wildcard);
         assert_eq!(p.layer, NumOrWild::Wildcard);
         assert_eq!(p.component, ComponentOrWild::Wildcard);
+        assert_eq!(p.call_index, NumOrWild::Wildcard);
         assert_eq!(p.event, NameOrWild::Wildcard);
     }
 
@@ -339,21 +353,21 @@ mod tests {
 
     #[test]
     fn round_trip_complex() {
-        let input = "mixtral:*:8:experts[3].gate_proj:output";
+        let input = "mixtral:*:8:experts[3].gate_proj:0:output";
         let parsed = ProbePoint::parse(input).unwrap();
         assert_eq!(parsed.to_string(), input);
     }
 
     #[test]
     fn round_trip_all_wildcards() {
-        let input = "*:*:*:*:*";
+        let input = "*:*:*:*:*:*";
         let parsed = ProbePoint::parse(input).unwrap();
         assert_eq!(parsed.to_string(), input);
     }
 
     #[test]
     fn round_trip_all_concrete() {
-        let input = "llama:0:12:attn.o_proj:output";
+        let input = "llama:0:12:attn.o_proj:0:output";
         let parsed = ProbePoint::parse(input).unwrap();
         assert_eq!(parsed.to_string(), input);
     }
@@ -362,51 +376,65 @@ mod tests {
 
     #[test]
     fn wildcard_matches_any_rank() {
-        let pattern = ProbePoint::parse("llama:*:12:mlp:output").unwrap();
-        let target = ProbePoint::parse("llama:3:12:mlp:output").unwrap();
+        let pattern = ProbePoint::parse("llama:*:12:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("llama:3:12:mlp:0:output").unwrap();
         assert!(pattern.matches(&target));
     }
 
     #[test]
     fn wildcard_matches_any_layer() {
-        let pattern = ProbePoint::parse("llama:0:*:mlp:output").unwrap();
-        let target = ProbePoint::parse("llama:0:7:mlp:output").unwrap();
+        let pattern = ProbePoint::parse("llama:0:*:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("llama:0:7:mlp:0:output").unwrap();
         assert!(pattern.matches(&target));
     }
 
     #[test]
     fn wildcard_matches_any_component() {
-        let pattern = ProbePoint::parse("llama:0:12:*:output").unwrap();
-        let target = ProbePoint::parse("llama:0:12:attn.o_proj:output").unwrap();
+        let pattern = ProbePoint::parse("llama:0:12:*:0:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:attn.o_proj:0:output").unwrap();
+        assert!(pattern.matches(&target));
+    }
+
+    #[test]
+    fn wildcard_matches_any_call_index() {
+        let pattern = ProbePoint::parse("llama:0:12:mlp:*:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:mlp:3:output").unwrap();
         assert!(pattern.matches(&target));
     }
 
     #[test]
     fn concrete_does_not_match_different() {
-        let pattern = ProbePoint::parse("llama:0:12:mlp:output").unwrap();
-        let target = ProbePoint::parse("llama:0:12:attn:output").unwrap();
+        let pattern = ProbePoint::parse("llama:0:12:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:attn:0:output").unwrap();
         assert!(!pattern.matches(&target));
     }
 
     #[test]
     fn different_model_does_not_match() {
-        let pattern = ProbePoint::parse("llama:0:12:mlp:output").unwrap();
-        let target = ProbePoint::parse("mixtral:0:12:mlp:output").unwrap();
+        let pattern = ProbePoint::parse("llama:0:12:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("mixtral:0:12:mlp:0:output").unwrap();
         assert!(!pattern.matches(&target));
     }
 
     #[test]
     fn different_layer_does_not_match() {
-        let pattern = ProbePoint::parse("llama:0:12:mlp:output").unwrap();
-        let target = ProbePoint::parse("llama:0:13:mlp:output").unwrap();
+        let pattern = ProbePoint::parse("llama:0:12:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("llama:0:13:mlp:0:output").unwrap();
+        assert!(!pattern.matches(&target));
+    }
+
+    #[test]
+    fn different_call_index_does_not_match() {
+        let pattern = ProbePoint::parse("llama:0:12:mlp:0:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:mlp:1:output").unwrap();
         assert!(!pattern.matches(&target));
     }
 
     // --- Invalid input ---
 
     #[test]
-    fn reject_missing_segments() {
-        assert!(ProbePoint::parse("llama:0:12:mlp").is_err());
+    fn reject_five_segments() {
+        assert!(ProbePoint::parse("llama:0:12:mlp:output").is_err());
     }
 
     #[test]
@@ -415,45 +443,45 @@ mod tests {
     }
 
     #[test]
-    fn reject_extra_segment() {
-        assert!(ProbePoint::parse("llama:0:12:mlp:output:extra").is_err());
+    fn reject_seven_segments() {
+        assert!(ProbePoint::parse("llama:0:12:mlp:0:output:extra").is_err());
     }
 
     #[test]
     fn reject_trailing_colon() {
-        assert!(ProbePoint::parse("llama:0:12:mlp:output:").is_err());
+        assert!(ProbePoint::parse("llama:0:12:mlp:0:output:").is_err());
     }
 
     #[test]
     fn reject_leading_colon() {
-        assert!(ProbePoint::parse(":0:12:mlp:output").is_err());
+        assert!(ProbePoint::parse(":0:12:mlp:0:output").is_err());
     }
 
     #[test]
     fn reject_negative_layer() {
-        assert!(ProbePoint::parse("llama:0:-1:mlp:output").is_err());
+        assert!(ProbePoint::parse("llama:0:-1:mlp:0:output").is_err());
     }
 
     #[test]
     fn reject_non_numeric_rank() {
-        assert!(ProbePoint::parse("llama:abc:12:mlp:output").is_err());
+        assert!(ProbePoint::parse("llama:abc:12:mlp:0:output").is_err());
     }
 
     #[test]
     fn reject_empty_component_segment() {
-        assert!(ProbePoint::parse("llama:0:12:.mlp:output").is_err());
+        assert!(ProbePoint::parse("llama:0:12:.mlp:0:output").is_err());
     }
 
     #[test]
     fn reject_unclosed_bracket() {
-        assert!(ProbePoint::parse("llama:0:12:experts[3:output").is_err());
+        assert!(ProbePoint::parse("llama:0:12:experts[3:0:output").is_err());
     }
 
     // --- Serde round-trip ---
 
     #[test]
     fn serde_round_trip() {
-        let p = ProbePoint::parse("llama:0:12:attn.o_proj:output").unwrap();
+        let p = ProbePoint::parse("llama:0:12:attn.o_proj:0:output").unwrap();
         let json = serde_json::to_string(&p).unwrap();
         let p2: ProbePoint = serde_json::from_str(&json).unwrap();
         assert_eq!(p, p2);

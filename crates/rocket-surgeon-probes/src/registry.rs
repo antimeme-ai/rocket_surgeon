@@ -144,23 +144,23 @@ mod tests {
     fn define_and_get() {
         let mut reg = ProbeRegistry::new();
         let id = reg
-            .define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+            .define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
         assert_eq!(id, "p1");
         assert!(reg.get("p1").is_some());
         assert_eq!(
             reg.get("p1").unwrap().point,
-            "llama:0:12:attn.o_proj:output"
+            "llama:0:12:attn.o_proj:0:output"
         );
     }
 
     #[test]
     fn define_duplicate_rejected() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
         let err = reg
-            .define(capture_probe("p1", "llama:0:12:mlp:output"))
+            .define(capture_probe("p1", "llama:0:12:mlp:0:output"))
             .unwrap_err();
         assert!(matches!(err, RegistryError::DuplicateId { .. }));
     }
@@ -175,9 +175,9 @@ mod tests {
     #[test]
     fn list_returns_all_sorted() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
-        reg.define(capture_probe("p2", "llama:0:12:mlp:output"))
+        reg.define(capture_probe("p2", "llama:0:12:mlp:0:output"))
             .unwrap();
         let list = reg.list();
         assert_eq!(list.len(), 2);
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn enable_and_disable() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
 
         let probe = reg.disable("p1").unwrap();
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn enable_already_enabled_is_idempotent() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
         let probe = reg.enable("p1").unwrap();
         assert!(probe.enabled);
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn disable_already_disabled_is_idempotent() {
         let mut reg = ProbeRegistry::new();
-        let mut p = capture_probe("p1", "llama:0:12:attn.o_proj:output");
+        let mut p = capture_probe("p1", "llama:0:12:attn.o_proj:0:output");
         p.enabled = false;
         reg.define(p).unwrap();
         let probe = reg.disable("p1").unwrap();
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn remove_probe() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
         let removed = reg.remove("p1").unwrap();
         assert_eq!(removed.id, "p1");
@@ -252,12 +252,12 @@ mod tests {
     #[test]
     fn matching_wildcard_finds_all() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
-        reg.define(capture_probe("p2", "llama:0:13:mlp:input"))
+        reg.define(capture_probe("p2", "llama:0:13:mlp:0:input"))
             .unwrap();
 
-        let wildcard = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let wildcard = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         let matched = reg.matching(&wildcard);
         assert_eq!(matched.len(), 2);
     }
@@ -265,12 +265,12 @@ mod tests {
     #[test]
     fn matching_specific_filters_correctly() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
-        reg.define(capture_probe("p2", "llama:0:13:mlp:input"))
+        reg.define(capture_probe("p2", "llama:0:13:mlp:0:input"))
             .unwrap();
 
-        let target = ProbePoint::parse("llama:0:12:attn.o_proj:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:attn.o_proj:0:output").unwrap();
         let matched = reg.matching(&target);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].id, "p1");
@@ -279,12 +279,12 @@ mod tests {
     #[test]
     fn matching_partial_wildcard_probe() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:*:*:mlp:output"))
+        reg.define(capture_probe("p1", "llama:*:*:mlp:*:output"))
             .unwrap();
-        reg.define(capture_probe("p2", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p2", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
 
-        let target = ProbePoint::parse("llama:0:5:mlp:output").unwrap();
+        let target = ProbePoint::parse("llama:0:5:mlp:0:output").unwrap();
         let matched = reg.matching(&target);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].id, "p1");
@@ -293,10 +293,10 @@ mod tests {
     #[test]
     fn matching_returns_empty_when_no_match() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
 
-        let target = ProbePoint::parse("mixtral:0:0:mlp:input").unwrap();
+        let target = ProbePoint::parse("mixtral:0:0:mlp:0:input").unwrap();
         let matched = reg.matching(&target);
         assert!(matched.is_empty());
     }
@@ -304,9 +304,9 @@ mod tests {
     #[test]
     fn matching_wildcard_probe_point() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("p1", "*:*:*:*:*:*")).unwrap();
 
-        let target = ProbePoint::parse("llama:0:12:attn.o_proj:output").unwrap();
+        let target = ProbePoint::parse("llama:0:12:attn.o_proj:0:output").unwrap();
         let matched = reg.matching(&target);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].id, "p1");
@@ -315,11 +315,11 @@ mod tests {
     #[test]
     fn matching_enabled_excludes_disabled() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "*:*:*:*:*")).unwrap();
-        reg.define(capture_probe("p2", "*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("p1", "*:*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("p2", "*:*:*:*:*:*")).unwrap();
         reg.disable("p2").unwrap();
 
-        let wildcard = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let wildcard = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         let matched = reg.matching_enabled(&wildcard);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].id, "p1");
@@ -328,18 +328,18 @@ mod tests {
     #[test]
     fn matching_sorted_by_priority() {
         let mut reg = ProbeRegistry::new();
-        let mut p1 = capture_probe("p1", "*:*:*:*:*");
+        let mut p1 = capture_probe("p1", "*:*:*:*:*:*");
         p1.priority = 10;
-        let mut p2 = capture_probe("p2", "*:*:*:*:*");
+        let mut p2 = capture_probe("p2", "*:*:*:*:*:*");
         p2.priority = 0;
-        let mut p3 = capture_probe("p3", "*:*:*:*:*");
+        let mut p3 = capture_probe("p3", "*:*:*:*:*:*");
         p3.priority = 5;
 
         reg.define(p1).unwrap();
         reg.define(p2).unwrap();
         reg.define(p3).unwrap();
 
-        let wildcard = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let wildcard = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         let matched = reg.matching(&wildcard);
         assert_eq!(matched.len(), 3);
         assert_eq!(matched[0].id, "p2");
@@ -350,15 +350,15 @@ mod tests {
     #[test]
     fn matching_enabled_sorted_by_priority() {
         let mut reg = ProbeRegistry::new();
-        let mut p1 = capture_probe("p1", "*:*:*:*:*");
+        let mut p1 = capture_probe("p1", "*:*:*:*:*:*");
         p1.priority = 10;
-        let mut p2 = capture_probe("p2", "*:*:*:*:*");
+        let mut p2 = capture_probe("p2", "*:*:*:*:*:*");
         p2.priority = 0;
 
         reg.define(p1).unwrap();
         reg.define(p2).unwrap();
 
-        let wildcard = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let wildcard = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         let matched = reg.matching_enabled(&wildcard);
         assert_eq!(matched[0].id, "p2");
         assert_eq!(matched[1].id, "p1");
@@ -367,11 +367,11 @@ mod tests {
     #[test]
     fn priority_ties_broken_by_insertion_order() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("first", "*:*:*:*:*")).unwrap();
-        reg.define(capture_probe("second", "*:*:*:*:*")).unwrap();
-        reg.define(capture_probe("third", "*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("first", "*:*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("second", "*:*:*:*:*:*")).unwrap();
+        reg.define(capture_probe("third", "*:*:*:*:*:*")).unwrap();
 
-        let wildcard = ProbePoint::parse("*:*:*:*:*").unwrap();
+        let wildcard = ProbePoint::parse("*:*:*:*:*:*").unwrap();
         let matched = reg.matching(&wildcard);
         assert_eq!(matched[0].id, "first");
         assert_eq!(matched[1].id, "second");
@@ -381,9 +381,9 @@ mod tests {
     #[test]
     fn active_probe_ids() {
         let mut reg = ProbeRegistry::new();
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
-        reg.define(capture_probe("p2", "llama:0:13:mlp:input"))
+        reg.define(capture_probe("p2", "llama:0:13:mlp:0:input"))
             .unwrap();
         reg.disable("p2").unwrap();
 
@@ -398,7 +398,7 @@ mod tests {
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
 
-        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:output"))
+        reg.define(capture_probe("p1", "llama:0:12:attn.o_proj:0:output"))
             .unwrap();
         assert!(!reg.is_empty());
         assert_eq!(reg.len(), 1);
