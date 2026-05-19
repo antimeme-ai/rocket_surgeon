@@ -39,6 +39,7 @@ pub mod internal {
     pub const HOST_CONFIGURE_HOOKS: &str = "_host/configure_hooks";
     pub const HOST_STEP: &str = "_host/step";
     pub const HOST_UPDATE_PROBES: &str = "_host/update_probes";
+    pub const HOST_INSPECT: &str = "_host/inspect";
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +498,36 @@ pub struct HostUpdateProbesResponse {
     pub probes_active: u32,
 }
 
+// ---------------------------------------------------------------------------
+// _host/inspect (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInspectRequest {
+    pub model_handle: u64,
+    pub target: String,
+    #[serde(default)]
+    pub detail: InspectDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slices: Option<Vec<[u64; 2]>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInspectResponse {
+    pub tensors: Vec<CapturedTensor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedTensor {
+    pub module_path: String,
+    pub canonical: String,
+    pub layer: u32,
+    pub shape: Vec<u64>,
+    pub dtype: String,
+    pub device: String,
+    pub data_base64: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +711,82 @@ mod tests {
         let json = r#"{"model_handle":1,"count":1}"#;
         let req: HostStepRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.granularity, None);
+    }
+
+    #[test]
+    fn internal_inspect_constant() {
+        assert_eq!(internal::HOST_INSPECT, "_host/inspect");
+    }
+
+    #[test]
+    fn host_inspect_request_round_trip() {
+        let req = HostInspectRequest {
+            model_handle: 1,
+            target: "model:0:0:*:output".to_owned(),
+            detail: InspectDetail::Summary,
+            slices: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostInspectRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_inspect_request_with_slices_round_trip() {
+        let req = HostInspectRequest {
+            model_handle: 1,
+            target: "model:0:0:q_proj:output".to_owned(),
+            detail: InspectDetail::Slice,
+            slices: Some(vec![[0, 10], [20, 30]]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostInspectRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert_eq!(parsed.slices.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn host_inspect_response_round_trip() {
+        let resp = HostInspectResponse {
+            tensors: vec![CapturedTensor {
+                module_path: "model.layers.0.self_attn.q_proj".to_owned(),
+                canonical: "q_proj".to_owned(),
+                layer: 0,
+                shape: vec![1, 4, 32],
+                dtype: "float32".to_owned(),
+                device: "cpu".to_owned(),
+                data_base64: "AAAA".to_owned(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostInspectResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tensors.len(), 1);
+        assert_eq!(parsed.tensors[0].canonical, "q_proj");
+    }
+
+    #[test]
+    fn host_inspect_response_empty_tensors_round_trip() {
+        let resp = HostInspectResponse { tensors: vec![] };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostInspectResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.tensors.is_empty());
+    }
+
+    #[test]
+    fn captured_tensor_round_trip() {
+        let ct = CapturedTensor {
+            module_path: "model.layers.3.mlp.gate_proj".to_owned(),
+            canonical: "gate_proj".to_owned(),
+            layer: 3,
+            shape: vec![1, 768],
+            dtype: "float16".to_owned(),
+            device: "cuda:0".to_owned(),
+            data_base64: "dGVzdA==".to_owned(),
+        };
+        let json = serde_json::to_string(&ct).unwrap();
+        let parsed: CapturedTensor = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.module_path, ct.module_path);
+        assert_eq!(parsed.layer, 3);
+        assert_eq!(parsed.shape, vec![1, 768]);
     }
 }
