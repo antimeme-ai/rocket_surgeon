@@ -5,6 +5,12 @@ pub struct InternTable {
     next_iid: u64,
 }
 
+impl Default for InternTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InternTable {
     pub fn new() -> Self {
         Self {
