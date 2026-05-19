@@ -1,11 +1,11 @@
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, DetachResponse, InitializeRequest, InitializeResponse,
-    MemoryUsage, StatusResponse, StepRequest, StepResponse,
+    InspectResponse, MemoryUsage, StatusResponse, StepRequest, StepResponse,
 };
 use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
-    ActionName, Capabilities, ResponseEnvelope, SessionState, Status,
+    ActionName, Capabilities, ResponseEnvelope, SessionState, Status, TensorSummary,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -354,6 +354,21 @@ impl Session {
             stopped_at: host_position.clone(),
         }))
     }
+
+    #[allow(dead_code)]
+    pub fn inspect(
+        &self,
+        tensors: &[TensorSummary],
+        slice_data: Option<String>,
+    ) -> Result<ResponseEnvelope<InspectResponse>, SessionError> {
+        self.require_stopped("rocket/inspect")?;
+
+        Ok(self.envelope(InspectResponse {
+            tensors: tensors.to_vec(),
+            view_result: None,
+            slice_data,
+        }))
+    }
 }
 
 fn stub_model_info(family: &str) -> (u32, u32, u32) {
@@ -370,7 +385,8 @@ mod tests {
     use super::*;
     use rocket_surgeon_protocol::messages::StepRequest;
     use rocket_surgeon_protocol::types::{
-        ExecutionMode, StepDirection, TickEvent, TickGranularity, TickPosition,
+        DType, ExecutionMode, StepDirection, TensorStats, TensorSummary, TickEvent,
+        TickGranularity, TickPosition, TopKEntry,
     };
 
     fn init_request() -> InitializeRequest {
@@ -783,5 +799,93 @@ mod tests {
         assert!(envelope.state.model_id.is_some());
         assert_eq!(envelope.state.status, Status::Stopped);
         assert!(envelope.state.available_actions.contains(&ActionName::Step));
+    }
+
+    fn sample_tensor_summary() -> TensorSummary {
+        TensorSummary {
+            tensor_id: "a".repeat(64),
+            shape: vec![4],
+            dtype: DType::Float32,
+            device: "cpu".to_owned(),
+            sharding: None,
+            stats: TensorStats {
+                mean: 2.5,
+                std: 1.118,
+                min: 1.0,
+                max: 4.0,
+                abs_max: 4.0,
+                sparsity: 0.0,
+                l2_norm: 5.477,
+                histogram: rocket_surgeon_protocol::types::Histogram {
+                    bins: 10,
+                    edges: vec![1.0, 2.0, 3.0, 4.0],
+                    counts: vec![1, 1, 1, 1],
+                },
+            },
+            top_k: vec![TopKEntry {
+                index: vec![3],
+                value: 4.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn inspect_from_stopped_succeeds() {
+        let session = stopped_session();
+        let tensors = vec![sample_tensor_summary()];
+        let result = session.inspect(&tensors, None);
+        assert!(result.is_ok());
+        let envelope = result.unwrap();
+        assert_eq!(envelope.state.status, Status::Stopped);
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.tensors.len(), 1);
+        assert!(data.slice_data.is_none());
+        assert!(data.view_result.is_none());
+    }
+
+    #[test]
+    fn inspect_from_initialized_returns_error() {
+        let session = initialized_session();
+        let result = session.inspect(&[], None);
+        let err = result.unwrap_err();
+        assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn inspect_with_slice_data() {
+        let session = stopped_session();
+        let tensors = vec![sample_tensor_summary()];
+        let result = session.inspect(&tensors, Some("AQIDBA==".to_owned()));
+        assert!(result.is_ok());
+        let data = result.unwrap().data.unwrap();
+        assert_eq!(data.slice_data.as_deref(), Some("AQIDBA=="));
+    }
+
+    #[test]
+    fn inspect_does_not_change_session_state() {
+        let mut session = stopped_session();
+        let req = StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+        };
+        let pos = TickPosition {
+            tick_id: 5,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 2,
+            component: "q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+        };
+        session.step(&req, &pos, false).unwrap();
+        let tick_before = session.state().tick_id;
+        let pos_before = session.state().position.clone();
+
+        session.inspect(&[sample_tensor_summary()], None).unwrap();
+
+        assert_eq!(session.state().tick_id, tick_before);
+        assert_eq!(session.state().position, pos_before);
+        assert_eq!(session.state().status, Status::Stopped);
     }
 }
