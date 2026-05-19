@@ -38,6 +38,9 @@ def load_model(source: str, device: str, dtype: str) -> int:
     handle = _next_handle
     _next_handle += 1
     _models[handle] = module
+    attn_impl = getattr(module.config, "_attn_implementation", "eager")
+    if attn_impl == "eager":
+        module.config.output_attentions = True  # type: ignore[union-attr]
     return handle
 
 
