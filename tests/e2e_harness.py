@@ -49,16 +49,40 @@ def send_message(proc: subprocess.Popen, body: dict) -> None:
     proc.stdin.flush()
 
 
+def _has_buffered_data(stream) -> bool:
+    """Return True if *stream*'s ``BufferedReader`` already holds unread data.
+
+    ``peek(1)`` would be the documented way, but it **blocks** when the
+    internal buffer is empty (it calls ``raw.read()`` to refill).  Instead
+    we temporarily flip the underlying fd to non-blocking so ``peek`` can
+    return immediately.
+    """
+    if not hasattr(stream, "peek") or not hasattr(stream, "fileno"):
+        return False
+    import os
+    fd = stream.fileno()
+    was_blocking = os.get_blocking(fd)
+    try:
+        os.set_blocking(fd, False)
+        data = stream.peek(1)
+        return bool(data)
+    except BlockingIOError:
+        return False
+    finally:
+        os.set_blocking(fd, was_blocking)
+
+
 def _wait_readable(stream, remaining: float) -> None:
     """Block until *stream* is readable or *remaining* seconds elapse.
 
-    Checks Python's internal buffer first (``peek``) so that data already
-    read from the OS fd by a previous ``readline``/``read`` is not missed.
+    Checks Python's internal buffer first (non-blocking peek) so that
+    data already read from the OS fd by a previous ``readline``/``read``
+    is not missed, then falls back to ``select``.
     """
     if remaining <= 0:
         msg = "Timed out waiting for data on stdout"
         raise TimeoutError(msg)
-    if hasattr(stream, "peek") and stream.peek(1):
+    if _has_buffered_data(stream):
         return
     readable, _, _ = select.select([stream], [], [], remaining)
     if not readable:

@@ -29,6 +29,9 @@ venv/
 *.bin
 *.wasm
 
+# AI tooling
+.claude/
+
 # IDE
 .idea/
 .vscode/

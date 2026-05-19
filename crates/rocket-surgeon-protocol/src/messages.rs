@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ErrorCode;
 use crate::types::{
     BuiltInView, Capabilities, CheckpointRef, DType, GranularityScope, InterventionRecipe,
-    ProbeAction, ProbeDefinition, SessionState, StepDirection, TensorSummary, TickGranularity,
+    ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary, TickGranularity,
     TickPosition,
 };
 
@@ -23,6 +23,7 @@ pub mod method {
     pub const REPLAY: &str = "rocket/replay";
     pub const STATUS: &str = "rocket/status";
     pub const SUBSCRIBE: &str = "rocket/subscribe";
+    pub const UNSUBSCRIBE: &str = "rocket/unsubscribe";
 }
 
 pub mod event {
@@ -318,26 +319,20 @@ pub enum EventType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscriptionFilter {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layer: Option<Vec<u32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rank: Option<Vec<u32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_ids: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeRequest {
-    pub events: Vec<EventType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<SubscriptionFilter>,
-}
+pub struct SubscribeRequest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResponse {
-    pub subscription_id: String,
-    pub subscribed_events: Vec<EventType>,
+    pub available_events: Vec<EventType>,
+    pub status: Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsubscribeRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsubscribeResponse {
+    pub status: Status,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +342,7 @@ pub struct SubscribeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickStoppedEvent {
     pub position: TickPosition,
-    pub state: SessionState,
+    pub state: Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -804,5 +799,62 @@ mod tests {
         assert_eq!(parsed.module_path, ct.module_path);
         assert_eq!(parsed.layer, 3);
         assert_eq!(parsed.shape, vec![1, 768]);
+    }
+
+    #[test]
+    fn subscribe_request_empty_round_trip() {
+        let req = SubscribeRequest {};
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "{}");
+        let parsed: SubscribeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn subscribe_request_ignores_unknown_fields() {
+        let json = r#"{"events":["tick.stopped"],"filter":{"layer":[1]}}"#;
+        let parsed: SubscribeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, SubscribeRequest {});
+    }
+
+    #[test]
+    fn subscribe_response_round_trip() {
+        let resp = SubscribeResponse {
+            available_events: vec![
+                EventType::TickStopped,
+                EventType::TickHeartbeat,
+                EventType::ProbeFired,
+            ],
+            status: Status::Stopped,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: SubscribeResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+        assert!(json.contains("\"available_events\""));
+        assert!(json.contains("\"stopped\""));
+    }
+
+    #[test]
+    fn unsubscribe_request_empty_round_trip() {
+        let req = UnsubscribeRequest {};
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "{}");
+        let parsed: UnsubscribeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn unsubscribe_response_round_trip() {
+        let resp = UnsubscribeResponse {
+            status: Status::Stopped,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: UnsubscribeResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn unsubscribe_method_constant() {
+        assert_eq!(method::UNSUBSCRIBE, "rocket/unsubscribe");
     }
 }

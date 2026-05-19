@@ -3,7 +3,8 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest,
+    AttachRequest, EventType, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse,
+    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
     method,
 };
 use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
@@ -38,7 +39,9 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::STATUS => handle_status(session, request),
         method::STEP => handle_step(session, request, None),
         method::INSPECT => handle_inspect_no_store(session, request),
-        method::INTERVENE | method::CHECKPOINT | method::REPLAY | method::SUBSCRIBE => {
+        method::SUBSCRIBE => handle_subscribe(session, request),
+        method::UNSUBSCRIBE => handle_unsubscribe(session, request),
+        method::INTERVENE | method::CHECKPOINT | method::REPLAY => {
             handle_stub_requires_stopped(session, request)
         }
         _ => Response::error(
@@ -421,6 +424,57 @@ pub fn handle_probe(
             Err(e) => registry_error_to_response(request.id.clone(), e),
         },
     }
+}
+
+pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
+    let _req: SubscribeRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/subscribe") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let resp = SubscribeResponse {
+        available_events: vec![
+            EventType::TickStopped,
+            EventType::TickHeartbeat,
+            EventType::ProbeFired,
+        ],
+        status: session.state().status,
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+pub fn handle_unsubscribe(session: &Session, request: &Request) -> Response {
+    let _req: UnsubscribeRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    let resp = UnsubscribeResponse {
+        status: session.state().status,
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
 }
 
 #[cfg(test)]
@@ -963,6 +1017,69 @@ mod tests {
         let data = &resp.result.unwrap()["data"];
         assert_eq!(data["probes"].as_array().unwrap().len(), 2);
         assert!(data["probe_id"].is_null());
+    }
+
+    #[test]
+    fn handle_subscribe_from_stopped_returns_available_events() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request("rocket/subscribe", serde_json::json!({}));
+        let resp = handle_subscribe(&session, &req);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let data = &result["data"];
+        let events = data["available_events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().any(|e| e == "tick.stopped"));
+        assert!(events.iter().any(|e| e == "tick.heartbeat"));
+        assert!(events.iter().any(|e| e == "probe.fired"));
+        assert_eq!(data["status"], "stopped");
+    }
+
+    #[test]
+    fn handle_subscribe_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request("rocket/subscribe", serde_json::json!({}));
+        let resp = handle_subscribe(&session, &req);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn handle_unsubscribe_from_stopped_returns_status() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request("rocket/unsubscribe", serde_json::json!({}));
+        let resp = handle_unsubscribe(&session, &req);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["data"]["status"], "stopped");
+    }
+
+    #[test]
+    fn handle_unsubscribe_from_initialized_returns_status() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request("rocket/unsubscribe", serde_json::json!({}));
+        let resp = handle_unsubscribe(&session, &req);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["data"]["status"], "initialized");
     }
 
     #[test]
