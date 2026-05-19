@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import site
 import subprocess
 import sysconfig
 import time
@@ -237,7 +238,11 @@ def spawn_daemon(env_extras: dict[str, str] | None = None) -> subprocess.Popen:
     """
     python_libdir = sysconfig.get_config_var("LIBDIR") or ""
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(PYTHON_DIR)
+    # Worker uses PyO3 auto-initialize: the embedded interpreter derives
+    # PYTHONHOME from libpython's location (the uv-managed Python), not from
+    # the venv. Extend PYTHONPATH with the venv site-packages so torch and
+    # other venv-installed packages are visible.
+    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), *site.getsitepackages()])
     env["DYLD_LIBRARY_PATH"] = python_libdir
     env["LD_LIBRARY_PATH"] = python_libdir
     if env_extras:
