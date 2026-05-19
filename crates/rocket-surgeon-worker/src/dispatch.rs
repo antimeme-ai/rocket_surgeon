@@ -211,6 +211,13 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     state.tick_state = TickState::new(req.rank);
     state.forward_pass = None;
 
+    if let Some(old_ring) = state.shm_ring.take() {
+        let old_name = old_ring.shm_name().to_owned();
+        drop(old_ring);
+        let _ = rocket_surgeon_shm::region::ShmRegion::unlink(&old_name);
+        rocket_surgeon_shm::cleanup::deregister_region_name(&old_name);
+    }
+
     let shm_ring = {
         let session_id = format!("{:08x}", std::process::id());
         let name = format!("/rs-{session_id}-0");
@@ -219,6 +226,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         match rocket_surgeon_shm::ring::DoomRingProducer::create(&name, config) {
             Ok(ring) => {
                 tracing::info!(shm_name = %name, "created shared memory ring buffer");
+                rocket_surgeon_shm::cleanup::register_region_name(&name);
                 Some(ring)
             }
             Err(e) => {
@@ -776,6 +784,13 @@ fn try_shm_publish(
 ) -> Option<CapturedTensor> {
     let ring = shm_ring.as_mut()?;
 
+    if shape.len() > 8 {
+        tracing::warn!(
+            ndim = shape.len(),
+            "tensor has more than 8 dimensions, truncating in probe frame header"
+        );
+    }
+
     let mut shape_arr = [0u32; 8];
     for (i, &dim) in shape.iter().enumerate().take(8) {
         shape_arr[i] = dim as u32;
@@ -813,7 +828,7 @@ fn try_shm_publish(
             })
         }
         Err(e) => {
-            tracing::debug!("shm publish failed, falling back to base64: {e}");
+            tracing::warn!("shm publish failed, falling back to base64: {e}");
             None
         }
     }

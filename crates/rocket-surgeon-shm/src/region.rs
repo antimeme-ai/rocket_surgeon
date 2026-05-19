@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{MAGIC, MAGIC_OFFSET, ShmError};
 
-const PSHMNAMLEN_MAX: usize = 30;
+#[cfg(target_os = "macos")]
+pub const PSHMNAMLEN_MAX: usize = 30;
+#[cfg(not(target_os = "macos"))]
+pub const PSHMNAMLEN_MAX: usize = 255;
 
 pub struct ShmRegion {
     ptr: *mut u8,
@@ -27,6 +30,11 @@ unsafe impl Send for ShmRegion {}
 
 impl ShmRegion {
     pub fn create(name: &str, size: usize) -> Result<Self, ShmError> {
+        if size == 0 {
+            return Err(ShmError::InvalidConfig(
+                "region size must be non-zero".into(),
+            ));
+        }
         validate_name(name)?;
         let c_name = CString::new(name).expect("shm name must not contain null bytes");
 
@@ -88,6 +96,11 @@ impl ShmRegion {
     }
 
     pub fn open(name: &str, size: usize) -> Result<Self, ShmError> {
+        if size == 0 {
+            return Err(ShmError::InvalidConfig(
+                "region size must be non-zero".into(),
+            ));
+        }
         validate_name(name)?;
         let c_name = CString::new(name).expect("shm name must not contain null bytes");
 
@@ -97,6 +110,31 @@ impl ShmRegion {
             return Err(ShmError::Open {
                 name: name.to_owned(),
                 source: std::io::Error::last_os_error(),
+            });
+        }
+
+        // Validate actual region size via fstat to prevent SIGBUS
+        // SAFETY: fd is valid from shm_open above, stat is zero-initialized.
+        let actual_size = unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            if libc::fstat(fd, std::ptr::addr_of_mut!(stat)) != 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(ShmError::Open {
+                    name: name.to_owned(),
+                    source: err,
+                });
+            }
+            stat.st_size
+        };
+        if (actual_size as usize) < size {
+            // SAFETY: fd is valid.
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(ShmError::RegionTooSmall {
+                expected: size,
+                actual: actual_size as usize,
             });
         }
 
@@ -170,9 +208,16 @@ impl ShmRegion {
         Ok(())
     }
 
-    pub fn as_slice(&self, offset: usize, len: usize) -> Result<&[u8], ShmError> {
+    /// Returns a slice into the shared memory region.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no concurrent writes to the range
+    /// `[offset, offset+len)` in the shared memory region.
+    pub unsafe fn as_slice(&self, offset: usize, len: usize) -> Result<&[u8], ShmError> {
         self.bounds_check(offset, len)?;
         // SAFETY: bounds_check verified offset+len is within the mmap region.
+        // Caller guarantees no concurrent writes to this range.
         Ok(unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) })
     }
 
@@ -348,7 +393,8 @@ mod tests {
         let name = test_region_name();
         let region = ShmRegion::create(&name, 4096).unwrap();
         region.write_bytes(0, b"DOOMRING").unwrap();
-        let slice = region.as_slice(0, 8).unwrap();
+        // SAFETY: single-threaded test, no concurrent writes.
+        let slice = unsafe { region.as_slice(0, 8) }.unwrap();
         assert_eq!(slice, b"DOOMRING");
         drop(region);
         ShmRegion::unlink(&name).unwrap();

@@ -222,7 +222,7 @@ pub fn handle_inspect(
     request: &Request,
     host_response: Option<&rocket_surgeon_protocol::messages::HostInspectResponse>,
     store: &mut TensorStore,
-    shm_consumer: Option<&rocket_surgeon_shm::ring::DoomRingConsumer>,
+    shm_consumer: Option<&mut rocket_surgeon_shm::ring::DoomRingConsumer>,
 ) -> Response {
     let req: InspectRequest = match parse_params(request) {
         Ok(r) => r,
@@ -275,11 +275,12 @@ fn ingest_and_respond(
     req: &InspectRequest,
     captured: &[rocket_surgeon_protocol::messages::CapturedTensor],
     store: &mut TensorStore,
-    shm_consumer: Option<&rocket_surgeon_shm::ring::DoomRingConsumer>,
+    shm_consumer: Option<&mut rocket_surgeon_shm::ring::DoomRingConsumer>,
 ) -> Response {
     let engine = base64::engine::general_purpose::STANDARD;
     let mut summaries = Vec::new();
     let mut first_tensor_id = None;
+    let mut shm_slots_consumed: u64 = 0;
 
     for ct in captured {
         let Some(dtype) = parse_dtype(&ct.dtype) else {
@@ -293,16 +294,33 @@ fn ingest_and_respond(
             );
         };
 
+        let has_shm = ct.shm_offset.is_some() && ct.byte_length.is_some();
+
+        if store.contains(&ct.tensor_id) {
+            if first_tensor_id.is_none() {
+                first_tensor_id = Some(ct.tensor_id.clone());
+            }
+            let summary = store.summarize(&ct.tensor_id).expect("tensor exists");
+            summaries.push(summary);
+            if has_shm {
+                shm_slots_consumed += 1;
+            }
+            continue;
+        }
+
         let handle = if let (Some(shm_offset), Some(byte_length)) = (ct.shm_offset, ct.byte_length)
         {
-            match read_from_shm(shm_consumer, shm_offset, byte_length) {
-                Ok(bytes) => store.insert_with_id(
-                    ct.tensor_id.clone(),
-                    bytes,
-                    ct.shape.clone(),
-                    dtype,
-                    ct.device.clone(),
-                ),
+            match read_from_shm(shm_consumer.as_deref(), shm_offset, byte_length) {
+                Ok(bytes) => {
+                    shm_slots_consumed += 1;
+                    store.insert_with_id(
+                        ct.tensor_id.clone(),
+                        bytes,
+                        ct.shape.clone(),
+                        dtype,
+                        ct.device.clone(),
+                    )
+                }
                 Err(e) => {
                     return Response::error(
                         request.id.clone(),
@@ -345,6 +363,17 @@ fn ingest_and_respond(
 
         let summary = store.summarize(&handle.tensor_id).expect("just inserted");
         summaries.push(summary);
+    }
+
+    if shm_slots_consumed > 0 {
+        if let Some(consumer) = shm_consumer {
+            if let Err(e) = consumer.advance_by(shm_slots_consumed) {
+                tracing::warn!(
+                    count = shm_slots_consumed,
+                    "failed to advance shm consumer: {e}"
+                );
+            }
+        }
     }
 
     let slice_data = if req.detail == rocket_surgeon_protocol::messages::InspectDetail::Slice {

@@ -74,9 +74,9 @@ impl TensorStore {
     ) -> TensorHandle {
         let tensor_id = blake3::hash(&data).to_hex().to_string();
 
-        if self.entries.contains_key(&tensor_id) {
-            self.touch(&tensor_id);
-            let existing = self.entries.get_mut(&tensor_id).unwrap();
+        if let Some(existing) = self.entries.get_mut(&tensor_id) {
+            existing.last_access_gen = self.access_generation;
+            self.access_generation += 1;
             existing.last_access = Instant::now();
             return TensorHandle {
                 tensor_id,
@@ -86,6 +86,8 @@ impl TensorStore {
         }
 
         let data_len = data.len();
+        // If data_len > max_bytes, we evict everything and insert anyway.
+        // This is intentional — refusing the insert would be worse.
         while !self.entries.is_empty()
             && (self.entries.len() >= self.max_entries
                 || self.current_bytes + data_len > self.max_bytes)
@@ -130,9 +132,9 @@ impl TensorStore {
         dtype: DType,
         device: String,
     ) -> TensorHandle {
-        if self.entries.contains_key(&tensor_id) {
-            self.touch(&tensor_id);
-            let existing = self.entries.get_mut(&tensor_id).unwrap();
+        if let Some(existing) = self.entries.get_mut(&tensor_id) {
+            existing.last_access_gen = self.access_generation;
+            self.access_generation += 1;
             existing.last_access = Instant::now();
             return TensorHandle {
                 tensor_id,
@@ -142,6 +144,8 @@ impl TensorStore {
         }
 
         let data_len = data.len();
+        // If data_len > max_bytes, we evict everything and insert anyway.
+        // This is intentional — refusing the insert would be worse.
         while !self.entries.is_empty()
             && (self.entries.len() >= self.max_entries
                 || self.current_bytes + data_len > self.max_bytes)
@@ -179,9 +183,9 @@ impl TensorStore {
 
     #[allow(dead_code)]
     pub fn get(&mut self, tensor_id: &str) -> Option<&StoredTensor> {
-        if self.entries.contains_key(tensor_id) {
-            self.touch(tensor_id);
-            let entry = self.entries.get_mut(tensor_id).unwrap();
+        if let Some(entry) = self.entries.get_mut(tensor_id) {
+            entry.last_access_gen = self.access_generation;
+            self.access_generation += 1;
             entry.last_access = Instant::now();
             Some(entry)
         } else {
@@ -210,12 +214,9 @@ impl TensorStore {
     }
 
     pub fn summarize(&mut self, tensor_id: &str) -> Option<TensorSummary> {
-        if !self.entries.contains_key(tensor_id) {
-            return None;
-        }
-
-        self.touch(tensor_id);
-        let entry = self.entries.get_mut(tensor_id).unwrap();
+        let entry = self.entries.get_mut(tensor_id)?;
+        entry.last_access_gen = self.access_generation;
+        self.access_generation += 1;
         entry.last_access = Instant::now();
 
         if entry.summary.is_none() {
@@ -237,12 +238,12 @@ impl TensorStore {
     }
 
     pub fn slice(&mut self, tensor_id: &str, offset: u64, len: u64) -> Result<Vec<u8>, StoreError> {
-        if !self.entries.contains_key(tensor_id) {
-            return Err(StoreError::NotFound(tensor_id.to_owned()));
-        }
-
-        self.touch(tensor_id);
-        let entry = self.entries.get_mut(tensor_id).unwrap();
+        let entry = self
+            .entries
+            .get_mut(tensor_id)
+            .ok_or_else(|| StoreError::NotFound(tensor_id.to_owned()))?;
+        entry.last_access_gen = self.access_generation;
+        self.access_generation += 1;
         entry.last_access = Instant::now();
 
         let data_len = entry.data.len() as u64;
@@ -257,14 +258,6 @@ impl TensorStore {
         let start = offset as usize;
         let end = start + len as usize;
         Ok(entry.data[start..end].to_vec())
-    }
-
-    fn touch(&mut self, tensor_id: &str) {
-        if let Some(entry) = self.entries.get_mut(tensor_id) {
-            entry.last_access_gen = self.access_generation;
-            self.access_generation += 1;
-            entry.last_access = Instant::now();
-        }
     }
 
     fn evict_oldest(&mut self) {

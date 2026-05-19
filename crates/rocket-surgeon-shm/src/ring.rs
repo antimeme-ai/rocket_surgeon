@@ -1,8 +1,8 @@
 use crate::region::ShmRegion;
 use crate::{
-    CONTROL_SIZE, MAGIC, MAKETIC_OFFSET, NETTICS_OFFSET, PROBE_FRAME_HEADER_SIZE,
-    REGION_SIZE_OFFSET, RingConfig, SLOT_COUNT_OFFSET, SLOT_SIZE_OFFSET, ShmError, VERSION,
-    VERSION_OFFSET,
+    CONTROL_SIZE, FRAME_OFFSET_GENERATION, FRAME_OFFSET_SIZE, MAGIC, MAKETIC_OFFSET,
+    NETTICS_OFFSET, PROBE_FRAME_HEADER_SIZE, REGION_SIZE_OFFSET, RingConfig, SLOT_COUNT_OFFSET,
+    SLOT_SIZE_OFFSET, ShmError, VERSION, VERSION_OFFSET,
 };
 
 pub struct ConsumedFrame {
@@ -165,13 +165,35 @@ impl DoomRingConsumer {
         let mut header = vec![0u8; PROBE_FRAME_HEADER_SIZE];
         self.region.read_bytes(slot_offset, &mut header)?;
 
-        // ProbeFrame v2: size at offset 64
-        let size_offset = 64;
+        // Read and validate size from header
         let size = u64::from_le_bytes(
-            header[size_offset..size_offset + 8]
+            header[FRAME_OFFSET_SIZE..FRAME_OFFSET_SIZE + 8]
                 .try_into()
                 .expect("8 bytes"),
         );
+
+        let slot_data_cap = self.config.slot_data_capacity();
+        if size as usize > slot_data_cap {
+            return Err(ShmError::ReadOutOfBounds {
+                offset: PROBE_FRAME_HEADER_SIZE,
+                length: size as usize,
+                capacity: slot_data_cap,
+            });
+        }
+
+        // Validate generation field to detect stale/torn reads
+        let generation = u32::from_le_bytes(
+            header[FRAME_OFFSET_GENERATION..FRAME_OFFSET_GENERATION + 4]
+                .try_into()
+                .expect("4 bytes"),
+        );
+        let expected_generation = (self.nettics & 0xFFFF_FFFF) as u32;
+        if generation != expected_generation {
+            return Err(ShmError::StaleSlot {
+                expected: expected_generation,
+                actual: generation,
+            });
+        }
 
         let mut data = vec![0u8; size as usize];
         self.region
@@ -180,9 +202,13 @@ impl DoomRingConsumer {
         Ok(Some(ConsumedFrame { header, data }))
     }
 
-    pub fn advance(&mut self) {
-        self.nettics += 1;
-        let _ = self.region.atomic_store_u64(NETTICS_OFFSET, self.nettics);
+    pub fn advance(&mut self) -> Result<(), ShmError> {
+        self.advance_by(1)
+    }
+
+    pub fn advance_by(&mut self, count: u64) -> Result<(), ShmError> {
+        self.nettics += count;
+        self.region.atomic_store_u64(NETTICS_OFFSET, self.nettics)
     }
 
     pub fn nettics(&self) -> u64 {
@@ -212,14 +238,21 @@ impl DoomRingConsumer {
         Ok(buf)
     }
 
-    pub fn slot_as_slice(
+    /// Returns a slice into a slot in the shared memory region.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no concurrent writes to the requested range
+    /// within the slot.
+    pub unsafe fn slot_as_slice(
         &self,
         slot_maketic: u64,
         offset_in_slot: usize,
         len: usize,
     ) -> Result<&[u8], ShmError> {
         let slot_offset = self.config.slot_offset(slot_maketic);
-        self.region.as_slice(slot_offset + offset_in_slot, len)
+        // SAFETY: caller is responsible for ensuring no concurrent writes.
+        unsafe { self.region.as_slice(slot_offset + offset_in_slot, len) }
     }
 }
 
@@ -240,8 +273,14 @@ mod tests {
     }
 
     fn make_header_with_size(size: u64) -> Vec<u8> {
+        make_header(size, 0)
+    }
+
+    fn make_header(size: u64, generation: u32) -> Vec<u8> {
         let mut header = vec![0u8; PROBE_FRAME_HEADER_SIZE];
-        header[64..72].copy_from_slice(&size.to_le_bytes());
+        header[FRAME_OFFSET_SIZE..FRAME_OFFSET_SIZE + 8].copy_from_slice(&size.to_le_bytes());
+        header[FRAME_OFFSET_GENERATION..FRAME_OFFSET_GENERATION + 4]
+            .copy_from_slice(&generation.to_le_bytes());
         header
     }
 
@@ -289,7 +328,8 @@ mod tests {
         let mut consumer = DoomRingConsumer::open(&name).unwrap();
 
         let data = vec![0xBB_u8; 100];
-        let header = make_header_with_size(data.len() as u64);
+        // generation=0 matches consumer.nettics=0
+        let header = make_header(data.len() as u64, 0);
         producer.publish(&header, &data).unwrap();
 
         assert_eq!(producer.maketic(), 1);
@@ -297,7 +337,7 @@ mod tests {
         let frame = consumer.try_consume().unwrap().unwrap();
         assert_eq!(&frame.header[..], &header[..]);
         assert_eq!(&frame.data[..], &data[..]);
-        consumer.advance();
+        consumer.advance().unwrap();
         assert_eq!(consumer.nettics(), 1);
 
         drop(consumer);
@@ -358,16 +398,19 @@ mod tests {
         let mut producer = DoomRingProducer::create(&name, config).unwrap();
         let mut consumer = DoomRingConsumer::open(&name).unwrap();
 
+        let mut tick: u64 = 0;
         for round in 0u8..3 {
             for i in 0u8..4 {
                 let data = vec![round * 10 + i; 50];
-                let header = make_header_with_size(data.len() as u64);
+                let generation = (tick & 0xFFFF_FFFF) as u32;
+                let header = make_header(data.len() as u64, generation);
                 producer.publish(&header, &data).unwrap();
+                tick += 1;
             }
             for i in 0u8..4 {
                 let frame = consumer.try_consume().unwrap().unwrap();
                 assert_eq!(frame.data[0], round * 10 + i);
-                consumer.advance();
+                consumer.advance().unwrap();
             }
         }
         assert_eq!(producer.maketic(), 12);

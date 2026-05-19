@@ -18,6 +18,19 @@ pub const NETTICS_OFFSET: usize = 256;
 
 pub const PROBE_FRAME_HEADER_SIZE: usize = 128;
 
+// Probe frame field offsets (must match probe_frame.rs in rocket-surgeon-python)
+pub const FRAME_OFFSET_RANK: usize = 0;
+pub const FRAME_OFFSET_LAYER: usize = 4;
+pub const FRAME_OFFSET_COMP_ID: usize = 8;
+pub const FRAME_OFFSET_DTYPE: usize = 10;
+pub const FRAME_OFFSET_NDIM: usize = 11;
+pub const FRAME_OFFSET_SHAPE: usize = 12;
+pub const FRAME_OFFSET_TICK_ID: usize = 48;
+pub const FRAME_OFFSET_DATA_OFF: usize = 56;
+pub const FRAME_OFFSET_SIZE: usize = 64;
+pub const FRAME_OFFSET_FLAGS: usize = 72;
+pub const FRAME_OFFSET_GENERATION: usize = 76;
+
 #[derive(Debug, Clone, Copy)]
 pub struct RingConfig {
     pub backuptics: u32,
@@ -28,6 +41,8 @@ pub struct RingConfig {
 pub enum ShmError {
     #[error("backuptics ({0}) must be a power of two and > 0")]
     NotPowerOfTwo(u32),
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
     #[error("shm_open failed for '{name}': {source}")]
     Open {
         name: String,
@@ -48,6 +63,12 @@ pub enum ShmError {
         length: usize,
         region_size: usize,
     },
+    #[error("read out of bounds: offset {offset} + length {length} exceeds capacity {capacity}")]
+    ReadOutOfBounds {
+        offset: usize,
+        length: usize,
+        capacity: usize,
+    },
     #[error("offset {offset} is not {alignment}-byte aligned")]
     Unaligned { offset: usize, alignment: usize },
     #[error("magic mismatch: expected DOOMRING, got {0:?}")]
@@ -67,12 +88,30 @@ pub enum ShmError {
     },
     #[error("shm name '{name}' exceeds max length {max_len}")]
     NameTooLong { name: String, max_len: usize },
+    #[error("region size mismatch: expected at least {expected}, got {actual}")]
+    RegionTooSmall { expected: usize, actual: usize },
+    #[error("stale slot: expected generation {expected}, got {actual}")]
+    StaleSlot { expected: u32, actual: u32 },
 }
 
 impl RingConfig {
     pub fn new(backuptics: u32, slot_size: u64) -> Result<Self, ShmError> {
         if backuptics == 0 || (backuptics & (backuptics - 1)) != 0 {
             return Err(ShmError::NotPowerOfTwo(backuptics));
+        }
+        if slot_size < PROBE_FRAME_HEADER_SIZE as u64 {
+            return Err(ShmError::InvalidConfig(format!(
+                "slot_size ({slot_size}) must be >= PROBE_FRAME_HEADER_SIZE ({PROBE_FRAME_HEADER_SIZE})"
+            )));
+        }
+        let slot_total = u64::from(backuptics)
+            .checked_mul(slot_size)
+            .and_then(|v| v.checked_add(CONTROL_SIZE as u64))
+            .ok_or_else(|| ShmError::InvalidConfig("region_size overflows u64".into()))?;
+        if slot_total > usize::MAX as u64 {
+            return Err(ShmError::InvalidConfig(
+                "region_size exceeds addressable memory".into(),
+            ));
         }
         Ok(Self {
             backuptics,
@@ -115,22 +154,23 @@ pub fn serialize_probe_frame(
 ) -> [u8; PROBE_FRAME_HEADER_SIZE] {
     let mut buf = [0u8; PROBE_FRAME_HEADER_SIZE];
 
-    buf[0..4].copy_from_slice(&rank.to_le_bytes());
-    buf[4..8].copy_from_slice(&layer.to_le_bytes());
-    buf[8..10].copy_from_slice(&comp_id.to_le_bytes());
-    buf[10] = dtype;
-    buf[11] = ndim;
+    buf[FRAME_OFFSET_RANK..FRAME_OFFSET_RANK + 4].copy_from_slice(&rank.to_le_bytes());
+    buf[FRAME_OFFSET_LAYER..FRAME_OFFSET_LAYER + 4].copy_from_slice(&layer.to_le_bytes());
+    buf[FRAME_OFFSET_COMP_ID..FRAME_OFFSET_COMP_ID + 2].copy_from_slice(&comp_id.to_le_bytes());
+    buf[FRAME_OFFSET_DTYPE] = dtype;
+    buf[FRAME_OFFSET_NDIM] = ndim;
 
     for (i, &dim) in shape.iter().enumerate() {
-        let start = 12 + i * 4;
+        let start = FRAME_OFFSET_SHAPE + i * 4;
         buf[start..start + 4].copy_from_slice(&dim.to_le_bytes());
     }
 
-    buf[48..56].copy_from_slice(&tick_id.to_le_bytes());
-    buf[56..64].copy_from_slice(&data_off.to_le_bytes());
-    buf[64..72].copy_from_slice(&size.to_le_bytes());
-    buf[72..76].copy_from_slice(&flags.to_le_bytes());
-    buf[76..80].copy_from_slice(&generation.to_le_bytes());
+    buf[FRAME_OFFSET_TICK_ID..FRAME_OFFSET_TICK_ID + 8].copy_from_slice(&tick_id.to_le_bytes());
+    buf[FRAME_OFFSET_DATA_OFF..FRAME_OFFSET_DATA_OFF + 8].copy_from_slice(&data_off.to_le_bytes());
+    buf[FRAME_OFFSET_SIZE..FRAME_OFFSET_SIZE + 8].copy_from_slice(&size.to_le_bytes());
+    buf[FRAME_OFFSET_FLAGS..FRAME_OFFSET_FLAGS + 4].copy_from_slice(&flags.to_le_bytes());
+    buf[FRAME_OFFSET_GENERATION..FRAME_OFFSET_GENERATION + 4]
+        .copy_from_slice(&generation.to_le_bytes());
 
     buf
 }

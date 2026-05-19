@@ -20,12 +20,36 @@ pub fn discover_stale_region_names() -> Vec<String> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with("rs-") {
-                    names.push(format!("/{name}"));
+                    // Format: rs-{pid_hex}-{n}
+                    // Only include regions whose owning PID is dead.
+                    if let Some(pid) = parse_pid_from_region_name(name) {
+                        if !is_pid_alive(pid) {
+                            names.push(format!("/{name}"));
+                        }
+                    } else {
+                        // Can't parse PID — include it as potentially stale
+                        names.push(format!("/{name}"));
+                    }
                 }
             }
         }
     }
     names
+}
+
+/// Parse the PID from a region name of the form `rs-{pid_hex}-{n}`.
+#[cfg(target_os = "linux")]
+fn parse_pid_from_region_name(name: &str) -> Option<i32> {
+    let rest = name.strip_prefix("rs-")?;
+    let pid_hex = rest.split('-').next()?;
+    u32::from_str_radix(pid_hex, 16).ok().map(|p| p as i32)
+}
+
+/// Check if a PID is still alive using `kill(pid, 0)`.
+#[cfg(target_os = "linux")]
+fn is_pid_alive(pid: i32) -> bool {
+    // SAFETY: kill with signal 0 performs error checking without sending a signal.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[cfg(target_os = "macos")]
@@ -54,6 +78,9 @@ pub fn register_region_name(name: &str) {
     let state_dir = dirs_or_home();
     let _ = std::fs::create_dir_all(&state_dir);
     let state_file = state_dir.join("shm_regions.json");
+    let lock_file = state_dir.join("shm_regions.lock");
+
+    let _lock = AdvisoryLock::acquire(&lock_file);
     let mut names = match std::fs::read_to_string(&state_file) {
         Ok(contents) => serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -65,12 +92,16 @@ pub fn register_region_name(name: &str) {
         &state_file,
         serde_json::to_string(&names).unwrap_or_default(),
     );
+    // _lock drops here, releasing the advisory lock
 }
 
 #[cfg(target_os = "macos")]
 pub fn deregister_region_name(name: &str) {
     let state_dir = dirs_or_home();
     let state_file = state_dir.join("shm_regions.json");
+    let lock_file = state_dir.join("shm_regions.lock");
+
+    let _lock = AdvisoryLock::acquire(&lock_file);
     if let Ok(contents) = std::fs::read_to_string(&state_file) {
         let mut names: Vec<String> = serde_json::from_str(&contents).unwrap_or_default();
         names.retain(|n| n != name);
@@ -78,6 +109,43 @@ pub fn deregister_region_name(name: &str) {
             &state_file,
             serde_json::to_string(&names).unwrap_or_default(),
         );
+    }
+    // _lock drops here, releasing the advisory lock
+}
+
+/// RAII advisory file lock using `flock(2)`.
+#[cfg(target_os = "macos")]
+struct AdvisoryLock {
+    fd: i32,
+}
+
+#[cfg(target_os = "macos")]
+impl AdvisoryLock {
+    fn acquire(path: &std::path::Path) -> Self {
+        use std::os::unix::io::IntoRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .expect("failed to open lock file");
+        let fd = file.into_raw_fd();
+        // SAFETY: fd is valid from OpenOptions::open above.
+        unsafe {
+            libc::flock(fd, libc::LOCK_EX);
+        }
+        Self { fd }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AdvisoryLock {
+    fn drop(&mut self) {
+        // SAFETY: fd is valid, acquired in AdvisoryLock::acquire.
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+            libc::close(self.fd);
+        }
     }
 }
 
