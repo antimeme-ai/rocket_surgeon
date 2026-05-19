@@ -1,8 +1,3 @@
-// All items are used by `compute_summary` (pub API for tensor_store), but
-// the binary crate has no caller yet — suppress dead-code until Task 7-8 wires
-// the tensor store.
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -218,6 +213,7 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
     }
 }
 
+#[allow(dead_code)]
 pub fn merge_pass1(a: &Pass1Result, b: &Pass1Result) -> Pass1Result {
     if a.n == 0 {
         return b.clone();

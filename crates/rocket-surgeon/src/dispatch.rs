@@ -185,7 +185,6 @@ fn handle_inspect_no_store(session: &Session, request: &Request) -> Response {
     )
 }
 
-#[allow(dead_code)]
 fn parse_dtype(s: &str) -> Option<DType> {
     match s {
         "float16" => Some(DType::Float16),
@@ -202,7 +201,6 @@ fn parse_dtype(s: &str) -> Option<DType> {
     }
 }
 
-#[allow(dead_code)]
 pub fn handle_inspect(
     session: &Session,
     request: &Request,
@@ -253,7 +251,6 @@ pub fn handle_inspect(
     ingest_and_respond(session, request, &req, captured, store)
 }
 
-#[allow(dead_code)]
 fn ingest_and_respond(
     session: &Session,
     request: &Request,

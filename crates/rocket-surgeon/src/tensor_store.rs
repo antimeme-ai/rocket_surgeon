@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
@@ -29,6 +27,7 @@ pub struct StoredTensor {
     pub device: String,
     data: Vec<u8>,
     summary: Option<(TensorStats, Vec<TopKEntry>)>,
+    #[allow(dead_code)]
     inserted_at: Instant,
     last_access: Instant,
 }
@@ -54,6 +53,7 @@ impl TensorStore {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -123,6 +123,7 @@ impl TensorStore {
         handle
     }
 
+    #[allow(dead_code)]
     pub fn get(&mut self, tensor_id: &str) -> Option<&StoredTensor> {
         if self.entries.contains_key(tensor_id) {
             self.touch_access_order(tensor_id);
@@ -134,18 +135,22 @@ impl TensorStore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, tensor_id: &str) -> bool {
         self.entries.contains_key(tensor_id)
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn bytes_used(&self) -> usize {
         self.current_bytes
     }
