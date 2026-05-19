@@ -5,15 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+import torch
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
 from rocket_surgeon.bridge import (
+    _models,
     discover_execution_order,
     discover_modules,
+    install_passive_hooks,
     load_model,
     model_config,
+    remove_hooks,
     unload_model,
 )
 
@@ -89,3 +93,29 @@ def test_discover_execution_order_call_index_zero_for_simple_model(model_handle:
     order = discover_execution_order(model_handle)
     for path, call_index in order:
         assert call_index == 0, f"Expected call_index 0 for {path}, got {call_index}"
+
+
+def test_install_passive_hooks_captures_container_output(model_handle: int) -> None:
+    """Passive hooks stash container output into a dict without barriers."""
+    model = _models[model_handle]
+    container_paths = []
+    for name, mod in model.named_modules():
+        type_name = type(mod).__name__
+        if "DecoderLayer" in type_name or "Block" in type_name:
+            container_paths.append(name)
+            break
+
+    assert len(container_paths) > 0, "Tiny model should have at least one container"
+
+    storage: dict[tuple[str, int], object] = {}
+    handles = install_passive_hooks(model_handle, container_paths, storage)
+    assert len(handles) == len(container_paths)
+
+    with torch.inference_mode():
+        dummy = torch.zeros(1, 2, dtype=torch.long, device="cpu")
+        model(dummy)
+
+    for path in container_paths:
+        assert (path, 0) in storage, f"Expected ({path}, 0) in storage, got {list(storage.keys())}"
+
+    remove_hooks(handles)

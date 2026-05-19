@@ -38,6 +38,9 @@ def load_model(source: str, device: str, dtype: str) -> int:
     handle = _next_handle
     _next_handle += 1
     _models[handle] = module
+    attn_impl = getattr(module.config, "_attn_implementation", "eager")
+    if attn_impl == "eager":
+        module.config.output_attentions = True  # type: ignore[union-attr]
     return handle
 
 
@@ -196,6 +199,35 @@ def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
     if t.dtype == torch.bfloat16:
         t = t.to(torch.float16)
     return t.numpy().tobytes()
+
+
+def install_passive_hooks(
+    handle: int,
+    module_paths: list[str],
+    storage: dict[tuple[str, int], Any],
+) -> list[Any]:
+    """Install plain forward hooks that stash container outputs without barriers.
+
+    Each hook writes (path, 0) -> output into *storage*. No mailbox,
+    no barrier, no tick counting.
+    """
+    model = _models[handle]
+    modules_by_path = dict(model.named_modules())
+    handles: list[Any] = []
+    for path in module_paths:
+        module = modules_by_path.get(path)
+        if module is None:
+            continue
+
+        def make_hook(p: str) -> Any:
+            def hook(_mod: Any, _inp: Any, output: Any) -> None:
+                storage[(p, 0)] = output
+
+            return hook
+
+        h = module.register_forward_hook(make_hook(path))
+        handles.append(h)
+    return handles
 
 
 def install_sentinel_hooks(handle: int, module_paths: list[str]) -> list[Any]:

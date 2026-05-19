@@ -13,7 +13,8 @@ use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
     CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
     HostDetachResponse, HostInspectRequest, HostInspectResponse, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, ProbeFiredEvent,
+    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, HostViewResponse,
+    ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -28,6 +29,7 @@ pub struct ForwardPassState {
     pub resume_mailbox: pyo3::PyObject,
     pub sentinel_handles: Vec<pyo3::PyObject>,
     pub capture_handles: Vec<pyo3::PyObject>,
+    pub passive_handles: Vec<pyo3::PyObject>,
     #[allow(dead_code)]
     pub call_counts: pyo3::PyObject,
     pub forward_complete: bool,
@@ -37,6 +39,7 @@ pub struct WorkerState {
     pub component_map: Option<ComponentMap>,
     pub component_index: HashMap<(String, u32), usize>,
     pub module_paths: Vec<String>,
+    pub container_paths: Vec<String>,
     pub model_handle: Option<u64>,
     pub rank: u32,
     pub tick_state: TickState,
@@ -54,6 +57,7 @@ impl WorkerState {
             component_map: None,
             component_index: HashMap::new(),
             module_paths: Vec::new(),
+            container_paths: Vec::new(),
             model_handle: None,
             rank: 0,
             tick_state: TickState::new(0),
@@ -80,6 +84,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_STEP => handle_host_step(state, request),
         internal::HOST_UPDATE_PROBES => handle_host_update_probes(state, request),
         internal::HOST_INSPECT => handle_host_inspect(state, request),
+        internal::HOST_VIEW => handle_host_view(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -168,15 +173,16 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         }
     };
 
-    let mut component_map = match crate::adapter::resolve(&modules, &config, req.rank) {
-        Ok(m) => m,
-        Err(e) => {
-            return internal_error(
-                request.id.clone(),
-                format!("adapter resolution failed: {e}"),
-            );
-        }
-    };
+    let (mut component_map, container_paths) =
+        match crate::adapter::resolve_with_containers(&modules, &config, req.rank) {
+            Ok(r) => r,
+            Err(e) => {
+                return internal_error(
+                    request.id.clone(),
+                    format!("adapter resolution failed: {e}"),
+                );
+            }
+        };
 
     let execution_order = match bridge::discover_execution_order(handle) {
         Ok(o) => o,
@@ -195,6 +201,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         .iter()
         .map(|c| c.module_path.clone())
         .collect();
+    state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
@@ -238,6 +245,9 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
             if let Err(e) = bridge::remove_hooks(py, &fwd.capture_handles) {
                 tracing::warn!("failed to remove capture hooks during detach: {e}");
             }
+            if let Err(e) = bridge::remove_hooks(py, &fwd.passive_handles) {
+                tracing::warn!("failed to remove passive hooks during detach: {e}");
+            }
         });
     }
 
@@ -245,6 +255,7 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     state.component_map = None;
     state.component_index.clear();
     state.module_paths.clear();
+    state.container_paths.clear();
     state.last_outputs = None;
 
     match bridge::unload_model(req.model_handle) {
@@ -354,6 +365,13 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         &state.module_paths,
     )?;
 
+    let passive_handles = if state.container_paths.is_empty() {
+        Vec::new()
+    } else {
+        let lo_bound = state.last_outputs.as_ref().unwrap().bind(py);
+        bridge::install_passive_hooks(py, handle, &state.container_paths, lo_bound)?
+    };
+
     let completion_mb = result_mb.clone_ref(py);
     let done_callback = pyo3::types::PyCFunction::new_closure(
         py,
@@ -383,6 +401,7 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         resume_mailbox: resume_mb,
         sentinel_handles,
         capture_handles,
+        passive_handles,
         call_counts: call_counts.into_py_any(py)?,
         forward_complete: false,
     });
@@ -692,6 +711,112 @@ fn collect_tensors(
 
         Ok(result)
     })
+}
+
+fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
+    let req: HostViewRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    if state.model_handle.is_none() || state.model_handle != Some(req.model_handle) {
+        return internal_error(
+            request.id.clone(),
+            "model handle mismatch or no model loaded".to_owned(),
+        );
+    }
+
+    if state.last_outputs.is_none() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                rocket_surgeon_protocol::errors::ErrorCode::ViewDataUnavailable,
+                "No captured tensors — execute at least one step first",
+            )),
+        );
+    }
+
+    let result = Python::with_gil(|py| compute_view(py, state, &req));
+
+    match result {
+        Ok(data) => {
+            let resp = HostViewResponse {
+                view: req.view,
+                data,
+            };
+            match serde_json::to_value(resp) {
+                Ok(value) => Response::success(request.id.clone(), value),
+                Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("VIEW_DATA_UNAVAILABLE") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::ViewDataUnavailable,
+                        msg,
+                    )),
+                )
+            } else if msg.contains("CAPABILITY_NOT_SUPPORTED") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::CapabilityNotSupported,
+                        msg,
+                    )),
+                )
+            } else if msg.contains("INVALID_PARAMS") {
+                Response::error(
+                    request.id.clone(),
+                    RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                        rocket_surgeon_protocol::errors::ErrorCode::InvalidParams,
+                        msg,
+                    )),
+                )
+            } else {
+                internal_error(request.id.clone(), msg)
+            }
+        }
+    }
+}
+
+fn compute_view(
+    py: Python<'_>,
+    state: &WorkerState,
+    req: &HostViewRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let views_mod = py.import("rocket_surgeon.views")?;
+    let handle = state
+        .model_handle
+        .ok_or_else(|| anyhow::anyhow!("no model handle"))?;
+    let lo = state
+        .last_outputs
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("VIEW_DATA_UNAVAILABLE: no last_outputs"))?;
+
+    let view_name = serde_json::to_value(req.view)?;
+    let view_str = view_name
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("bad view name"))?;
+
+    let params_py = match &req.params {
+        Some(v) => {
+            let json_str = serde_json::to_string(v)?;
+            py.import("json")?.call_method1("loads", (json_str,))?
+        }
+        None => py.None().into_bound(py),
+    };
+
+    let result_py =
+        views_mod.call_method1("compute_view", (handle, lo.bind(py), view_str, params_py))?;
+
+    let json_mod = py.import("json")?;
+    let result_str: String = json_mod.call_method1("dumps", (result_py,))?.extract()?;
+
+    let data: serde_json::Value = serde_json::from_str(&result_str)?;
+    Ok(data)
 }
 
 #[cfg(test)]
