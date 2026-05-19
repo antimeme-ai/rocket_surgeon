@@ -6,6 +6,7 @@ members = [
     "crates/rocket-surgeon-protocol",
     "crates/rocket-surgeon-probes",
     "crates/rocket-surgeon-python",
+    "crates/rocket-surgeon-shm",
     "crates/rocket-surgeon-transport",
     "crates/rocket-surgeon-worker",
     "crates/rocket-surgeon-orchestrator",
@@ -23,7 +24,11 @@ version = "0.1.0"
 # Internal
 rocket-surgeon-protocol = { path = "crates/rocket-surgeon-protocol" }
 rocket-surgeon-probes = { path = "crates/rocket-surgeon-probes" }
+rocket-surgeon-shm = { path = "crates/rocket-surgeon-shm" }
 rocket-surgeon-transport = { path = "crates/rocket-surgeon-transport" }
+
+# Shared memory
+libc = "0.2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
