@@ -75,6 +75,9 @@ anyhow = "1"
 # Tensor serialization
 safetensors = "0.5"
 
+# Testing
+tempfile = "3"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 rust_2024_compatibility = { level = "warn", priority = -1 }

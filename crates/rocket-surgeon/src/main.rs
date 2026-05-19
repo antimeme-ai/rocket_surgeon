@@ -1,6 +1,7 @@
 mod dispatch;
 mod notifications;
 mod orchestrator_handle;
+mod perfetto_sink;
 mod server;
 mod session;
 mod tensor_stats;
