@@ -403,6 +403,7 @@ fn main() {
     let mut events_enabled = false;
     let mut notification_seq: u64 = 0;
     let mut last_stale_sweep = Instant::now();
+    let mut perfetto: Option<perfetto_sink::PerfettoSink> = None;
 
     let stale_names = rocket_surgeon_shm::cleanup::discover_stale_region_names();
     if !stale_names.is_empty() {
@@ -621,9 +622,34 @@ fn main() {
                     }
                 }
             });
+
+            let trace_dir = std::env::temp_dir();
+            match perfetto_sink::PerfettoSink::create(
+                &trace_dir,
+                &session.state().session_id,
+                session.state().model_id.as_deref().unwrap_or("unknown"),
+                started_at,
+            ) {
+                Ok(mut ps) => {
+                    if let Err(e) = ps.declare_rank(0) {
+                        warn!("perfetto: failed to declare rank: {e}");
+                    }
+                    info!(path = %ps.path().display(), "perfetto trace started");
+                    perfetto = Some(ps);
+                }
+                Err(e) => {
+                    warn!("perfetto: failed to create trace sink: {e}");
+                }
+            }
         }
 
         if response.error.is_none() && request.method == method::DETACH {
+            if let Some(mut ps) = perfetto.take() {
+                match ps.close() {
+                    Ok(path) => info!(path = %path.display(), "perfetto trace flushed"),
+                    Err(e) => warn!("perfetto: failed to close trace: {e}"),
+                }
+            }
             detach_orchestrator(&mut orchestrator, &mut model_handle);
             shm_consumer = None;
         }
@@ -671,6 +697,14 @@ fn main() {
                 break;
             }
 
+            if let Some(ref mut ps) = perfetto {
+                if let Some(ref pos) = session.state().position {
+                    if let Err(e) = ps.on_tick_stopped(pos) {
+                        warn!("perfetto: tick event write failed: {e}");
+                    }
+                }
+            }
+
             if let Some(ref hr) = step_host_response {
                 for pe in &hr.events {
                     let params = serde_json::to_value(pe).expect("serialize probe.fired");
@@ -684,13 +718,27 @@ fn main() {
                         break;
                     }
                 }
+
+                if let Some(ref mut ps) = perfetto {
+                    for pe in &hr.events {
+                        if let Err(e) = ps.on_probe_fired(pe) {
+                            warn!("perfetto: probe event write failed: {e}");
+                        }
+                    }
+                }
             }
 
             last_heartbeat = Instant::now();
         }
     }
 
-    // Cleanup: drop orchestrator on exit
+    if let Some(mut ps) = perfetto.take() {
+        match ps.close() {
+            Ok(path) => info!(path = %path.display(), "perfetto trace flushed on exit"),
+            Err(e) => warn!("perfetto: failed to close trace on exit: {e}"),
+        }
+    }
+
     drop(orchestrator);
 
     info!(
