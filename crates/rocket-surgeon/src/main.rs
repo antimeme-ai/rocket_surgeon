@@ -1,4 +1,6 @@
 mod dispatch;
+#[allow(dead_code)]
+mod notifications;
 mod orchestrator_handle;
 mod server;
 mod session;
