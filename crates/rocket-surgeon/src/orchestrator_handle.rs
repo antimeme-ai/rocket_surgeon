@@ -213,6 +213,7 @@ mod tests {
             count: 1,
             direction: StepDirection::Forward,
             granularity: None,
+            max_events: None,
         };
         let result = handle.step(&req);
         assert!(result.is_err());

@@ -465,8 +465,9 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
 
         Ok(HostStepResponse {
             position,
-            capture: None,
+            events: vec![],
             forward_complete,
+            events_truncated: false,
         })
     }) {
         Ok(resp) => match serde_json::to_value(resp) {

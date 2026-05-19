@@ -134,6 +134,7 @@ fn try_orchestrator_step(
         count: step_req.count,
         direction: step_req.direction,
         granularity: step_req.granularity,
+        max_events: None,
     };
     match orch.step(&host_req) {
         Ok(hr) => Some(hr),

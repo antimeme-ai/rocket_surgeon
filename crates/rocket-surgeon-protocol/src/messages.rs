@@ -473,24 +473,28 @@ pub struct HostStepRequest {
     pub direction: StepDirection,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granularity: Option<TickGranularity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_events: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostStepResponse {
     pub position: TickPosition,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capture: Option<TensorSummary>,
+    #[serde(default)]
+    pub events: Vec<ProbeFiredEvent>,
     pub forward_complete: bool,
+    #[serde(default)]
+    pub events_truncated: bool,
 }
 
 // ---------------------------------------------------------------------------
 // _host/update_probes (internal: daemon → orchestrator → worker)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostUpdateProbesRequest {
     pub model_handle: u64,
-    pub active_probes: Vec<String>,
+    pub active_probes: Vec<ProbeDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +626,7 @@ mod tests {
             count: 1,
             direction: StepDirection::Forward,
             granularity: None,
+            max_events: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -640,20 +645,30 @@ mod tests {
                 event: TickEvent::Output,
                 replay_of: None,
             },
-            capture: None,
+            events: vec![],
             forward_complete: false,
+            events_truncated: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostStepResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp.position.tick_id, parsed.position.tick_id);
         assert_eq!(resp.forward_complete, parsed.forward_complete);
+        assert!(parsed.events.is_empty());
+        assert!(!parsed.events_truncated);
     }
 
     #[test]
     fn host_update_probes_round_trip() {
         let req = HostUpdateProbesRequest {
             model_handle: 1,
-            active_probes: vec!["model:0:3:q_proj:0:fwd".to_owned()],
+            active_probes: vec![ProbeDefinition {
+                id: "p1".to_owned(),
+                point: "model:0:*:*:0:fwd".to_owned(),
+                action: ProbeAction::Capture,
+                config: None,
+                enabled: true,
+                priority: 0,
+            }],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostUpdateProbesRequest = serde_json::from_str(&json).unwrap();
@@ -699,6 +714,7 @@ mod tests {
             count: 3,
             direction: StepDirection::Forward,
             granularity: Some(TickGranularity::Layer),
+            max_events: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();

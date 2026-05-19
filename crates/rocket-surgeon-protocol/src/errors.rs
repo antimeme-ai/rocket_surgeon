@@ -38,6 +38,10 @@ pub enum ErrorCode {
     ModelAlreadyAttached,
     #[serde(rename = "INVALID_PARAMS")]
     InvalidParams,
+    #[serde(rename = "DUPLICATE_PROBE_ID")]
+    DuplicateProbeId,
+    #[serde(rename = "INVALID_POINT")]
+    InvalidPoint,
 }
 
 impl ErrorCode {
@@ -62,6 +66,8 @@ impl ErrorCode {
             Self::CompiledModel => -32016,
             Self::ModelAlreadyAttached => -32017,
             Self::InvalidParams => -32602,
+            Self::DuplicateProbeId => -32018,
+            Self::InvalidPoint => -32019,
         }
     }
 
@@ -108,5 +114,43 @@ impl ErrorData {
             valid_states: None,
             context: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_probe_id_error_code() {
+        assert_eq!(ErrorCode::DuplicateProbeId.numeric_code(), -32018);
+        assert_eq!(
+            ErrorCode::DuplicateProbeId.severity(),
+            Severity::Recoverable
+        );
+    }
+
+    #[test]
+    fn invalid_point_error_code() {
+        assert_eq!(ErrorCode::InvalidPoint.numeric_code(), -32019);
+        assert_eq!(ErrorCode::InvalidPoint.severity(), Severity::Recoverable);
+    }
+
+    #[test]
+    fn duplicate_probe_id_serde() {
+        let code = ErrorCode::DuplicateProbeId;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"DUPLICATE_PROBE_ID\"");
+        let parsed: ErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, code);
+    }
+
+    #[test]
+    fn invalid_point_serde() {
+        let code = ErrorCode::InvalidPoint;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"INVALID_POINT\"");
+        let parsed: ErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, code);
     }
 }
