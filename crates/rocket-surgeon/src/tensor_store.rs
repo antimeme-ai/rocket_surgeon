@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use rocket_surgeon_protocol::types::{DType, TensorHandle, TensorStats, TensorSummary, TopKEntry};
@@ -30,11 +30,12 @@ pub struct StoredTensor {
     #[allow(dead_code)]
     inserted_at: Instant,
     last_access: Instant,
+    last_access_gen: u64,
 }
 
 pub struct TensorStore {
     entries: HashMap<String, StoredTensor>,
-    access_order: VecDeque<String>,
+    access_generation: u64,
     max_entries: usize,
     max_bytes: usize,
     current_bytes: usize,
@@ -45,7 +46,7 @@ impl TensorStore {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            access_order: VecDeque::new(),
+            access_generation: 0,
             max_entries: DEFAULT_MAX_ENTRIES,
             max_bytes: DEFAULT_MAX_BYTES,
             current_bytes: 0,
@@ -57,7 +58,7 @@ impl TensorStore {
     pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            access_order: VecDeque::new(),
+            access_generation: 0,
             max_entries,
             max_bytes,
             current_bytes: 0,
@@ -73,9 +74,8 @@ impl TensorStore {
     ) -> TensorHandle {
         let tensor_id = blake3::hash(&data).to_hex().to_string();
 
-        // Deduplication: if already present, update access time and return
         if self.entries.contains_key(&tensor_id) {
-            self.touch_access_order(&tensor_id);
+            self.touch(&tensor_id);
             let existing = self.entries.get_mut(&tensor_id).unwrap();
             existing.last_access = Instant::now();
             return TensorHandle {
@@ -85,10 +85,6 @@ impl TensorStore {
             };
         }
 
-        // Evict until we are within entry-count and byte-budget limits.
-        // Entry-count: hard ceiling — keep evicting until below max_entries.
-        // Byte budget: evict while already over limit (before accounting for the
-        // new entry) so we reclaim space without over-evicting small inserts.
         let data_len = data.len();
         while !self.entries.is_empty()
             && (self.entries.len() >= self.max_entries
@@ -97,6 +93,8 @@ impl TensorStore {
             self.evict_oldest();
         }
 
+        let generation = self.access_generation;
+        self.access_generation += 1;
         let now = Instant::now();
         let handle = TensorHandle {
             tensor_id: tensor_id.clone(),
@@ -115,9 +113,65 @@ impl TensorStore {
                 summary: None,
                 inserted_at: now,
                 last_access: now,
+                last_access_gen: generation,
             },
         );
-        self.access_order.push_back(tensor_id);
+        self.current_bytes += data_len;
+
+        handle
+    }
+
+    #[allow(dead_code)]
+    pub fn insert_with_id(
+        &mut self,
+        tensor_id: String,
+        data: Vec<u8>,
+        shape: Vec<u64>,
+        dtype: DType,
+        device: String,
+    ) -> TensorHandle {
+        if self.entries.contains_key(&tensor_id) {
+            self.touch(&tensor_id);
+            let existing = self.entries.get_mut(&tensor_id).unwrap();
+            existing.last_access = Instant::now();
+            return TensorHandle {
+                tensor_id,
+                shape: existing.shape.clone(),
+                dtype: existing.dtype,
+            };
+        }
+
+        let data_len = data.len();
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_entries
+                || self.current_bytes + data_len > self.max_bytes)
+        {
+            self.evict_oldest();
+        }
+
+        let generation = self.access_generation;
+        self.access_generation += 1;
+        let now = Instant::now();
+        let handle = TensorHandle {
+            tensor_id: tensor_id.clone(),
+            shape: shape.clone(),
+            dtype,
+        };
+
+        self.entries.insert(
+            tensor_id.clone(),
+            StoredTensor {
+                tensor_id: tensor_id.clone(),
+                shape,
+                dtype,
+                device,
+                data,
+                summary: None,
+                inserted_at: now,
+                last_access: now,
+                last_access_gen: generation,
+            },
+        );
         self.current_bytes += data_len;
 
         handle
@@ -126,7 +180,7 @@ impl TensorStore {
     #[allow(dead_code)]
     pub fn get(&mut self, tensor_id: &str) -> Option<&StoredTensor> {
         if self.entries.contains_key(tensor_id) {
-            self.touch_access_order(tensor_id);
+            self.touch(tensor_id);
             let entry = self.entries.get_mut(tensor_id).unwrap();
             entry.last_access = Instant::now();
             Some(entry)
@@ -160,7 +214,7 @@ impl TensorStore {
             return None;
         }
 
-        self.touch_access_order(tensor_id);
+        self.touch(tensor_id);
         let entry = self.entries.get_mut(tensor_id).unwrap();
         entry.last_access = Instant::now();
 
@@ -187,7 +241,7 @@ impl TensorStore {
             return Err(StoreError::NotFound(tensor_id.to_owned()));
         }
 
-        self.touch_access_order(tensor_id);
+        self.touch(tensor_id);
         let entry = self.entries.get_mut(tensor_id).unwrap();
         entry.last_access = Instant::now();
 
@@ -205,14 +259,22 @@ impl TensorStore {
         Ok(entry.data[start..end].to_vec())
     }
 
-    fn touch_access_order(&mut self, tensor_id: &str) {
-        self.access_order.retain(|id| id != tensor_id);
-        self.access_order.push_back(tensor_id.to_owned());
+    fn touch(&mut self, tensor_id: &str) {
+        if let Some(entry) = self.entries.get_mut(tensor_id) {
+            entry.last_access_gen = self.access_generation;
+            self.access_generation += 1;
+            entry.last_access = Instant::now();
+        }
     }
 
     fn evict_oldest(&mut self) {
-        if let Some(oldest_id) = self.access_order.pop_front() {
-            if let Some(removed) = self.entries.remove(&oldest_id) {
+        let oldest_id = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_access_gen)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = oldest_id {
+            if let Some(removed) = self.entries.remove(&id) {
                 self.current_bytes -= removed.data.len();
             }
         }
@@ -400,6 +462,41 @@ mod tests {
         let handle = store.insert(data, vec![10], DType::Uint8, "cpu".into());
         let slice = store.slice(&handle.tensor_id, 0, 10).unwrap();
         assert_eq!(slice, vec![42u8; 10]);
+    }
+
+    // --- insert_with_id tests ---
+
+    #[test]
+    fn insert_with_id_accepts_precomputed_hash() {
+        let mut store = TensorStore::new();
+        let data = vec![1, 2, 3, 4];
+        let tensor_id = "a".repeat(64);
+        let handle =
+            store.insert_with_id(tensor_id.clone(), data, vec![4], DType::Uint8, "cpu".into());
+        assert_eq!(handle.tensor_id, tensor_id);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn insert_with_id_dedup_returns_existing() {
+        let mut store = TensorStore::new();
+        let tensor_id = "b".repeat(64);
+        let h1 = store.insert_with_id(
+            tensor_id.clone(),
+            vec![1, 2, 3, 4],
+            vec![4],
+            DType::Uint8,
+            "cpu".into(),
+        );
+        let h2 = store.insert_with_id(
+            tensor_id,
+            vec![1, 2, 3, 4],
+            vec![4],
+            DType::Uint8,
+            "cpu".into(),
+        );
+        assert_eq!(h1.tensor_id, h2.tensor_id);
+        assert_eq!(store.len(), 1);
     }
 
     // --- LRU eviction tests ---
