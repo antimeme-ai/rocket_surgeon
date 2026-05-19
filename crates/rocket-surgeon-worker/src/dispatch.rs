@@ -280,6 +280,15 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     state.container_paths.clear();
     state.last_outputs = None;
 
+    if let Some(ring) = state.shm_ring.take() {
+        let name = ring.shm_name().to_owned();
+        drop(ring);
+        if let Err(e) = rocket_surgeon_shm::region::ShmRegion::unlink(&name) {
+            tracing::warn!("failed to unlink shm region '{name}': {e}");
+        }
+        rocket_surgeon_shm::cleanup::deregister_region_name(&name);
+    }
+
     match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
         Err(e) => {

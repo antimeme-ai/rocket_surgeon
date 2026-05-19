@@ -404,6 +404,14 @@ fn main() {
     let mut events_enabled = false;
     let mut notification_seq: u64 = 0;
 
+    let stale_names = rocket_surgeon_shm::cleanup::discover_stale_region_names();
+    if !stale_names.is_empty() {
+        let count = rocket_surgeon_shm::cleanup::sweep_stale_regions(&stale_names);
+        if count > 0 {
+            info!(count, "cleaned up stale shm regions from previous sessions");
+        }
+    }
+
     loop {
         let raw = if events_enabled {
             if last_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -558,6 +566,7 @@ fn main() {
 
         if response.error.is_none() && request.method == method::DETACH {
             detach_orchestrator(&mut orchestrator, &mut model_handle);
+            shm_consumer = None;
         }
 
         let resp_json = serde_json::to_string(&response).expect("serialize response");
