@@ -4,12 +4,13 @@ use rocket_surgeon_protocol::jsonrpc::{
 };
 use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, CheckpointRequest, CheckpointResponse, CreateCheckpointTier,
-    DetachRequest, DetachResponse, Divergence, ErrorEvent, EventType, InitializeRequest,
-    InitializeResponse, InspectDetail, InspectRequest, InspectResponse, InterveneRequest,
-    MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse, ReplayDivergenceEvent,
-    ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest, StatusResponse, StepRequest,
-    StepResponse, SubscribeRequest, SubscribeResponse, TickHeartbeatEvent, TickStoppedEvent,
-    UnsubscribeRequest, UnsubscribeResponse,
+    DetachRequest, DetachResponse, Divergence, ErrorEvent, EventType, HostViewRequest,
+    HostViewResponse, InitializeRequest, InitializeResponse, InspectDetail, InspectRequest,
+    InspectResponse, InterveneRequest, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
+    ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest,
+    StatusResponse, StepRequest, StepResponse, SubscribeRequest, SubscribeResponse,
+    TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewRequest,
+    ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
     ActionName, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, CompositionMode, DType,
@@ -808,6 +809,69 @@ fn unsubscribe_response_roundtrip() {
         status: Status::Stopped,
     };
     roundtrip(&resp);
+}
+
+// ===== View =====
+
+#[test]
+fn view_request_roundtrip() {
+    let req = ViewRequest {
+        view: BuiltInView::ResidualStreamNorm,
+        params: None,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_request_with_params_roundtrip() {
+    let req = ViewRequest {
+        view: BuiltInView::AttentionPattern,
+        params: Some(json!({"layer": 3, "head": 7})),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_response_roundtrip() {
+    let resp = ViewResponse {
+        view: BuiltInView::ResidualStreamNorm,
+        data: json!({"norms": [0.42, 0.38], "num_layers": 2, "norm_type": "l2"}),
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn host_view_request_roundtrip() {
+    let req = HostViewRequest {
+        model_handle: 1,
+        view: BuiltInView::AttentionPattern,
+        params: Some(json!({"layer": 0})),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn host_view_response_roundtrip() {
+    let resp = HostViewResponse {
+        view: BuiltInView::AttentionPattern,
+        data: json!({
+            "layer": 0,
+            "heads": [{"head": 0, "weights": [[0.5, 0.5]]}],
+            "seq_len": 1
+        }),
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn view_data_unavailable_error_code() {
+    assert_eq!(ErrorCode::ViewDataUnavailable.numeric_code(), -32020);
+    assert_eq!(
+        ErrorCode::ViewDataUnavailable.severity(),
+        Severity::Recoverable
+    );
+    let json = serde_json::to_string(&ErrorCode::ViewDataUnavailable).unwrap();
+    assert_eq!(json, "\"VIEW_DATA_UNAVAILABLE\"");
 }
 
 // ===== Event notifications =====

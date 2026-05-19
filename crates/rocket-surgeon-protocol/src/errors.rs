@@ -42,6 +42,8 @@ pub enum ErrorCode {
     DuplicateProbeId,
     #[serde(rename = "INVALID_POINT")]
     InvalidPoint,
+    #[serde(rename = "VIEW_DATA_UNAVAILABLE")]
+    ViewDataUnavailable,
 }
 
 impl ErrorCode {
@@ -68,6 +70,7 @@ impl ErrorCode {
             Self::InvalidParams => -32602,
             Self::DuplicateProbeId => -32018,
             Self::InvalidPoint => -32019,
+            Self::ViewDataUnavailable => -32020,
         }
     }
 

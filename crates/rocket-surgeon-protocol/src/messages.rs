@@ -24,6 +24,7 @@ pub mod method {
     pub const STATUS: &str = "rocket/status";
     pub const SUBSCRIBE: &str = "rocket/subscribe";
     pub const UNSUBSCRIBE: &str = "rocket/unsubscribe";
+    pub const VIEW: &str = "rocket/view";
 }
 
 pub mod event {
@@ -41,6 +42,7 @@ pub mod internal {
     pub const HOST_STEP: &str = "_host/step";
     pub const HOST_UPDATE_PROBES: &str = "_host/update_probes";
     pub const HOST_INSPECT: &str = "_host/inspect";
+    pub const HOST_VIEW: &str = "_host/view";
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +338,23 @@ pub struct UnsubscribeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// rocket/view
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewRequest {
+    pub view: BuiltInView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewResponse {
+    pub view: BuiltInView,
+    pub data: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
 // Event notifications
 // ---------------------------------------------------------------------------
 
@@ -525,6 +544,24 @@ pub struct CapturedTensor {
     pub dtype: String,
     pub device: String,
     pub data_base64: String,
+}
+
+// ---------------------------------------------------------------------------
+// _host/view (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostViewRequest {
+    pub model_handle: u64,
+    pub view: BuiltInView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostViewResponse {
+    pub view: BuiltInView,
+    pub data: serde_json::Value,
 }
 
 #[cfg(test)]
