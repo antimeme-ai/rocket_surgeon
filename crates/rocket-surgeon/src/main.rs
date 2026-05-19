@@ -13,7 +13,9 @@ use std::io::{self, BufReader};
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use crate::dispatch::{dispatch, handle_inspect, handle_probe, handle_step};
+use crate::dispatch::{
+    dispatch, handle_inspect, handle_probe, handle_step, handle_subscribe, handle_unsubscribe,
+};
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
@@ -267,7 +269,13 @@ fn propagate_probes(
     }
 }
 
-#[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
+#[allow(
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    unused_assignments,
+    unused_variables,
+    unused_mut
+)]
 fn main() {
     let cli = Cli::parse();
 
@@ -295,6 +303,8 @@ fn main() {
     let mut model_handle: Option<u64> = None;
     let mut probe_registry = ProbeRegistry::new();
     let mut granularity_scopes: Vec<GranularityScope> = Vec::new();
+    let mut events_enabled = false;
+    let mut notification_seq: u64 = 0;
 
     loop {
         let raw = match read_message(&mut reader) {
@@ -360,6 +370,15 @@ fn main() {
                 propagate_probes(&mut orchestrator, model_handle, &probe_registry);
             }
             resp
+        } else if request.method == method::SUBSCRIBE {
+            let resp = handle_subscribe(&session, &request);
+            if resp.error.is_none() {
+                events_enabled = true;
+            }
+            resp
+        } else if request.method == method::UNSUBSCRIBE {
+            events_enabled = false;
+            handle_unsubscribe(&session, &request)
         } else {
             dispatch(&mut session, &request)
         };
