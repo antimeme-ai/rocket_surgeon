@@ -71,7 +71,7 @@ fn spawn_and_attach(
     orchestrator_bin: Option<&str>,
     worker_bin: Option<&str>,
     log_level: &str,
-) -> Option<(OrchestratorHandle, u64)> {
+) -> Option<(OrchestratorHandle, u64, Option<String>)> {
     let params = request.params.as_ref()?;
     let attach_req: AttachRequest = match serde_json::from_value(params.clone()) {
         Ok(r) => r,
@@ -113,7 +113,7 @@ fn spawn_and_attach(
                 module_count = host_resp.module_tree.len(),
                 "orchestrator attached model"
             );
-            Some((orch, host_resp.model_handle))
+            Some((orch, host_resp.model_handle, host_resp.shm_name))
         }
         Err(e) => {
             warn!("orchestrator attach failed: {e}");
@@ -398,10 +398,20 @@ fn main() {
     let mut writer = io::stdout().lock();
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
+    let mut shm_consumer: Option<rocket_surgeon_shm::ring::DoomRingConsumer> = None;
     let mut probe_registry = ProbeRegistry::new();
     let mut granularity_scopes: Vec<GranularityScope> = Vec::new();
     let mut events_enabled = false;
     let mut notification_seq: u64 = 0;
+    let mut last_stale_sweep = Instant::now();
+
+    let stale_names = rocket_surgeon_shm::cleanup::discover_stale_region_names();
+    if !stale_names.is_empty() {
+        let count = rocket_surgeon_shm::cleanup::sweep_stale_regions(&stale_names);
+        if count > 0 {
+            info!(count, "cleaned up stale shm regions from previous sessions");
+        }
+    }
 
     loop {
         let raw = if events_enabled {
@@ -495,6 +505,7 @@ fn main() {
                     &request,
                     host_response.as_ref(),
                     &mut tensor_store,
+                    shm_consumer.as_mut(),
                 ),
                 Err(err_response) => *err_response,
             }
@@ -531,7 +542,7 @@ fn main() {
         };
 
         if response.error.is_none() && request.method == method::ATTACH {
-            if let Some((orch, handle)) = spawn_and_attach(
+            if let Some((orch, handle, worker_shm_name)) = spawn_and_attach(
                 &request,
                 orchestrator_bin.as_deref(),
                 worker_bin.as_deref(),
@@ -539,11 +550,35 @@ fn main() {
             ) {
                 orchestrator = Some(orch);
                 model_handle = Some(handle);
+                shm_consumer = worker_shm_name.and_then(|name| {
+                    match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
+                        Ok(c) => {
+                            info!(shm_name = %name, "opened shared memory ring buffer");
+                            Some(c)
+                        }
+                        Err(e) => {
+                            warn!("failed to open shm ring '{name}', using base64: {e}");
+                            None
+                        }
+                    }
+                });
             }
         }
 
         if response.error.is_none() && request.method == method::DETACH {
             detach_orchestrator(&mut orchestrator, &mut model_handle);
+            shm_consumer = None;
+        }
+
+        if last_stale_sweep.elapsed() >= Duration::from_secs(60) {
+            let stale = rocket_surgeon_shm::cleanup::discover_stale_region_names();
+            if !stale.is_empty() {
+                let swept = rocket_surgeon_shm::cleanup::sweep_stale_regions(&stale);
+                if swept > 0 {
+                    info!(count = swept, "periodic stale shm sweep");
+                }
+            }
+            last_stale_sweep = Instant::now();
         }
 
         let resp_json = serde_json::to_string(&response).expect("serialize response");

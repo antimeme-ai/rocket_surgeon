@@ -443,6 +443,8 @@ pub struct HostAttachResponse {
     pub module_tree: Vec<String>,
     pub model_type: String,
     pub component_vocabulary: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shm_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +545,15 @@ pub struct CapturedTensor {
     pub shape: Vec<u64>,
     pub dtype: String,
     pub device: String,
-    pub data_base64: String,
+    pub tensor_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shm_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shm_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byte_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +604,7 @@ mod tests {
             module_tree: vec!["model.embed_tokens".to_owned(), "model.layers.0".to_owned()],
             model_type: "llama".to_owned(),
             component_vocabulary: vec!["q_proj".to_owned()],
+            shm_name: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
@@ -717,6 +728,7 @@ mod tests {
             module_tree: vec!["model.layers.0".to_owned()],
             model_type: "llama".to_owned(),
             component_vocabulary: vec!["q_proj".to_owned(), "k_proj".to_owned()],
+            shm_name: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
@@ -803,7 +815,11 @@ mod tests {
                 shape: vec![1, 4, 32],
                 dtype: "float32".to_owned(),
                 device: "cpu".to_owned(),
-                data_base64: "AAAA".to_owned(),
+                tensor_id: "a".repeat(64),
+                shm_name: None,
+                shm_offset: None,
+                byte_length: None,
+                data_base64: Some("AAAA".to_owned()),
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -829,7 +845,11 @@ mod tests {
             shape: vec![1, 768],
             dtype: "float16".to_owned(),
             device: "cuda:0".to_owned(),
-            data_base64: "dGVzdA==".to_owned(),
+            tensor_id: "b".repeat(64),
+            shm_name: None,
+            shm_offset: None,
+            byte_length: None,
+            data_base64: Some("dGVzdA==".to_owned()),
         };
         let json = serde_json::to_string(&ct).unwrap();
         let parsed: CapturedTensor = serde_json::from_str(&json).unwrap();

@@ -7,10 +7,13 @@ const OFFSET_COMP_ID: usize = 8;
 const OFFSET_DTYPE: usize = 10;
 const OFFSET_NDIM: usize = 11;
 const OFFSET_SHAPE: usize = 12;
-const OFFSET_TICK_ID: usize = 44;
-const OFFSET_OFFSET: usize = 52;
-const OFFSET_SIZE: usize = 60;
-const OFFSET_FLAGS: usize = 68;
+#[cfg(test)]
+const OFFSET_PAD0: usize = 44;
+const OFFSET_TICK_ID: usize = 48;
+const OFFSET_DATA_OFF: usize = 56;
+const OFFSET_SIZE: usize = 64;
+const OFFSET_FLAGS: usize = 72;
+const OFFSET_GENERATION: usize = 76;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeFrameHeader {
@@ -21,9 +24,10 @@ pub struct ProbeFrameHeader {
     pub ndim: u8,
     pub shape: [u32; MAX_DIMS],
     pub tick_id: u64,
-    pub offset: u64,
+    pub data_off: u64,
     pub size: u64,
     pub flags: u32,
+    pub generation: u32,
 }
 
 impl ProbeFrameHeader {
@@ -42,9 +46,11 @@ impl ProbeFrameHeader {
         }
 
         buf[OFFSET_TICK_ID..OFFSET_TICK_ID + 8].copy_from_slice(&self.tick_id.to_le_bytes());
-        buf[OFFSET_OFFSET..OFFSET_OFFSET + 8].copy_from_slice(&self.offset.to_le_bytes());
+        buf[OFFSET_DATA_OFF..OFFSET_DATA_OFF + 8].copy_from_slice(&self.data_off.to_le_bytes());
         buf[OFFSET_SIZE..OFFSET_SIZE + 8].copy_from_slice(&self.size.to_le_bytes());
         buf[OFFSET_FLAGS..OFFSET_FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
+        buf[OFFSET_GENERATION..OFFSET_GENERATION + 4]
+            .copy_from_slice(&self.generation.to_le_bytes());
 
         buf
     }
@@ -72,9 +78,18 @@ impl ProbeFrameHeader {
 
         let tick_id =
             u64::from_le_bytes(data[OFFSET_TICK_ID..OFFSET_TICK_ID + 8].try_into().unwrap());
-        let offset = u64::from_le_bytes(data[OFFSET_OFFSET..OFFSET_OFFSET + 8].try_into().unwrap());
+        let data_off = u64::from_le_bytes(
+            data[OFFSET_DATA_OFF..OFFSET_DATA_OFF + 8]
+                .try_into()
+                .unwrap(),
+        );
         let size = u64::from_le_bytes(data[OFFSET_SIZE..OFFSET_SIZE + 8].try_into().unwrap());
         let flags = u32::from_le_bytes(data[OFFSET_FLAGS..OFFSET_FLAGS + 4].try_into().unwrap());
+        let generation = u32::from_le_bytes(
+            data[OFFSET_GENERATION..OFFSET_GENERATION + 4]
+                .try_into()
+                .unwrap(),
+        );
 
         Ok(Self {
             rank,
@@ -84,9 +99,10 @@ impl ProbeFrameHeader {
             ndim,
             shape,
             tick_id,
-            offset,
+            data_off,
             size,
             flags,
+            generation,
         })
     }
 }
@@ -106,13 +122,14 @@ mod tests {
             rank: 0,
             layer: 12,
             comp_id: 3,
-            dtype: 2, // Float32
+            dtype: 2,
             ndim: 3,
             shape: [2, 4096, 4096, 0, 0, 0, 0, 0],
             tick_id: 42,
-            offset: 0x1000,
+            data_off: 0x1000,
             size: 2 * 4096 * 4096 * 4,
             flags: 0,
+            generation: 0,
         }
     }
 
@@ -135,7 +152,14 @@ mod tests {
     fn reserved_bytes_are_zero() {
         let header = sample_header();
         let bytes = header.serialize();
-        assert!(bytes[72..HEADER_SIZE].iter().all(|&b| b == 0));
+        assert!(bytes[80..HEADER_SIZE].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn pad0_is_zeroed() {
+        let header = sample_header();
+        let bytes = header.serialize();
+        assert!(bytes[OFFSET_PAD0..OFFSET_PAD0 + 4].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -180,6 +204,24 @@ mod tests {
     }
 
     #[test]
+    fn generation_round_trip() {
+        let header = ProbeFrameHeader {
+            generation: 0xABCD_1234,
+            ..sample_header()
+        };
+        let bytes = header.serialize();
+        let parsed = ProbeFrameHeader::parse(&bytes).unwrap();
+        assert_eq!(parsed.generation, 0xABCD_1234);
+    }
+
+    #[test]
+    fn u64_fields_8byte_aligned() {
+        const { assert!(OFFSET_TICK_ID % 8 == 0) };
+        const { assert!(OFFSET_DATA_OFF % 8 == 0) };
+        const { assert!(OFFSET_SIZE % 8 == 0) };
+    }
+
+    #[test]
     fn all_fields_at_correct_offsets() {
         let header = ProbeFrameHeader {
             rank: 7,
@@ -189,9 +231,10 @@ mod tests {
             ndim: 1,
             shape: [42, 0, 0, 0, 0, 0, 0, 0],
             tick_id: 0xDEAD_BEEF_CAFE_BABE,
-            offset: 0x1234_5678_9ABC_DEF0,
+            data_off: 0x1234_5678_9ABC_DEF0,
             size: 0xFEDC_BA98_7654_3210,
             flags: 0xABCD_EF01,
+            generation: 0x1111_2222,
         };
         let bytes = header.serialize();
 
@@ -218,24 +261,34 @@ mod tests {
             "shape[0]"
         );
         assert_eq!(
-            u64::from_le_bytes(bytes[44..52].try_into().unwrap()),
+            u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            0,
+            "_pad0"
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[48..56].try_into().unwrap()),
             0xDEAD_BEEF_CAFE_BABE,
             "tick_id"
         );
         assert_eq!(
-            u64::from_le_bytes(bytes[52..60].try_into().unwrap()),
+            u64::from_le_bytes(bytes[56..64].try_into().unwrap()),
             0x1234_5678_9ABC_DEF0,
-            "offset"
+            "data_off"
         );
         assert_eq!(
-            u64::from_le_bytes(bytes[60..68].try_into().unwrap()),
+            u64::from_le_bytes(bytes[64..72].try_into().unwrap()),
             0xFEDC_BA98_7654_3210,
             "size"
         );
         assert_eq!(
-            u32::from_le_bytes(bytes[68..72].try_into().unwrap()),
+            u32::from_le_bytes(bytes[72..76].try_into().unwrap()),
             0xABCD_EF01,
             "flags"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[76..80].try_into().unwrap()),
+            0x1111_2222,
+            "generation"
         );
     }
 }
