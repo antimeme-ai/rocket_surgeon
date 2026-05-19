@@ -259,6 +259,25 @@ pub fn install_sentinel_hooks(
     })
 }
 
+pub fn install_passive_hooks<'py>(
+    py: Python<'py>,
+    handle: u64,
+    container_paths: &[String],
+    last_outputs: &Bound<'py, pyo3::PyAny>,
+) -> anyhow::Result<Vec<pyo3::PyObject>> {
+    let bridge = py.import("rocket_surgeon.bridge")?;
+    let py_paths = PyList::new(py, container_paths)?;
+    let result =
+        bridge
+            .getattr("install_passive_hooks")?
+            .call1((handle, py_paths, last_outputs))?;
+    let list = result
+        .downcast::<PyList>()
+        .map_err(|e| anyhow::anyhow!("expected list from install_passive_hooks, got: {e}"))?;
+    let handles: Vec<pyo3::PyObject> = list.iter().map(|h| h.into_py_any(py).unwrap()).collect();
+    Ok(handles)
+}
+
 pub fn install_capture_hooks<'py>(
     py: Python<'py>,
     handle: u64,
