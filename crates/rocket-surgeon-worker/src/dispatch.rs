@@ -39,6 +39,10 @@ pub struct WorkerState {
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
     pub last_outputs: Option<pyo3::PyObject>,
+    pub active_probes: Vec<(
+        rocket_surgeon_protocol::types::ProbeDefinition,
+        rocket_surgeon_probes::grammar::ProbePoint,
+    )>,
 }
 
 impl WorkerState {
@@ -52,6 +56,7 @@ impl WorkerState {
             tick_state: TickState::new(0),
             forward_pass: None,
             last_outputs: None,
+            active_probes: Vec::new(),
         }
     }
 
@@ -70,7 +75,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_DETACH => handle_host_detach(state, request),
         internal::HOST_CONFIGURE_HOOKS => handle_host_configure_hooks(request),
         internal::HOST_STEP => handle_host_step(state, request),
-        internal::HOST_UPDATE_PROBES => handle_host_update_probes(request),
+        internal::HOST_UPDATE_PROBES => handle_host_update_probes(state, request),
         internal::HOST_INSPECT => handle_host_inspect(state, request),
         _ => Response::error(
             request.id.clone(),
@@ -478,14 +483,26 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
     }
 }
 
-fn handle_host_update_probes(request: &Request) -> Response {
+fn handle_host_update_probes(state: &mut WorkerState, request: &Request) -> Response {
     let req: HostUpdateProbesRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
 
+    let mut parsed = Vec::with_capacity(req.active_probes.len());
+    for probe in req.active_probes {
+        match rocket_surgeon_probes::grammar::ProbePoint::parse(&probe.point) {
+            Ok(pp) => parsed.push((probe, pp)),
+            Err(e) => {
+                tracing::warn!(point = %probe.point, error = %e, "skipping probe with invalid point");
+            }
+        }
+    }
+
+    state.active_probes = parsed;
+
     let resp = HostUpdateProbesResponse {
-        probes_active: req.active_probes.len() as u32,
+        probes_active: state.active_probes.len() as u32,
     };
 
     match serde_json::to_value(resp) {
