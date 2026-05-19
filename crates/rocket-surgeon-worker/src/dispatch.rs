@@ -37,6 +37,7 @@ pub struct WorkerState {
     pub rank: u32,
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
+    pub last_outputs: Option<pyo3::PyObject>,
 }
 
 impl WorkerState {
@@ -49,6 +50,7 @@ impl WorkerState {
             rank: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
+            last_outputs: None,
         }
     }
 
@@ -233,6 +235,7 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     state.component_map = None;
     state.component_index.clear();
     state.module_paths.clear();
+    state.last_outputs = None;
 
     match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
@@ -272,6 +275,8 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
     if state.forward_pass.is_some() {
         return Ok(());
     }
+
+    state.last_outputs = Some(PyDict::new(py).unbind().into());
 
     let result_mb = bridge::create_mailbox(py)?;
     let resume_mb = bridge::create_mailbox(py)?;
@@ -319,6 +324,35 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         call_counts: call_counts.into_py_any(py)?,
         forward_complete: false,
     });
+    Ok(())
+}
+
+fn stash_tensor_output(
+    py: Python<'_>,
+    last_outputs: Option<&pyo3::PyObject>,
+    path: &str,
+    call_index: u32,
+    tuple: &pyo3::Bound<'_, PyTuple>,
+) -> anyhow::Result<()> {
+    if tuple.len() > 2 {
+        let output = tuple.get_item(2)?;
+        if !output.is_none() {
+            if let Some(lo) = last_outputs {
+                let dict = lo
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
+                let key = PyTuple::new(
+                    py,
+                    [
+                        path.into_pyobject(py)?.into_any(),
+                        call_index.into_pyobject(py)?.into_any(),
+                    ],
+                )?;
+                dict.set_item(key, output)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -378,6 +412,8 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
                 .map_err(|e| anyhow::anyhow!("expected tuple from mailbox, got: {e}"))?;
             let path: String = tuple.get_item(0)?.extract()?;
             let call_index: u32 = tuple.get_item(1)?.extract()?;
+
+            stash_tensor_output(py, state.last_outputs.as_ref(), &path, call_index, tuple)?;
 
             result_mb.call_method0("restore")?;
 
