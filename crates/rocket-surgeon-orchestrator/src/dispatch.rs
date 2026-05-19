@@ -22,9 +22,10 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
     match request.method.as_str() {
         internal::HOST_ATTACH => handle_host_attach(state, request),
         internal::HOST_DETACH => handle_host_detach(state, request),
-        internal::HOST_STEP | internal::HOST_CONFIGURE_HOOKS | internal::HOST_UPDATE_PROBES => {
-            forward_to_worker(state, request)
-        }
+        internal::HOST_STEP
+        | internal::HOST_CONFIGURE_HOOKS
+        | internal::HOST_UPDATE_PROBES
+        | internal::HOST_INSPECT => forward_to_worker(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -349,6 +350,28 @@ mod tests {
         );
         let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn host_inspect_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_INSPECT,
+            serde_json::json!({
+                "model_handle": 1,
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No worker running")
+        );
     }
 
     #[test]
