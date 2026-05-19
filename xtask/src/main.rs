@@ -32,6 +32,8 @@ enum Xtask {
     Tck,
     /// Run full CI suite (all lints + all tests)
     Ci,
+    /// Bootstrap the project (idempotent): venv, deps, maturin, cargo build
+    Setup,
 }
 
 fn main() -> Result<()> {
@@ -58,8 +60,18 @@ fn main() -> Result<()> {
             test()?;
             pytest()?;
         }
+        Xtask::Setup => setup()?,
     }
     Ok(())
+}
+
+fn setup() -> Result<()> {
+    let repo_root = std::env::current_dir().context("cwd")?;
+    let script = repo_root.join("scripts").join("bootstrap.sh");
+    if !script.is_file() {
+        bail!("bootstrap script not found at {}", script.display());
+    }
+    run("bash", &[script.to_str().context("non-utf8 script path")?]).context("bootstrap.sh failed")
 }
 
 fn fmt(check: bool) -> Result<()> {

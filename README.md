@@ -55,23 +55,34 @@ The wire protocol is JSON-RPC 2.0 with Content-Length framing (MCP-compatible). 
 
 ## Building
 
+One command, idempotent — pins Python via `.python-version`, creates `.venv`, installs dev deps, builds the PyO3 extension, builds the Rust workspace, and smoke-checks the result:
+
 ```bash
-cargo build --workspace
+cargo xtask setup
 ```
 
-Requires Rust 1.85+ (edition 2024).
+Prerequisites: Rust 1.85+ (edition 2024), [`uv`](https://docs.astral.sh/uv/), and [`lefthook`](https://lefthook.dev/installation/). Everything else (Python interpreter included) is provisioned by `uv` into the project venv. `lefthook install` is wired up by the bootstrap, so git hooks run automatically on commit and push.
+
+After bootstrap:
+
+```bash
+source .venv/bin/activate
+```
 
 ## Testing
 
 ```bash
-# Run all Rust tests
+# Full CI suite (fmt + clippy + ruff + mypy + all tests)
+cargo xtask ci
+
+# Rust tests only
 cargo test --workspace
 
-# Run with clippy (pedantic + nursery, zero warnings)
-cargo clippy --workspace --all-targets -- -D warnings
+# Python unit tests
+pytest python/tests/ -v
 
-# Run Python tests
-cd python && pytest
+# End-to-end tests (spawn the daemon and drive it over JSON-RPC)
+python tests/test_e2e_lifecycle.py
 ```
 
 The project includes a behavioral specification suite (TCK) with 192 Gherkin scenarios across 16 feature files in `tck/`.

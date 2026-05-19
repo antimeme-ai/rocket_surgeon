@@ -167,7 +167,7 @@ class TestPurePythonFallback:
             _py_parse_probe_frame_header(b"\x00" * 64)
 
     def test_pure_python_ndim_mismatch(self) -> None:
-        with pytest.raises(ValueError, match="ndim.*does not match"):
+        with pytest.raises(ValueError, match=r"ndim.*does not match"):
             _py_serialize_probe_frame_header(
                 rank=0,
                 layer=0,
@@ -203,7 +203,7 @@ class TestNativeExtension:
         assert has_native_extension() is True
 
     def test_ndim_shape_mismatch_raises(self) -> None:
-        with pytest.raises(ValueError, match="ndim.*does not match"):
+        with pytest.raises(ValueError, match=r"ndim.*does not match"):
             serialize_probe_frame_header(
                 rank=0,
                 layer=0,

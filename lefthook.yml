@@ -1,0 +1,45 @@
+# lefthook — git hook manager
+# https://lefthook.dev/
+#
+# Installed by `cargo xtask setup`. Python commands call .venv/bin/* directly
+# so the hooks work whether or not the venv is activated in the shell that
+# runs `git commit` / `git push`.
+
+pre-commit:
+  parallel: true
+  commands:
+    python-version-guard:
+      run: |
+        PIN=$(tr -d '[:space:]' < .python-version)
+        ACTUAL=$(.venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo unknown)
+        if [ "$ACTUAL" != "$PIN" ]; then
+          echo "venv python is $ACTUAL but .python-version pins $PIN" >&2
+          echo "run 'cargo xtask setup' to rebuild the venv" >&2
+          exit 1
+        fi
+    rust-fmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+    rust-clippy:
+      glob: "*.rs"
+      # PATH override: cargo clippy --all-targets triggers PyO3 build scripts
+      # which probe `python3` on PATH. Force the venv so we hit the pinned
+      # interpreter regardless of whether the shell that ran git is activated.
+      run: PATH="$PWD/.venv/bin:$PATH" cargo clippy --workspace --all-targets -- -D warnings
+    python-ruff-check:
+      glob: "python/**/*.py"
+      run: .venv/bin/ruff check python/
+    python-ruff-format:
+      glob: "python/**/*.py"
+      run: .venv/bin/ruff format --check python/
+    python-mypy:
+      glob: "python/**/*.py"
+      run: .venv/bin/mypy python/rocket_surgeon
+
+pre-push:
+  parallel: true
+  commands:
+    cargo-test:
+      run: PATH="$PWD/.venv/bin:$PATH" cargo xtask test
+    pytest:
+      run: .venv/bin/pytest python/tests/
