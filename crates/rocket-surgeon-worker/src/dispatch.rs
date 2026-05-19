@@ -7,11 +7,12 @@ use rocket_surgeon_protocol::jsonrpc::{
     INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RequestId, Response, RpcError,
 };
 use rocket_surgeon_protocol::messages::internal;
-use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use rocket_surgeon_protocol::messages::{
-    HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest, HostDetachResponse,
-    HostStepRequest, HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse,
+    CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
+    HostDetachResponse, HostInspectRequest, HostInspectResponse, HostStepRequest, HostStepResponse,
+    HostUpdateProbesRequest, HostUpdateProbesResponse,
 };
+use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
 
 use crate::adapter::ComponentMap;
@@ -70,6 +71,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_CONFIGURE_HOOKS => handle_host_configure_hooks(request),
         internal::HOST_STEP => handle_host_step(state, request),
         internal::HOST_UPDATE_PROBES => handle_host_update_probes(request),
+        internal::HOST_INSPECT => handle_host_inspect(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -491,6 +493,110 @@ fn handle_host_update_probes(request: &Request) -> Response {
     }
 }
 
+fn handle_host_inspect(state: &WorkerState, request: &Request) -> Response {
+    let req: HostInspectRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let Some(handle) = state.model_handle else {
+        return internal_error(request.id.clone(), "No model loaded".to_owned());
+    };
+
+    if req.model_handle != handle {
+        return internal_error(
+            request.id.clone(),
+            format!(
+                "model handle mismatch: expected {handle}, got {}",
+                req.model_handle
+            ),
+        );
+    }
+
+    let Some(ref component_map) = state.component_map else {
+        return internal_error(request.id.clone(), "No component map available".to_owned());
+    };
+
+    let matched_components: Vec<_> = component_map
+        .components
+        .iter()
+        .filter(|c| crate::capture::probe_matches_target(&c.probe_point, &req.target))
+        .collect();
+
+    if matched_components.is_empty() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(rocket_surgeon_protocol::errors::ErrorData::new(
+                rocket_surgeon_protocol::errors::ErrorCode::InvalidTarget,
+                format!("No components match target '{}'", req.target),
+            )),
+        );
+    }
+
+    let tensors = match collect_tensors(state, &matched_components) {
+        Ok(t) => t,
+        Err(e) => {
+            return internal_error(request.id.clone(), format!("inspect failed: {e}"));
+        }
+    };
+
+    let resp = HostInspectResponse { tensors };
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+fn collect_tensors(
+    state: &WorkerState,
+    matched_components: &[&crate::adapter::MappedComponent],
+) -> anyhow::Result<Vec<CapturedTensor>> {
+    use base64::Engine;
+
+    Python::with_gil(|py| {
+        let Some(ref lo) = state.last_outputs else {
+            return Ok(vec![]);
+        };
+        let dict = lo
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
+        let mut result = Vec::new();
+
+        for comp in matched_components {
+            let key = PyTuple::new(
+                py,
+                [
+                    comp.module_path.clone().into_pyobject(py)?.into_any(),
+                    comp.call_index.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+
+            if let Some(tensor_obj) = dict.get_item(&key)? {
+                let bytes_result = bridge::tensor_to_bytes(py, &tensor_obj)?;
+                let shape = bridge::get_tensor_shape(py, &tensor_obj)?;
+                let dtype = bridge::get_tensor_dtype(py, &tensor_obj)?;
+                let device = bridge::get_tensor_device(py, &tensor_obj)?;
+
+                let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes_result);
+
+                result.push(CapturedTensor {
+                    module_path: comp.module_path.clone(),
+                    canonical: comp.canonical.clone(),
+                    layer: comp.layer_index.unwrap_or(0),
+                    shape,
+                    dtype,
+                    device,
+                    data_base64,
+                });
+            }
+        }
+
+        Ok(result)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +721,39 @@ mod tests {
         let resp = dispatch(&mut state, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_inspect_invalid_params() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_INSPECT,
+            serde_json::json!({"wrong_field": 42}),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_inspect_no_model_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_INSPECT,
+            serde_json::json!({
+                "model_handle": 1,
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No model loaded")
+        );
     }
 }

@@ -209,6 +209,37 @@ pub fn tensor_to_bytes(py: Python<'_>, tensor: &Bound<'_, pyo3::PyAny>) -> anyho
     Ok(bytes)
 }
 
+pub fn get_tensor_shape(
+    _py: Python<'_>,
+    tensor: &Bound<'_, pyo3::PyAny>,
+) -> anyhow::Result<Vec<u64>> {
+    let shape = tensor.getattr("shape")?;
+    let dims: Vec<u64> = shape
+        .try_iter()?
+        .map(|d| d.unwrap().extract().unwrap())
+        .collect();
+    Ok(dims)
+}
+
+pub fn get_tensor_dtype(
+    _py: Python<'_>,
+    tensor: &Bound<'_, pyo3::PyAny>,
+) -> anyhow::Result<String> {
+    let dtype = tensor.getattr("dtype")?;
+    let name = dtype.str()?.to_string();
+    let clean = name.strip_prefix("torch.").unwrap_or(&name);
+    Ok(clean.to_owned())
+}
+
+pub fn get_tensor_device(
+    _py: Python<'_>,
+    tensor: &Bound<'_, pyo3::PyAny>,
+) -> anyhow::Result<String> {
+    let device = tensor.getattr("device")?;
+    let s = device.str()?.to_string();
+    Ok(s)
+}
+
 pub fn install_sentinel_hooks(
     handle: u64,
     module_paths: &[String],

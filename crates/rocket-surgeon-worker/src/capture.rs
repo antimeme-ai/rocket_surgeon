@@ -40,6 +40,10 @@ pub fn should_capture(
     false
 }
 
+pub fn probe_matches_target(probe_point: &str, target: &str) -> bool {
+    probe_matches(probe_point, target)
+}
+
 fn probe_matches(probe_point: &str, pattern: &str) -> bool {
     let point_parts: Vec<&str> = probe_point.split(':').collect();
     let pattern_parts: Vec<&str> = pattern.split(':').collect();
