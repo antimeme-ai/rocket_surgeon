@@ -8,8 +8,8 @@ use rocket_surgeon_protocol::messages::{
     InitializeResponse, InspectDetail, InspectRequest, InspectResponse, InterveneRequest,
     MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse, ReplayDivergenceEvent,
     ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest, StatusResponse, StepRequest,
-    StepResponse, SubscribeRequest, SubscribeResponse, SubscriptionFilter, TickHeartbeatEvent,
-    TickStoppedEvent,
+    StepResponse, SubscribeRequest, SubscribeResponse, TickHeartbeatEvent, TickStoppedEvent,
+    UnsubscribeRequest, UnsubscribeResponse,
 };
 use rocket_surgeon_protocol::types::{
     ActionName, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, CompositionMode, DType,
@@ -779,22 +779,33 @@ fn event_type_serde() {
 
 #[test]
 fn subscribe_request_roundtrip() {
-    let req = SubscribeRequest {
-        events: vec![EventType::TickStopped, EventType::ProbeFired],
-        filter: Some(SubscriptionFilter {
-            layer: Some(vec![12, 13]),
-            rank: None,
-            probe_ids: Some(vec!["p1".to_owned()]),
-        }),
-    };
+    let req = SubscribeRequest {};
     roundtrip(&req);
 }
 
 #[test]
 fn subscribe_response_roundtrip() {
     let resp = SubscribeResponse {
-        subscription_id: "sub-1".to_owned(),
-        subscribed_events: vec![EventType::TickStopped],
+        available_events: vec![
+            EventType::TickStopped,
+            EventType::TickHeartbeat,
+            EventType::ProbeFired,
+        ],
+        status: Status::Stopped,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn unsubscribe_request_roundtrip() {
+    let req = UnsubscribeRequest {};
+    roundtrip(&req);
+}
+
+#[test]
+fn unsubscribe_response_roundtrip() {
+    let resp = UnsubscribeResponse {
+        status: Status::Stopped,
     };
     roundtrip(&resp);
 }
