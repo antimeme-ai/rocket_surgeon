@@ -3,8 +3,8 @@ use std::process::{Child, Command, Stdio};
 
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
-    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostStepRequest, HostStepResponse,
-    internal,
+    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest,
+    HostInspectResponse, HostStepRequest, HostStepResponse, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -122,6 +122,31 @@ impl OrchestratorHandle {
         Ok(host_resp)
     }
 
+    /// Send `_host/inspect` to the orchestrator and parse the response.
+    #[allow(dead_code)]
+    pub fn inspect(&mut self, req: &HostInspectRequest) -> anyhow::Result<HostInspectResponse> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_INSPECT, params);
+
+        self.send(&request)?;
+        let response = self.recv()?;
+
+        if let Some(err) = response.error {
+            anyhow::bail!(
+                "orchestrator inspect failed (code {}): {}",
+                err.code,
+                err.message
+            );
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("orchestrator inspect: missing result"))?;
+        let host_resp: HostInspectResponse = serde_json::from_value(result)?;
+        Ok(host_resp)
+    }
+
     /// Kill the orchestrator child process and wait for it to exit.
     pub fn kill(&mut self) {
         if let Err(e) = self.child.kill() {
@@ -214,5 +239,22 @@ mod tests {
         assert_eq!(handle.next_id(), 1);
         assert_eq!(handle.next_id(), 2);
         assert_eq!(handle.next_id(), 3);
+    }
+
+    #[test]
+    fn inspect_method_exists() {
+        use rocket_surgeon_protocol::messages::HostInspectRequest;
+        use rocket_surgeon_protocol::messages::InspectDetail;
+
+        let mut handle =
+            OrchestratorHandle::spawn("cat", "/fake/worker", "info").expect("cat should exist");
+        let req = HostInspectRequest {
+            model_handle: 1,
+            target: "model:0:0:q_proj:output".to_owned(),
+            detail: InspectDetail::Summary,
+            slices: None,
+        };
+        let result = handle.inspect(&req);
+        assert!(result.is_err());
     }
 }
