@@ -123,11 +123,11 @@ fn test() -> Result<()> {
 
 fn ruff(fix: bool) -> Result<()> {
     if fix {
-        run("ruff", &["check", "--fix", "python/"])?;
-        run("ruff", &["format", "python/"]).context("ruff format failed")
+        run("ruff", &["check", "--fix", "python/", "tests/"])?;
+        run("ruff", &["format", "python/", "tests/"]).context("ruff format failed")
     } else {
-        run("ruff", &["check", "python/"]).context("ruff check failed")?;
-        run("ruff", &["format", "--check", "python/"]).context("ruff format check failed")
+        run("ruff", &["check", "python/", "tests/"]).context("ruff check failed")?;
+        run("ruff", &["format", "--check", "python/", "tests/"]).context("ruff format check failed")
     }
 }
 

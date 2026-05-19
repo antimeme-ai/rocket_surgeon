@@ -101,9 +101,7 @@ def run_test() -> None:  # noqa: PLR0915
         # config: 2 hidden layers, 4 attention heads, hidden_size 16.
         assert data["num_layers"] == 2, f"Expected 2 real layers, got: {data['num_layers']}"
         assert data["num_heads"] == 4, f"Expected 4 real heads, got: {data['num_heads']}"
-        assert data["hidden_dim"] == 16, (
-            f"Expected 16 real hidden_dim, got: {data['hidden_dim']}"
-        )
+        assert data["hidden_dim"] == 16, f"Expected 16 real hidden_dim, got: {data['hidden_dim']}"
 
         model_id = state["model_id"]
         print(f"  status: {state['status']}")
@@ -177,9 +175,7 @@ def run_test() -> None:  # noqa: PLR0915
             f"Expected recoverable, got: {err_data.get('severity')}"
         )
         ctx = err_data.get("context") or {}
-        assert "backend_error" in ctx, (
-            f"Expected backend_error in context, got: {ctx}"
-        )
+        assert "backend_error" in ctx, f"Expected backend_error in context, got: {ctx}"
 
         # Confirm session state did not mutate — a follow-up status call
         # should still show initialized (unit test covers this too, but the

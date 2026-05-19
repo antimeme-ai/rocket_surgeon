@@ -1,9 +1,10 @@
 ---
 id: BEAD-0008
 title: Daemon returns synthesized success on failed backend attach
-status: open
+status: closed
 priority: high
 created: 2026-05-19
+resolved: 2026-05-19
 ---
 
 ## Description
@@ -66,12 +67,16 @@ etc.) instead of hardcoded placeholders.
 
 ## Acceptance
 
-- [ ] `attach` returns an error response when backend orchestrator fails
-- [ ] `attach` success response contains real model metadata from the worker,
+- [x] `attach` returns an error response when backend orchestrator fails
+      → dispatch.rs: handle_attach(Err) returns BACKEND_ATTACH_FAILED
+- [x] `attach` success response contains real model metadata from the worker,
       not synthesized placeholders
-- [ ] New TCK scenario in `tck/lifecycle.feature` (or wherever attach lives)
-      covering "attach with broken backend returns error"
-- [ ] Existing passing e2e tests continue to pass
+      → main.rs: spawn_and_attach() blocks, real HostAttachResponse flows through
+- [x] New TCK scenario in `tck/lifecycle.feature` covering backend failures
+      → lifecycle.feature:129-181: five BEAD-0008 scenarios (real metadata,
+        broken backend, model_family override, zero metadata, duplicate precheck)
+- [x] Existing passing e2e tests continue to pass
+      → cargo xtask ci green
 
 ## Related
 
