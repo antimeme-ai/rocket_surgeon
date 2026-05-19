@@ -97,8 +97,13 @@ def run_test() -> None:  # noqa: PLR0915
         send_message(
             proc,
             make_request(
-                "rocket/attach",
-                {"model_path": MODEL_SOURCE, "model_family": MODEL_FAMILY},
+                "attach",
+                {
+                    "model_path": MODEL_SOURCE,
+                    "model_family": MODEL_FAMILY,
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
                 req_id=2,
             ),
         )
@@ -119,7 +124,14 @@ def run_test() -> None:  # noqa: PLR0915
         # -- step 3 times --
         print("\n[test] Step 4: step 3x")
         for i in range(3):
-            send_message(proc, make_request("rocket/step", {}, req_id=10 + i))
+            send_message(
+                proc,
+                make_request(
+                    "rocket/step",
+                    {"direction": "forward", "count": 1, "granularity": "component"},
+                    req_id=10 + i,
+                ),
+            )
             resp = recv_message(proc)
             # May receive notifications before the response
             while resp and "method" in resp:
@@ -129,7 +141,7 @@ def run_test() -> None:  # noqa: PLR0915
 
         # -- detach --
         print("\n[test] Step 5: detach")
-        send_message(proc, make_request("rocket/detach", {}, req_id=20))
+        send_message(proc, make_request("detach", {}, req_id=20))
         resp = recv_message(proc)
         # May receive trailing notifications
         while resp and "method" in resp:

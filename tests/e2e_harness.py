@@ -173,7 +173,9 @@ def assert_envelope_fields(state: dict) -> None:
     required = {
         "session_id": str,
         "status": str,
-        "tick_id": int,
+        # tick_id is Option<u64> in the protocol — null pre-step (uninitialized,
+        # initialized, just-detached), populated once stepping begins.
+        "tick_id": (int, type(None)),
         "available_actions": list,
     }
     for field, typ in required.items():
