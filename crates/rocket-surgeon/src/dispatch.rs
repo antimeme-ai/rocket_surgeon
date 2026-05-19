@@ -3,9 +3,9 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, EventType, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse,
-    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
-    method,
+    AttachRequest, EventType, HostViewResponse, InitializeRequest, InspectRequest, ProbeRequest,
+    ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    UnsubscribeResponse, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
 
@@ -41,6 +41,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::INSPECT => handle_inspect_no_store(session, request),
         method::SUBSCRIBE => handle_subscribe(session, request),
         method::UNSUBSCRIBE => handle_unsubscribe(session, request),
+        method::VIEW => handle_view(session, request, None),
         method::INTERVENE | method::CHECKPOINT | method::REPLAY => {
             handle_stub_requires_stopped(session, request)
         }
@@ -473,6 +474,46 @@ pub fn handle_unsubscribe(session: &Session, request: &Request) -> Response {
 
     let resp = UnsubscribeResponse {
         status: session.state().status,
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+pub fn handle_view(
+    session: &Session,
+    request: &Request,
+    host_response: Option<&HostViewResponse>,
+) -> Response {
+    let _req: ViewRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/view") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let Some(hr) = host_response else {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(ErrorData::new(
+                ErrorCode::ViewDataUnavailable,
+                "No orchestrator available to compute view",
+            )),
+        );
+    };
+
+    let resp = ViewResponse {
+        view: hr.view,
+        data: hr.data.clone(),
     };
     serialize_envelope(request.id.clone(), session.envelope(resp))
 }
@@ -1104,5 +1145,76 @@ mod tests {
         let err = resp.error.as_ref().unwrap();
         let data = err.data.as_ref().unwrap();
         assert_eq!(data.error_code, ErrorCode::ProbeNotFound);
+    }
+
+    // --- View tests ---
+
+    use rocket_surgeon_protocol::messages::HostViewResponse;
+    use rocket_surgeon_protocol::types::BuiltInView;
+
+    #[test]
+    fn handle_view_from_stopped_returns_view_response() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request(
+            "rocket/view",
+            serde_json::json!({"view": "residual_stream_norm"}),
+        );
+        let resp = handle_view(&session, &req, None);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_view_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request(
+            "rocket/view",
+            serde_json::json!({"view": "residual_stream_norm"}),
+        );
+        let resp = handle_view(&session, &req, None);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn handle_view_with_invalid_params_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let req = make_request("rocket/view", serde_json::json!("not an object"));
+        let resp = handle_view(&session, &req, None);
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn handle_view_with_host_response_returns_success() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        dispatch(&mut session, &make_request("attach", attach_params()));
+
+        let host_resp = HostViewResponse {
+            view: BuiltInView::ResidualStreamNorm,
+            data: serde_json::json!({"norms": [0.5, 0.6], "num_layers": 2, "norm_type": "l2"}),
+        };
+
+        let req = make_request(
+            "rocket/view",
+            serde_json::json!({"view": "residual_stream_norm"}),
+        );
+        let resp = handle_view(&session, &req, Some(&host_resp));
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["view"], "residual_stream_norm");
+        assert!(data["data"]["norms"].is_array());
     }
 }
