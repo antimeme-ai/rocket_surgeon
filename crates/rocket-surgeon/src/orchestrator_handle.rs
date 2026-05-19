@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
     HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest, HostStepRequest,
-    HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse, internal,
+    HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -128,6 +128,15 @@ impl OrchestratorHandle {
         let id = self.next_id();
         let params = serde_json::to_value(req)?;
         let request = Request::new(RequestId::Number(id), internal::HOST_INSPECT, params);
+
+        self.send(&request)?;
+        self.recv()
+    }
+
+    pub fn view_raw(&mut self, req: &HostViewRequest) -> anyhow::Result<Response> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_VIEW, params);
 
         self.send(&request)?;
         self.recv()

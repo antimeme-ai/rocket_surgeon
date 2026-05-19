@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::dispatch::{
     dispatch, handle_inspect, handle_probe, handle_step, handle_subscribe, handle_unsubscribe,
+    handle_view,
 };
 use crate::notifications::send_notification;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -239,6 +240,71 @@ fn try_orchestrator_inspect(
     }
 }
 
+fn try_orchestrator_view(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Result<Option<rocket_surgeon_protocol::messages::HostViewResponse>, Box<Response>> {
+    let Some(orch) = orchestrator.as_mut() else {
+        return Ok(None);
+    };
+    let Some(mh) = model_handle else {
+        return Ok(None);
+    };
+    let view_req: rocket_surgeon_protocol::messages::ViewRequest = match request
+        .params
+        .as_ref()
+        .map(|p| serde_json::from_value(p.clone()))
+    {
+        Some(Ok(r)) => r,
+        _ => return Ok(None),
+    };
+
+    let host_req = rocket_surgeon_protocol::messages::HostViewRequest {
+        model_handle: mh,
+        view: view_req.view,
+        params: view_req.params,
+    };
+
+    let raw_response = match orch.view_raw(&host_req) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("orchestrator view transport error: {e}");
+            return Err(Box::new(Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("orchestrator transport error: {e}"),
+                    data: None,
+                },
+            )));
+        }
+    };
+
+    if let Some(err) = raw_response.error {
+        warn!("orchestrator view failed: {}", err.message);
+        return Err(Box::new(Response::error(request.id.clone(), err)));
+    }
+
+    match raw_response.result {
+        Some(value) => {
+            let hr: rocket_surgeon_protocol::messages::HostViewResponse =
+                serde_json::from_value(value).map_err(|e| {
+                    Box::new(Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("failed to parse orchestrator response: {e}"),
+                            data: None,
+                        },
+                    ))
+                })?;
+            Ok(Some(hr))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Send `_host/detach` to the orchestrator and drop it.
 fn detach_orchestrator(
     orchestrator: &mut Option<OrchestratorHandle>,
@@ -430,6 +496,11 @@ fn main() {
                     host_response.as_ref(),
                     &mut tensor_store,
                 ),
+                Err(err_response) => *err_response,
+            }
+        } else if request.method == method::VIEW {
+            match try_orchestrator_view(&mut orchestrator, model_handle, &request) {
+                Ok(host_response) => handle_view(&session, &request, host_response.as_ref()),
                 Err(err_response) => *err_response,
             }
         } else if request.method == method::PROBE {

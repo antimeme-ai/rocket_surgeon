@@ -25,7 +25,8 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
         internal::HOST_STEP
         | internal::HOST_CONFIGURE_HOOKS
         | internal::HOST_UPDATE_PROBES
-        | internal::HOST_INSPECT => forward_to_worker(state, request),
+        | internal::HOST_INSPECT
+        | internal::HOST_VIEW => forward_to_worker(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
