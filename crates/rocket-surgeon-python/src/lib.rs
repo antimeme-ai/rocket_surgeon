@@ -12,7 +12,7 @@ fn blake3_hash(py: Python<'_>, data: &[u8]) -> String {
 }
 
 #[pyfunction]
-#[pyo3(signature = (rank, layer, comp_id, dtype, ndim, shape, tick_id, offset, size, flags))]
+#[pyo3(signature = (rank, layer, comp_id, dtype, ndim, shape, tick_id, data_off, size, flags, generation))]
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn serialize_probe_frame_header(
     py: Python<'_>,
@@ -23,9 +23,10 @@ fn serialize_probe_frame_header(
     ndim: u8,
     shape: Vec<u32>,
     tick_id: u64,
-    offset: u64,
+    data_off: u64,
     size: u64,
     flags: u32,
+    generation: u32,
 ) -> PyResult<Py<PyBytes>> {
     if shape.len() > 8 {
         return Err(PyValueError::new_err(format!(
@@ -53,9 +54,10 @@ fn serialize_probe_frame_header(
         ndim,
         shape: shape_arr,
         tick_id,
-        offset,
+        data_off,
         size,
         flags,
+        generation,
     };
 
     let bytes = header.serialize();
@@ -74,9 +76,10 @@ fn parse_probe_frame_header<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound
     dict.set_item("ndim", header.ndim)?;
     dict.set_item("shape", PyList::new(py, header.shape)?)?;
     dict.set_item("tick_id", header.tick_id)?;
-    dict.set_item("offset", header.offset)?;
+    dict.set_item("data_off", header.data_off)?;
     dict.set_item("size", header.size)?;
     dict.set_item("flags", header.flags)?;
+    dict.set_item("generation", header.generation)?;
     Ok(dict)
 }
 
@@ -129,9 +132,10 @@ mod tests {
             ndim: 2,
             shape: [4096, 4096, 0, 0, 0, 0, 0, 0],
             tick_id: 100,
-            offset: 0,
+            data_off: 0,
             size: 4096 * 4096 * 4,
             flags: 0,
+            generation: 0,
         };
         let bytes = header.serialize();
         assert_eq!(bytes.len(), 128);
