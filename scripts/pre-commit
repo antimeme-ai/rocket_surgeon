@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Guard: interpreter must match .python-version. Bootstrap (cargo xtask setup)
+# is responsible for keeping .venv aligned with the pin.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PIN_FILE="$REPO_ROOT/.python-version"
+if [[ -f "$PIN_FILE" ]]; then
+    PIN="$(tr -d '[:space:]' < "$PIN_FILE")"
+    ACTUAL="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo unknown)"
+    if [[ "$ACTUAL" != "$PIN" ]]; then
+        echo "pre-commit: python3 is $ACTUAL but .python-version pins $PIN" >&2
+        echo "pre-commit: run 'cargo xtask setup' and 'source .venv/bin/activate'" >&2
+        exit 1
+    fi
+fi
+
 exec cargo xtask ci
