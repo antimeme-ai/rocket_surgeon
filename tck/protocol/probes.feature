@@ -19,7 +19,7 @@ Feature: Probe system for observing and asserting on the forward pass
         "action": "define",
         "probe": {
           "id": "p-cap-1",
-          "point": "llama:0:12:attn.o_proj:output",
+          "point": "llama:0:12:attn.o_proj:0:fwd",
           "action": "capture",
           "config": {
             "summary": true,
@@ -36,14 +36,14 @@ Feature: Probe system for observing and asserting on the forward pass
     And the entry "p-cap-1" has action "capture"
     And the entry "p-cap-1" has enabled true
 
-  Scenario: Define probe with five-level hierarchical point pattern
+  Scenario: Define probe with six-level hierarchical point pattern
     When the client sends "rocket/probe" with:
       """json
       {
         "action": "define",
         "probe": {
           "id": "p-hier-1",
-          "point": "llama:*:12:attn.o_proj:output",
+          "point": "llama:*:12:attn.o_proj:*:fwd",
           "action": "capture",
           "config": {"summary": true}
         }
@@ -51,13 +51,13 @@ Feature: Probe system for observing and asserting on the forward pass
       """
     Then the response status is "stopped"
     And the response data field "probe_id" is "p-hier-1"
-    And the entry "p-hier-1" has point "llama:*:12:attn.o_proj:output"
+    And the entry "p-hier-1" has point "llama:*:12:attn.o_proj:*:fwd"
 
   # ── List probes ───────────────────────────────────────────────────
 
   Scenario: List probes returns all defined probes
-    Given a defined probe "p-alpha" at point "llama:0:12:attn.o_proj:output" with action "capture"
-    And a defined probe "p-beta" at point "llama:0:8:mlp:output" with action "trace"
+    Given a defined probe "p-alpha" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture"
+    And a defined probe "p-beta" at point "llama:0:8:mlp:0:fwd" with action "trace"
     When the client sends "rocket/probe" with:
       """json
       {
@@ -73,7 +73,7 @@ Feature: Probe system for observing and asserting on the forward pass
   # ── Enable / disable / remove ─────────────────────────────────────
 
   Scenario: Enable probe by ID
-    Given a defined probe "p-dis-1" at point "llama:0:12:attn.o_proj:output" with action "capture" and enabled false
+    Given a defined probe "p-dis-1" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture" and enabled false
     When the client sends "rocket/probe" with:
       """json
       {
@@ -85,7 +85,7 @@ Feature: Probe system for observing and asserting on the forward pass
     And the entry "p-dis-1" has enabled true
 
   Scenario: Disable probe by ID
-    Given a defined probe "p-en-1" at point "llama:0:12:attn.o_proj:output" with action "capture" and enabled true
+    Given a defined probe "p-en-1" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture" and enabled true
     When the client sends "rocket/probe" with:
       """json
       {
@@ -97,7 +97,7 @@ Feature: Probe system for observing and asserting on the forward pass
     And the entry "p-en-1" has enabled false
 
   Scenario: Remove probe by ID
-    Given a defined probe "p-rm-1" at point "llama:0:12:attn.o_proj:output" with action "capture"
+    Given a defined probe "p-rm-1" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture"
     When the client sends "rocket/probe" with:
       """json
       {
@@ -131,7 +131,7 @@ Feature: Probe system for observing and asserting on the forward pass
         "action": "define",
         "probe": {
           "id": "p-wildcard",
-          "point": "*:*:*:*:*",
+          "point": "*:*:*:*:*:*",
           "action": "capture",
           "config": {"summary": true, "capture_tensor": false}
         }
@@ -145,10 +145,10 @@ Feature: Probe system for observing and asserting on the forward pass
   # ── Priority ordering ─────────────────────────────────────────────
 
   Scenario: Two probes at same point fire in priority order
-    Given a defined probe "p-lo" at point "llama:0:12:attn.o_proj:output" with action "capture" and priority 0
-    And a defined probe "p-hi" at point "llama:0:12:attn.o_proj:output" with action "capture" and priority 10
+    Given a defined probe "p-lo" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture" and priority 0
+    And a defined probe "p-hi" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture" and priority 10
     When the client sends "rocket/step" with direction "forward"
-    Then probe "p-lo" fires before probe "p-hi" at point "llama:0:12:attn.o_proj:output"
+    Then probe "p-lo" fires before probe "p-hi" at point "llama:0:12:attn.o_proj:0:fwd"
 
   # ── Assert action ─────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ Feature: Probe system for observing and asserting on the forward pass
         "action": "define",
         "probe": {
           "id": "p-assert-norm",
-          "point": "llama:0:12:attn.o_proj:output",
+          "point": "llama:0:12:attn.o_proj:0:fwd",
           "action": "assert",
           "config": {
             "assertion": "norm < 100.0"
@@ -169,7 +169,7 @@ Feature: Probe system for observing and asserting on the forward pass
       """
     Then the response data field "probe_id" is "p-assert-norm"
     When the forward pass reaches layer 12 and the norm exceeds 100.0
-    Then execution pauses at "llama:0:12:attn.o_proj:output"
+    Then execution pauses at "llama:0:12:attn.o_proj:0:fwd"
     And the session is in "stopped" state
     And a "probe.fired" event is emitted with probe_id "p-assert-norm"
     And the event includes the assertion violation details
@@ -195,9 +195,9 @@ Feature: Probe system for observing and asserting on the forward pass
   # ── Probe and intervention composition ────────────────────────────
 
   Scenario: Probe at same point as intervention both execute
-    Given an active intervention "iv-scale-comp" of type "scale" on "llama:0:12:attn.o_proj:output" with params {"factor": 0.5}
-    And a defined probe "p-cap-comp" at point "llama:0:12:attn.o_proj:output" with action "capture" and priority 0
+    Given an active intervention "iv-scale-comp" of type "scale" on "llama:0:12:attn.o_proj:0:fwd" with params {"factor": 0.5}
+    And a defined probe "p-cap-comp" at point "llama:0:12:attn.o_proj:0:fwd" with action "capture" and priority 0
     When the client sends "rocket/step" with direction "forward"
-    Then probe "p-cap-comp" captures the tensor at "llama:0:12:attn.o_proj:output"
-    And intervention "iv-scale-comp" is applied at "llama:0:12:attn.o_proj:output"
+    Then probe "p-cap-comp" captures the tensor at "llama:0:12:attn.o_proj:0:fwd"
+    And intervention "iv-scale-comp" is applied at "llama:0:12:attn.o_proj:0:fwd"
     And the non-mutating probe "p-cap-comp" executes before the mutating intervention "iv-scale-comp"
