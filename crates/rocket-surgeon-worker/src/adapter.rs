@@ -495,12 +495,21 @@ pub fn resolve(
     config: &ModelConfig,
     rank: u32,
 ) -> Result<ComponentMap, String> {
+    resolve_with_containers(modules, config, rank).map(|(map, _)| map)
+}
+
+pub fn resolve_with_containers(
+    modules: &[RawModule],
+    config: &ModelConfig,
+    rank: u32,
+) -> Result<(ComponentMap, Vec<String>), String> {
     let decl = family_declaration(&config.model_type)
         .ok_or_else(|| format!("unsupported model family: {}", config.model_type))?;
 
     let family_name = config.model_type.clone();
     let mut components = Vec::new();
     let mut vocabulary = HashSet::new();
+    let mut container_paths = Vec::new();
 
     for module in modules {
         let mut matched = false;
@@ -509,7 +518,11 @@ pub fn resolve(
             if matches_module(matcher, module) {
                 matched = true;
                 match mapping {
-                    ModuleMapping::Skip | ModuleMapping::Container => break,
+                    ModuleMapping::Skip => break,
+                    ModuleMapping::Container => {
+                        container_paths.push(module.path.clone());
+                        break;
+                    }
                     ModuleMapping::Direct { canonical } => {
                         let layer_index = extract_layer_index(&module.path);
                         vocabulary.insert(canonical.clone());
@@ -574,11 +587,14 @@ pub fn resolve(
     let mut vocab_sorted: Vec<String> = vocabulary.into_iter().collect();
     vocab_sorted.sort();
 
-    Ok(ComponentMap {
-        components,
-        model_family: family_name,
-        vocabulary: vocab_sorted,
-    })
+    Ok((
+        ComponentMap {
+            components,
+            model_family: family_name,
+            vocabulary: vocab_sorted,
+        },
+        container_paths,
+    ))
 }
 
 pub fn apply_execution_order(map: &mut ComponentMap, execution_order: &[(String, u32)]) {
@@ -924,5 +940,68 @@ mod tests {
         apply_execution_order(&mut map, &execution_order);
         assert_eq!(map.components[0].module_path, "b");
         assert_eq!(map.components[1].module_path, "a");
+    }
+
+    #[test]
+    fn container_paths_includes_llama_decoder_layers() {
+        let modules = vec![
+            RawModule {
+                path: "model.layers.0".into(),
+                type_name: "LlamaDecoderLayer".into(),
+                attr_name: "0".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn".into(),
+                type_name: "LlamaSdpaAttention".into(),
+                attr_name: "self_attn".into(),
+            },
+            RawModule {
+                path: "model.layers.0.mlp".into(),
+                type_name: "LlamaMLP".into(),
+                attr_name: "mlp".into(),
+            },
+            RawModule {
+                path: "model.layers.0.self_attn.q_proj".into(),
+                type_name: "Linear".into(),
+                attr_name: "q_proj".into(),
+            },
+        ];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 64,
+            num_kv_heads: Some(4),
+        };
+        let (_, containers) = resolve_with_containers(&modules, &config, 0).unwrap();
+        assert!(containers.contains(&"model.layers.0".to_owned()));
+        assert!(containers.contains(&"model.layers.0.self_attn".to_owned()));
+        assert!(containers.contains(&"model.layers.0.mlp".to_owned()));
+        assert!(!containers.contains(&"model.layers.0.self_attn.q_proj".to_owned()));
+    }
+
+    #[test]
+    fn container_paths_empty_for_skip_modules() {
+        let modules = vec![
+            RawModule {
+                path: "model.embed_tokens".into(),
+                type_name: "Embedding".into(),
+                attr_name: "embed_tokens".into(),
+            },
+            RawModule {
+                path: "model.rotary_emb".into(),
+                type_name: "LlamaRotaryEmbedding".into(),
+                attr_name: "rotary_emb".into(),
+            },
+        ];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 64,
+            num_kv_heads: Some(4),
+        };
+        let (_, containers) = resolve_with_containers(&modules, &config, 0).unwrap();
+        assert!(containers.is_empty());
     }
 }
