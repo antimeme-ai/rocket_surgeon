@@ -427,4 +427,110 @@ mod tests {
             assert_eq!(&redecoded, packet);
         }
     }
+
+    fn find_traceconv() -> Option<std::path::PathBuf> {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+        let wrapper = std::path::Path::new(&manifest)
+            .parent()?
+            .parent()?
+            .join("quarantine/perfetto/tools/traceconv");
+        wrapper.is_file().then_some(wrapper)
+    }
+
+    #[test]
+    fn traceconv_validates_output() {
+        let Some(traceconv) = find_traceconv() else {
+            eprintln!("skipping: quarantine/perfetto/tools/traceconv not found");
+            return;
+        };
+
+        let dir = TempDir::new().unwrap();
+        let mut sink =
+            PerfettoSink::create(dir.path(), "traceconv-test", "gpt2", Instant::now()).unwrap();
+
+        sink.declare_rank(0).unwrap();
+        sink.declare_rank(1).unwrap();
+        sink.declare_layer(0, 0).unwrap();
+        sink.declare_layer(0, 1).unwrap();
+        sink.declare_layer(1, 0).unwrap();
+        sink.declare_component(0, 0, 0, "attn::q_proj").unwrap();
+        sink.declare_component(0, 0, 1, "attn::k_proj").unwrap();
+        sink.declare_component(0, 1, 0, "mlp::gate").unwrap();
+        sink.declare_component(1, 0, 0, "attn::q_proj").unwrap();
+        sink.emit_interned_names(0).unwrap();
+        sink.emit_interned_names(1).unwrap();
+
+        for _ in 0..3 {
+            sink.on_tick_stopped(&make_position(0, "attn::q_proj"))
+                .unwrap();
+            sink.on_tick_stopped(&make_position(1, "mlp::gate"))
+                .unwrap();
+        }
+
+        sink.on_probe_fired(&make_probe_event("p1")).unwrap();
+        sink.on_probe_fired(&make_probe_event("p2")).unwrap();
+
+        let path = sink.close().unwrap();
+
+        let text_out = dir.path().join("trace.textproto");
+        let output = std::process::Command::new("python3")
+            .arg(&traceconv)
+            .arg("text")
+            .arg(&path)
+            .arg(&text_out)
+            .output()
+            .expect("failed to run traceconv");
+
+        assert!(
+            output.status.success(),
+            "traceconv failed (exit {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let text = std::fs::read_to_string(&text_out).expect("traceconv output file missing");
+        assert!(!text.is_empty(), "traceconv produced empty output");
+
+        assert!(
+            text.contains("track_descriptor"),
+            "missing track_descriptor"
+        );
+        assert!(text.contains("track_event"), "missing track_event");
+
+        assert!(text.contains("traceconv-test"), "missing session name");
+        assert!(text.contains("rank:0"), "missing rank:0 track");
+        assert!(text.contains("rank:1"), "missing rank:1 track");
+        assert!(
+            text.contains("L0::attn::q_proj"),
+            "missing component L0::attn::q_proj"
+        );
+        assert!(
+            text.contains("L0::attn::k_proj"),
+            "missing component L0::attn::k_proj"
+        );
+        assert!(
+            text.contains("L1::mlp::gate"),
+            "missing component L1::mlp::gate"
+        );
+
+        assert!(
+            text.contains("type: TYPE_SLICE_BEGIN"),
+            "missing SLICE_BEGIN events"
+        );
+        assert!(
+            text.contains("type: TYPE_SLICE_END"),
+            "missing SLICE_END events"
+        );
+        assert!(
+            text.contains("type: TYPE_INSTANT"),
+            "missing INSTANT events"
+        );
+        assert!(text.contains("probe:p1"), "missing probe:p1 instant");
+        assert!(text.contains("probe:p2"), "missing probe:p2 instant");
+
+        assert!(
+            text.contains("debug_annotation"),
+            "missing debug_annotation on probe instants"
+        );
+    }
 }
