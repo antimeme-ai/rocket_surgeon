@@ -333,6 +333,7 @@ pub struct Capabilities {
     pub num_experts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k_experts: Option<u32>,
+    pub shared_memory_supported: bool,
 }
 
 impl Capabilities {
@@ -371,6 +372,7 @@ impl Capabilities {
             num_ranks: None,
             num_experts: None,
             top_k_experts: None,
+            shared_memory_supported: true,
         }
     }
 }

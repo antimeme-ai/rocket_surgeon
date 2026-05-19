@@ -216,6 +216,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         module_tree: info.module_tree,
         model_type: config.model_type,
         component_vocabulary: component_map.vocabulary,
+        shm_name: None,
     };
 
     match serde_json::to_value(resp) {
@@ -697,6 +698,7 @@ fn collect_tensors(
 
                 let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes_result);
 
+                let tensor_id = blake3::hash(&bytes_result).to_hex().to_string();
                 result.push(CapturedTensor {
                     module_path: comp.module_path.clone(),
                     canonical: comp.canonical.clone(),
@@ -704,7 +706,11 @@ fn collect_tensors(
                     shape,
                     dtype,
                     device,
-                    data_base64,
+                    tensor_id,
+                    shm_name: None,
+                    shm_offset: None,
+                    byte_length: None,
+                    data_base64: Some(data_base64),
                 });
             }
         }

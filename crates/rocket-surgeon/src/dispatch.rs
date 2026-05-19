@@ -267,14 +267,26 @@ fn ingest_and_respond(
     let mut first_tensor_id = None;
 
     for ct in captured {
-        let bytes = match engine.decode(&ct.data_base64) {
-            Ok(b) => b,
-            Err(e) => {
+        let bytes = match &ct.data_base64 {
+            Some(b64) => match engine.decode(b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("base64 decode failed: {e}"),
+                            data: None,
+                        },
+                    );
+                }
+            },
+            None => {
                 return Response::error(
                     request.id.clone(),
                     RpcError {
                         code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
-                        message: format!("base64 decode failed: {e}"),
+                        message: "CapturedTensor has neither data_base64 nor shm_offset".into(),
                         data: None,
                     },
                 );
@@ -815,7 +827,11 @@ mod tests {
                 shape: vec![4],
                 dtype: "float32".to_owned(),
                 device: "cpu".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                tensor_id: "a".repeat(64),
+                shm_name: None,
+                shm_offset: None,
+                byte_length: None,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&data)),
             }],
         };
 
@@ -876,7 +892,11 @@ mod tests {
                 shape: vec![4],
                 dtype: "float32".to_owned(),
                 device: "cpu".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                tensor_id: "a".repeat(64),
+                shm_name: None,
+                shm_offset: None,
+                byte_length: None,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&data)),
             }],
         };
 
@@ -937,7 +957,11 @@ mod tests {
                 shape: vec![4],
                 dtype: "float32".to_owned(),
                 device: "cpu".to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                tensor_id: "a".repeat(64),
+                shm_name: None,
+                shm_offset: None,
+                byte_length: None,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&data)),
             }],
         };
 
