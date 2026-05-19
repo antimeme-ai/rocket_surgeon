@@ -73,21 +73,12 @@ impl PerfettoSink {
 
     pub fn declare_rank(&mut self, rank: u32) -> Result<(), PerfettoError> {
         let name = format!("rank:{rank}");
-        self.sink.write_thread_track(
-            rank_uuid(rank),
-            PROCESS_UUID,
-            &name,
-            1,
-            i64::from(rank),
-        )?;
+        self.sink
+            .write_thread_track(rank_uuid(rank), PROCESS_UUID, &name, 1, i64::from(rank))?;
         Ok(())
     }
 
-    pub fn declare_layer(
-        &mut self,
-        rank: u32,
-        layer: u32,
-    ) -> Result<(), PerfettoError> {
+    pub fn declare_layer(&mut self, rank: u32, layer: u32) -> Result<(), PerfettoError> {
         let name = format!("L{layer}");
         self.sink.write_track(
             layer_uuid(rank, layer),
@@ -269,8 +260,8 @@ mod tests {
             offset += 1;
             let (len, consumed) = decode_varint(&data[offset..]);
             offset += consumed;
-            let packet =
-                TracePacket::decode(&data[offset..offset + len as usize]).expect("valid TracePacket");
+            let packet = TracePacket::decode(&data[offset..offset + len as usize])
+                .expect("valid TracePacket");
             packets.push(packet);
             offset += len as usize;
         }
@@ -324,8 +315,8 @@ mod tests {
     #[test]
     fn create_writes_process_track() {
         let dir = TempDir::new().unwrap();
-        let sink = PerfettoSink::create(dir.path(), "test-session", "gpt2", Instant::now())
-            .unwrap();
+        let sink =
+            PerfettoSink::create(dir.path(), "test-session", "gpt2", Instant::now()).unwrap();
         let path = sink.path().to_owned();
         drop(sink);
 

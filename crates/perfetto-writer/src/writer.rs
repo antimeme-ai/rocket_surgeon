@@ -267,8 +267,8 @@ mod tests {
             offset += 1;
             let (len, consumed) = decode_varint(&data[offset..]);
             offset += consumed;
-            let packet =
-                TracePacket::decode(&data[offset..offset + len as usize]).expect("valid TracePacket");
+            let packet = TracePacket::decode(&data[offset..offset + len as usize])
+                .expect("valid TracePacket");
             packets.push(packet);
             offset += len as usize;
         }
@@ -288,8 +288,7 @@ mod tests {
 
         assert_eq!(out[0], 0x0A);
         let (len, consumed) = decode_varint(&out[1..]);
-        let decoded =
-            TracePacket::decode(&out[1 + consumed..1 + consumed + len as usize]).unwrap();
+        let decoded = TracePacket::decode(&out[1 + consumed..1 + consumed + len as usize]).unwrap();
         assert_eq!(decoded.timestamp, Some(42));
     }
 
@@ -399,20 +398,14 @@ mod tests {
     fn write_interned_names_emits_seq_cleared() {
         let mut out = Vec::new();
         let mut sink = TraceSink::new(&mut out);
-        sink.write_interned_names(
-            1001,
-            &[(1, "L0::attn::q_proj"), (2, "L0::attn::k_proj")],
-        )
-        .unwrap();
+        sink.write_interned_names(1001, &[(1, "L0::attn::q_proj"), (2, "L0::attn::k_proj")])
+            .unwrap();
         drop(sink);
 
         let packets = decode_trace_packets(&out);
         let p = &packets[0];
         assert_eq!(p.trusted_packet_sequence_id, Some(1001));
-        assert_eq!(
-            p.sequence_flags,
-            Some(proto::SEQ_INCREMENTAL_STATE_CLEARED)
-        );
+        assert_eq!(p.sequence_flags, Some(proto::SEQ_INCREMENTAL_STATE_CLEARED));
         assert_eq!(p.first_packet_on_sequence, Some(true));
         assert_eq!(p.timestamp_clock_id, Some(proto::CLOCK_MONOTONIC));
         let interned = p.interned_data.as_ref().unwrap();
