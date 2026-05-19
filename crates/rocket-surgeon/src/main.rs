@@ -9,6 +9,9 @@ mod tensor_store;
 mod trace_log;
 
 use std::io::{self, BufReader};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use tracing::{error, info, warn};
@@ -297,7 +300,26 @@ fn main() {
     let mut session = Session::new();
     let mut tensor_store = TensorStore::new();
     let mut trace_log = TraceLog::new();
-    let mut reader = BufReader::new(io::stdin().lock());
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Result<String, String>>();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        loop {
+            match read_message(&mut reader) {
+                Ok(msg) => {
+                    if stdin_tx.send(Ok(msg)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = stdin_tx.send(Err(e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut last_heartbeat = Instant::now();
     let mut writer = io::stdout().lock();
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
@@ -307,11 +329,30 @@ fn main() {
     let mut notification_seq: u64 = 0;
 
     loop {
-        let raw = match read_message(&mut reader) {
-            Ok(msg) => msg,
-            Err(e) => {
-                info!("connection closed: {e}");
-                break;
+        let raw = if events_enabled {
+            match stdin_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(e)) => {
+                    info!("connection closed: {e}");
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    info!("reader thread disconnected");
+                    break;
+                }
+            }
+        } else {
+            match stdin_rx.recv() {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(e)) => {
+                    info!("connection closed: {e}");
+                    break;
+                }
+                Err(_) => {
+                    info!("reader thread disconnected");
+                    break;
+                }
             }
         };
 
