@@ -1,5 +1,4 @@
 mod dispatch;
-#[allow(dead_code)]
 mod notifications;
 mod orchestrator_handle;
 mod server;
@@ -19,6 +18,7 @@ use tracing::{error, info, warn};
 use crate::dispatch::{
     dispatch, handle_inspect, handle_probe, handle_step, handle_subscribe, handle_unsubscribe,
 };
+use crate::notifications::send_notification;
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
@@ -28,7 +28,8 @@ use crate::trace_log::{Direction, TraceLog};
 use rocket_surgeon_probes::registry::ProbeRegistry;
 use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, ProbeRequest, method,
+    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, ProbeRequest, TickHeartbeatEvent,
+    TickStoppedEvent, event, method,
 };
 use rocket_surgeon_protocol::types::GranularityScope;
 
@@ -272,13 +273,7 @@ fn propagate_probes(
     }
 }
 
-#[allow(
-    clippy::significant_drop_tightening,
-    clippy::too_many_lines,
-    unused_assignments,
-    unused_variables,
-    unused_mut
-)]
+#[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
 fn main() {
     let cli = Cli::parse();
 
@@ -330,6 +325,41 @@ fn main() {
 
     loop {
         let raw = if events_enabled {
+            if last_heartbeat.elapsed() >= Duration::from_secs(1) {
+                let position = session.state().position.clone().unwrap_or_else(|| {
+                    rocket_surgeon_protocol::types::TickPosition {
+                        tick_id: 0,
+                        direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+                        rank: Some(0),
+                        layer: 0,
+                        component: String::new(),
+                        event: rocket_surgeon_protocol::types::TickEvent::Output,
+                        replay_of: None,
+                    }
+                });
+                let hb = TickHeartbeatEvent {
+                    position,
+                    uptime_seconds: session.state().tick_id.map_or(0.0, |_| {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0.0, |d| d.as_secs_f64())
+                    }),
+                    elapsed_stopped_sec: last_heartbeat.elapsed().as_secs_f64(),
+                    per_rank_status: vec![],
+                };
+                let params = serde_json::to_value(&hb).expect("serialize heartbeat");
+                if let Err(e) = send_notification(
+                    &mut writer,
+                    &mut notification_seq,
+                    event::TICK_HEARTBEAT,
+                    params,
+                ) {
+                    error!("failed to send heartbeat: {e}");
+                    break;
+                }
+                last_heartbeat = Instant::now();
+            }
+
             match stdin_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(e)) => {
@@ -379,14 +409,15 @@ fn main() {
             }
         };
 
+        let mut step_host_response = None;
         let response = if request.method == method::STEP {
-            let host_response = try_orchestrator_step(
+            step_host_response = try_orchestrator_step(
                 &mut orchestrator,
                 model_handle,
                 &request,
                 &granularity_scopes,
             );
-            handle_step(&mut session, &request, host_response.as_ref())
+            handle_step(&mut session, &request, step_host_response.as_ref())
         } else if request.method == method::INSPECT {
             match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {
                 Ok(host_response) => handle_inspect(
@@ -447,6 +478,51 @@ fn main() {
         if let Err(e) = write_message(&mut writer, &resp_json) {
             error!("failed to write response: {e}");
             break;
+        }
+
+        if events_enabled && response.error.is_none() && request.method == method::STEP {
+            let position = session.state().position.clone().unwrap_or_else(|| {
+                rocket_surgeon_protocol::types::TickPosition {
+                    tick_id: 0,
+                    direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+                    rank: Some(0),
+                    layer: 0,
+                    component: String::new(),
+                    event: rocket_surgeon_protocol::types::TickEvent::Output,
+                    replay_of: None,
+                }
+            });
+            let stopped = TickStoppedEvent {
+                position,
+                state: session.state().clone(),
+            };
+            let params = serde_json::to_value(&stopped).expect("serialize tick.stopped");
+            if let Err(e) = send_notification(
+                &mut writer,
+                &mut notification_seq,
+                event::TICK_STOPPED,
+                params,
+            ) {
+                error!("failed to send tick.stopped: {e}");
+                break;
+            }
+
+            if let Some(ref hr) = step_host_response {
+                for pe in &hr.events {
+                    let params = serde_json::to_value(pe).expect("serialize probe.fired");
+                    if let Err(e) = send_notification(
+                        &mut writer,
+                        &mut notification_seq,
+                        event::PROBE_FIRED,
+                        params,
+                    ) {
+                        error!("failed to send probe.fired: {e}");
+                        break;
+                    }
+                }
+            }
+
+            last_heartbeat = Instant::now();
         }
     }
 
