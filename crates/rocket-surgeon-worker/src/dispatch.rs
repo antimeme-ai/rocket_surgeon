@@ -29,6 +29,7 @@ pub struct ForwardPassState {
     pub resume_mailbox: pyo3::PyObject,
     pub sentinel_handles: Vec<pyo3::PyObject>,
     pub capture_handles: Vec<pyo3::PyObject>,
+    pub passive_handles: Vec<pyo3::PyObject>,
     #[allow(dead_code)]
     pub call_counts: pyo3::PyObject,
     pub forward_complete: bool,
@@ -38,6 +39,7 @@ pub struct WorkerState {
     pub component_map: Option<ComponentMap>,
     pub component_index: HashMap<(String, u32), usize>,
     pub module_paths: Vec<String>,
+    pub container_paths: Vec<String>,
     pub model_handle: Option<u64>,
     pub rank: u32,
     pub tick_state: TickState,
@@ -55,6 +57,7 @@ impl WorkerState {
             component_map: None,
             component_index: HashMap::new(),
             module_paths: Vec::new(),
+            container_paths: Vec::new(),
             model_handle: None,
             rank: 0,
             tick_state: TickState::new(0),
@@ -170,15 +173,16 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         }
     };
 
-    let mut component_map = match crate::adapter::resolve(&modules, &config, req.rank) {
-        Ok(m) => m,
-        Err(e) => {
-            return internal_error(
-                request.id.clone(),
-                format!("adapter resolution failed: {e}"),
-            );
-        }
-    };
+    let (mut component_map, container_paths) =
+        match crate::adapter::resolve_with_containers(&modules, &config, req.rank) {
+            Ok(r) => r,
+            Err(e) => {
+                return internal_error(
+                    request.id.clone(),
+                    format!("adapter resolution failed: {e}"),
+                );
+            }
+        };
 
     let execution_order = match bridge::discover_execution_order(handle) {
         Ok(o) => o,
@@ -197,6 +201,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         .iter()
         .map(|c| c.module_path.clone())
         .collect();
+    state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
@@ -240,6 +245,9 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
             if let Err(e) = bridge::remove_hooks(py, &fwd.capture_handles) {
                 tracing::warn!("failed to remove capture hooks during detach: {e}");
             }
+            if let Err(e) = bridge::remove_hooks(py, &fwd.passive_handles) {
+                tracing::warn!("failed to remove passive hooks during detach: {e}");
+            }
         });
     }
 
@@ -247,6 +255,7 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     state.component_map = None;
     state.component_index.clear();
     state.module_paths.clear();
+    state.container_paths.clear();
     state.last_outputs = None;
 
     match bridge::unload_model(req.model_handle) {
@@ -356,6 +365,13 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         &state.module_paths,
     )?;
 
+    let passive_handles = if state.container_paths.is_empty() {
+        Vec::new()
+    } else {
+        let lo_bound = state.last_outputs.as_ref().unwrap().bind(py);
+        bridge::install_passive_hooks(py, handle, &state.container_paths, lo_bound)?
+    };
+
     let completion_mb = result_mb.clone_ref(py);
     let done_callback = pyo3::types::PyCFunction::new_closure(
         py,
@@ -385,6 +401,7 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         resume_mailbox: resume_mb,
         sentinel_handles,
         capture_handles,
+        passive_handles,
         call_counts: call_counts.into_py_any(py)?,
         forward_complete: false,
     });
