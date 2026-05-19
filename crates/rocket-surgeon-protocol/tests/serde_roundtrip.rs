@@ -816,7 +816,7 @@ fn unsubscribe_response_roundtrip() {
 fn tick_stopped_event_roundtrip() {
     let evt = TickStoppedEvent {
         position: sample_tick_position(),
-        state: sample_session_state(),
+        state: Status::Stopped,
     };
     roundtrip(&evt);
 }

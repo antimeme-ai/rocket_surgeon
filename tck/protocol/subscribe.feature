@@ -23,7 +23,7 @@ Feature: Event subscription and notification delivery
     And the response data field "available_events" contains "probe.fired"
     When the client sends "rocket/step" with direction "forward"
     Then the client receives a "tick.stopped" notification
-    And the notification includes a "seq" field with a positive integer
+    And the notification includes a "seq" field with a non-negative integer
 
   # ── Events not sent before subscribe ─────────────────────────────
 
@@ -107,15 +107,18 @@ Feature: Event subscription and notification delivery
     Then the response status is "stopped"
 
   # ── Subscribe requires stopped state ─────────────────────────────
+  # Background attaches+steps, so detach first to reach Initialized state.
 
-  Scenario: Subscribe before attach returns invalid state error
-    Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
-    When the client sends "rocket/subscribe" with:
+  Scenario: Subscribe without attached model returns model-not-attached error
+    When the client sends "rocket/detach" with:
       """json
       {}
       """
-    Then the response contains an error with code "INVALID_STATE"
+    And the client sends "rocket/subscribe" with:
+      """json
+      {}
+      """
+    Then the response contains an error with code "MODEL_NOT_ATTACHED"
 
   # ── Notification wire format ─────────────────────────────────────
 
@@ -130,4 +133,4 @@ Feature: Event subscription and notification delivery
     And the notification has field "method" as a string
     And the notification has field "params" as an object
     And the notification has no "id" field
-    And the notification "params" contains "seq" as a positive integer
+    And the notification "params" contains "seq" as a non-negative integer

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ErrorCode;
 use crate::types::{
     BuiltInView, Capabilities, CheckpointRef, DType, GranularityScope, InterventionRecipe,
-    ProbeAction, ProbeDefinition, SessionState, Status, StepDirection, TensorSummary,
-    TickGranularity, TickPosition,
+    ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary, TickGranularity,
+    TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ pub struct UnsubscribeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickStoppedEvent {
     pub position: TickPosition,
-    pub state: SessionState,
+    pub state: Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

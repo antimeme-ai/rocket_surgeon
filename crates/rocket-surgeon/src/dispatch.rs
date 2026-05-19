@@ -4,7 +4,8 @@ use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, EventType, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse,
-    StepRequest, SubscribeResponse, UnsubscribeResponse, method,
+    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    method,
 };
 use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
 
@@ -426,6 +427,20 @@ pub fn handle_probe(
 }
 
 pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
+    let _req: SubscribeRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
     if let Err(ref e) = session.require_stopped("rocket/subscribe") {
         return session_error_to_response(request.id.clone(), e);
     }
@@ -442,6 +457,20 @@ pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
 }
 
 pub fn handle_unsubscribe(session: &Session, request: &Request) -> Response {
+    let _req: UnsubscribeRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
     let resp = UnsubscribeResponse {
         status: session.state().status,
     };

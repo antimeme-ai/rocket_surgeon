@@ -273,6 +273,18 @@ fn propagate_probes(
     }
 }
 
+fn default_position() -> rocket_surgeon_protocol::types::TickPosition {
+    rocket_surgeon_protocol::types::TickPosition {
+        tick_id: 0,
+        direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+        rank: Some(0),
+        layer: 0,
+        component: String::new(),
+        event: rocket_surgeon_protocol::types::TickEvent::Output,
+        replay_of: None,
+    }
+}
+
 #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
 fn main() {
     let cli = Cli::parse();
@@ -314,7 +326,9 @@ fn main() {
         }
     });
 
+    let started_at = Instant::now();
     let mut last_heartbeat = Instant::now();
+    let mut stopped_since = Instant::now();
     let mut writer = io::stdout().lock();
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
@@ -326,25 +340,15 @@ fn main() {
     loop {
         let raw = if events_enabled {
             if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-                let position = session.state().position.clone().unwrap_or_else(|| {
-                    rocket_surgeon_protocol::types::TickPosition {
-                        tick_id: 0,
-                        direction: rocket_surgeon_protocol::types::StepDirection::Forward,
-                        rank: Some(0),
-                        layer: 0,
-                        component: String::new(),
-                        event: rocket_surgeon_protocol::types::TickEvent::Output,
-                        replay_of: None,
-                    }
-                });
+                let position = session
+                    .state()
+                    .position
+                    .clone()
+                    .unwrap_or_else(default_position);
                 let hb = TickHeartbeatEvent {
                     position,
-                    uptime_seconds: session.state().tick_id.map_or(0.0, |_| {
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0.0, |d| d.as_secs_f64())
-                    }),
-                    elapsed_stopped_sec: last_heartbeat.elapsed().as_secs_f64(),
+                    uptime_seconds: started_at.elapsed().as_secs_f64(),
+                    elapsed_stopped_sec: stopped_since.elapsed().as_secs_f64(),
                     per_rank_status: vec![],
                 };
                 let params = serde_json::to_value(&hb).expect("serialize heartbeat");
@@ -481,20 +485,16 @@ fn main() {
         }
 
         if events_enabled && response.error.is_none() && request.method == method::STEP {
-            let position = session.state().position.clone().unwrap_or_else(|| {
-                rocket_surgeon_protocol::types::TickPosition {
-                    tick_id: 0,
-                    direction: rocket_surgeon_protocol::types::StepDirection::Forward,
-                    rank: Some(0),
-                    layer: 0,
-                    component: String::new(),
-                    event: rocket_surgeon_protocol::types::TickEvent::Output,
-                    replay_of: None,
-                }
-            });
+            stopped_since = Instant::now();
+
+            let position = session
+                .state()
+                .position
+                .clone()
+                .unwrap_or_else(default_position);
             let stopped = TickStoppedEvent {
                 position,
-                state: session.state().clone(),
+                state: session.state().status,
             };
             let params = serde_json::to_value(&stopped).expect("serialize tick.stopped");
             if let Err(e) = send_notification(
