@@ -21,8 +21,9 @@ use crate::trace_log::{Direction, TraceLog};
 use rocket_surgeon_probes::registry::ProbeRegistry;
 use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, method,
+    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, ProbeRequest, method,
 };
+use rocket_surgeon_protocol::types::GranularityScope;
 
 #[derive(Parser)]
 #[command(
@@ -112,11 +113,22 @@ fn spawn_and_attach(
     }
 }
 
+fn resolve_granularity(
+    explicit: Option<rocket_surgeon_protocol::types::TickGranularity>,
+    scopes: &[GranularityScope],
+) -> Option<rocket_surgeon_protocol::types::TickGranularity> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    scopes.first().map(|s| s.granularity)
+}
+
 /// Try to step via the orchestrator. Returns `Some(HostStepResponse)` on success.
 fn try_orchestrator_step(
     orchestrator: &mut Option<OrchestratorHandle>,
     model_handle: Option<u64>,
     request: &rocket_surgeon_protocol::jsonrpc::Request,
+    granularity_scopes: &[GranularityScope],
 ) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
     let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
     let step_req: rocket_surgeon_protocol::messages::StepRequest = request
@@ -132,11 +144,13 @@ fn try_orchestrator_step(
         )
         .ok()?;
 
+    let granularity = resolve_granularity(step_req.granularity, granularity_scopes);
+
     let host_req = rocket_surgeon_protocol::messages::HostStepRequest {
         model_handle: mh,
         count: step_req.count,
         direction: step_req.direction,
-        granularity: step_req.granularity,
+        granularity,
         max_events: None,
     };
     match orch.step(&host_req) {
@@ -251,7 +265,7 @@ fn propagate_probes(
     }
 }
 
-#[allow(clippy::significant_drop_tightening)]
+#[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
 fn main() {
     let cli = Cli::parse();
 
@@ -278,6 +292,7 @@ fn main() {
     let mut orchestrator: Option<OrchestratorHandle> = None;
     let mut model_handle: Option<u64> = None;
     let mut probe_registry = ProbeRegistry::new();
+    let mut granularity_scopes: Vec<GranularityScope> = Vec::new();
 
     loop {
         let raw = match read_message(&mut reader) {
@@ -312,7 +327,12 @@ fn main() {
         };
 
         let response = if request.method == method::STEP {
-            let host_response = try_orchestrator_step(&mut orchestrator, model_handle, &request);
+            let host_response = try_orchestrator_step(
+                &mut orchestrator,
+                model_handle,
+                &request,
+                &granularity_scopes,
+            );
             handle_step(&mut session, &request, host_response.as_ref())
         } else if request.method == method::INSPECT {
             match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {
@@ -325,6 +345,14 @@ fn main() {
                 Err(err_response) => *err_response,
             }
         } else if request.method == method::PROBE {
+            if let Some(params) = &request.params {
+                if let Ok(ProbeRequest::SetGranularity { scopes }) =
+                    serde_json::from_value::<ProbeRequest>(params.clone())
+                {
+                    info!(num_scopes = scopes.len(), "granularity scopes updated");
+                    granularity_scopes = scopes;
+                }
+            }
             let resp = handle_probe(&session, &request, &mut probe_registry);
             if resp.error.is_none() {
                 propagate_probes(&mut orchestrator, model_handle, &probe_registry);
