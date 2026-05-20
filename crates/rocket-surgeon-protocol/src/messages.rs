@@ -25,6 +25,15 @@ pub mod method {
     pub const SUBSCRIBE: &str = "rocket/subscribe";
     pub const UNSUBSCRIBE: &str = "rocket/unsubscribe";
     pub const VIEW: &str = "rocket/view";
+    pub const KV_READ: &str = "rocket/kv.read";
+    pub const KV_INTERVENE: &str = "rocket/kv.intervene";
+    pub const BRANCH_FORK: &str = "rocket/branch.fork";
+    pub const BRANCH_DROP: &str = "rocket/branch.drop";
+    pub const BRANCH_COMPARE: &str = "rocket/branch.compare";
+    pub const DISCOVER: &str = "rocket/discover";
+    pub const SWEEP: &str = "rocket/sweep";
+    pub const VIEW_FOCUS: &str = "rocket/view.focus";
+    pub const VIEW_DEFINE: &str = "rocket/view.define";
 }
 
 pub mod event {
@@ -33,6 +42,12 @@ pub mod event {
     pub const PROBE_FIRED: &str = "probe.fired";
     pub const REPLAY_DIVERGENCE: &str = "replay.divergence";
     pub const ERROR: &str = "error";
+    pub const KV_UPDATE: &str = "kv.update";
+    pub const KV_EVICTED: &str = "kv.evicted";
+    pub const BRANCH_CREATED: &str = "branch.created";
+    pub const BRANCH_TIER_CHANGED: &str = "branch.tier_changed";
+    pub const SPEC_STEP: &str = "spec.step";
+    pub const SWEEP_TRIAL_COMPLETE: &str = "sweep.trial_complete";
 }
 
 pub mod internal {
@@ -386,6 +401,119 @@ pub struct ViewResponse {
 }
 
 // ---------------------------------------------------------------------------
+// rocket/kv.read
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvSlot {
+    K,
+    V,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvMetric {
+    #[default]
+    L2Norm,
+    Mean,
+    AbsMax,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvReadRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heads: Option<Vec<u32>>,
+    #[serde(default)]
+    pub slot: KvSlot,
+    #[serde(default)]
+    pub metric: KvMetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverlay {
+    Sink,
+    HeavyHitter,
+    Evicted,
+    Quantized,
+    PageBoundary,
+    SharedPrefix,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvCacheEntry {
+    pub layer: u32,
+    pub position: u64,
+    pub head: u32,
+    pub k_metric: Option<f64>,
+    pub v_metric: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<KvOverlay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvReadResponse {
+    pub entries: Vec<KvCacheEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/branch.*
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchTier {
+    Live,
+    Spilled,
+    Dropped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchForkRequest {
+    pub from_checkpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchForkResponse {
+    pub branch_id: String,
+    pub tier: BranchTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchDropRequest {
+    pub branch_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchDropResponse {
+    pub branch_id: String,
+    pub freed_mb: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchCompareRequest {
+    pub branch_a: String,
+    pub branch_b: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchCompareResponse {
+    pub cosine_similarity: f64,
+    pub max_relative_error: f64,
+    pub kl_divergence: f64,
+    pub per_layer_norm_delta: Vec<f64>,
+}
+
+// ---------------------------------------------------------------------------
 // Event notifications
 // ---------------------------------------------------------------------------
 
@@ -446,6 +574,34 @@ pub struct ErrorEvent {
     pub message: String,
     pub details: Option<serde_json::Value>,
     pub fatal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvUpdateEvent {
+    pub layer: u32,
+    pub new_positions: Vec<u64>,
+    pub total_positions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvEvictedEvent {
+    pub layer: u32,
+    pub evicted_positions: Vec<u64>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchCreatedEvent {
+    pub branch_id: String,
+    pub from_checkpoint: String,
+    pub tier: BranchTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchTierChangedEvent {
+    pub branch_id: String,
+    pub old_tier: BranchTier,
+    pub new_tier: BranchTier,
 }
 
 // ---------------------------------------------------------------------------

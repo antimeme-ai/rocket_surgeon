@@ -3,15 +3,18 @@ use rocket_surgeon_protocol::jsonrpc::{
     JSONRPC_VERSION, Notification, RawMessage, Request, RequestId, Response, RpcError,
 };
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, AttachResponse, CheckpointRequest, CheckpointResponse, CreateCheckpointTier,
-    DetachRequest, DetachResponse, Divergence, ErrorEvent, EventType, HostViewRequest,
-    HostViewResponse, InitializeRequest, InitializeResponse, InspectDetail, InspectRequest,
-    InspectResponse, InterveneRequest, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
+    AttachRequest, AttachResponse, BranchCompareRequest, BranchCompareResponse,
+    BranchCreatedEvent, BranchDropRequest, BranchDropResponse, BranchForkRequest,
+    BranchForkResponse, BranchTier, BranchTierChangedEvent, CheckpointRequest,
+    CheckpointResponse, CreateCheckpointTier, DetachRequest, DetachResponse, Divergence,
+    ErrorEvent, EventType, HostViewRequest, HostViewResponse, InitializeRequest,
+    InitializeResponse, InspectDetail, InspectRequest, InspectResponse, InterveneRequest,
+    KvCacheEntry, KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest, KvReadResponse, KvSlot,
+    KvUpdateEvent, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
     ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest,
     StatusResponse, StepRequest, StepResponse, SubscribeFilter, SubscribeRequest,
-    SubscribeResponse,
-    TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewRequest,
-    ViewResponse,
+    SubscribeResponse, TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest,
+    UnsubscribeResponse, ViewRequest, ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
     AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
@@ -1403,6 +1406,226 @@ fn view_data_unavailable_error_code() {
     );
     let json = serde_json::to_string(&ErrorCode::ViewDataUnavailable).unwrap();
     assert_eq!(json, "\"VIEW_DATA_UNAVAILABLE\"");
+}
+
+// ===== KV cache =====
+
+#[test]
+fn kv_slot_default_is_both() {
+    assert_eq!(KvSlot::default(), KvSlot::Both);
+}
+
+#[test]
+fn kv_metric_default_is_l2_norm() {
+    assert_eq!(KvMetric::default(), KvMetric::L2Norm);
+}
+
+#[test]
+fn kv_read_request_roundtrip() {
+    let req = KvReadRequest {
+        layers: Some(vec![0, 1]),
+        positions: Some(vec![0, 1, 2]),
+        heads: None,
+        slot: KvSlot::Both,
+        metric: KvMetric::L2Norm,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn kv_read_request_minimal() {
+    let json = serde_json::json!({});
+    let req: KvReadRequest = serde_json::from_value(json).unwrap();
+    assert!(req.layers.is_none());
+    assert_eq!(req.slot, KvSlot::Both);
+    assert_eq!(req.metric, KvMetric::L2Norm);
+}
+
+#[test]
+fn kv_cache_entry_roundtrip() {
+    let entry = KvCacheEntry {
+        layer: 0,
+        position: 5,
+        head: 3,
+        k_metric: Some(1.23),
+        v_metric: Some(4.56),
+        overlay: Some(KvOverlay::HeavyHitter),
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn kv_read_response_roundtrip() {
+    let resp = KvReadResponse {
+        entries: vec![KvCacheEntry {
+            layer: 0,
+            position: 0,
+            head: 0,
+            k_metric: Some(0.5),
+            v_metric: None,
+            overlay: None,
+        }],
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn kv_overlay_serde() {
+    assert_eq!(
+        serde_json::to_string(&KvOverlay::Sink).unwrap(),
+        r#""sink""#
+    );
+    assert_eq!(
+        serde_json::to_string(&KvOverlay::SharedPrefix).unwrap(),
+        r#""shared_prefix""#
+    );
+}
+
+// ===== Branch =====
+
+#[test]
+fn branch_tier_serde() {
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Live).unwrap(),
+        r#""live""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Spilled).unwrap(),
+        r#""spilled""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Dropped).unwrap(),
+        r#""dropped""#
+    );
+}
+
+#[test]
+fn branch_fork_request_roundtrip() {
+    let req = BranchForkRequest {
+        from_checkpoint: "ckpt-1".to_owned(),
+        name: Some("experiment-a".to_owned()),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_fork_response_roundtrip() {
+    let resp = BranchForkResponse {
+        branch_id: "br-001".to_owned(),
+        tier: BranchTier::Live,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn branch_drop_request_roundtrip() {
+    let req = BranchDropRequest {
+        branch_id: "br-001".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_drop_response_roundtrip() {
+    let resp = BranchDropResponse {
+        branch_id: "br-001".to_owned(),
+        freed_mb: Some(128.5),
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn branch_compare_request_roundtrip() {
+    let req = BranchCompareRequest {
+        branch_a: "br-001".to_owned(),
+        branch_b: "br-002".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_compare_response_roundtrip() {
+    let resp = BranchCompareResponse {
+        cosine_similarity: 0.98,
+        max_relative_error: 0.02,
+        kl_divergence: 0.001,
+        per_layer_norm_delta: vec![0.01, 0.02, 0.03],
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn kv_update_event_roundtrip() {
+    let evt = KvUpdateEvent {
+        layer: 5,
+        new_positions: vec![10, 11],
+        total_positions: 100,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn kv_evicted_event_roundtrip() {
+    let evt = KvEvictedEvent {
+        layer: 3,
+        evicted_positions: vec![0, 1, 2],
+        reason: "cache full".to_owned(),
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn branch_created_event_roundtrip() {
+    let evt = BranchCreatedEvent {
+        branch_id: "br-001".to_owned(),
+        from_checkpoint: "ckpt-1".to_owned(),
+        tier: BranchTier::Live,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn branch_tier_changed_event_roundtrip() {
+    let evt = BranchTierChangedEvent {
+        branch_id: "br-001".to_owned(),
+        old_tier: BranchTier::Live,
+        new_tier: BranchTier::Dropped,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn method_constants_kv_branch() {
+    use rocket_surgeon_protocol::messages::method;
+    assert_eq!(method::KV_READ, "rocket/kv.read");
+    assert_eq!(method::BRANCH_FORK, "rocket/branch.fork");
+    assert_eq!(method::BRANCH_DROP, "rocket/branch.drop");
+    assert_eq!(method::BRANCH_COMPARE, "rocket/branch.compare");
+}
+
+#[test]
+fn event_constants_kv_branch() {
+    use rocket_surgeon_protocol::messages::event;
+    assert_eq!(event::KV_UPDATE, "kv.update");
+    assert_eq!(event::KV_EVICTED, "kv.evicted");
+    assert_eq!(event::BRANCH_CREATED, "branch.created");
+    assert_eq!(event::BRANCH_TIER_CHANGED, "branch.tier_changed");
+}
+
+#[test]
+fn built_in_view_new_variants_serde() {
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::TunedLens).unwrap(),
+        r#""tuned_lens""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::KvCacheRibbon).unwrap(),
+        r#""kv_cache_ribbon""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::WorldlineDag).unwrap(),
+        r#""worldline_dag""#
+    );
 }
 
 // ===== Event notifications =====

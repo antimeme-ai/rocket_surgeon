@@ -500,6 +500,10 @@ pub enum BuiltInView {
     RoutingEntropy,
     FeatureAttribution,
     SaeActivation,
+    TunedLens,
+    KvCacheRibbon,
+    KvCacheDetail,
+    WorldlineDag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
