@@ -205,6 +205,7 @@ pub fn handle_step(
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         (pos, false)
     };
@@ -665,7 +666,7 @@ mod tests {
     fn init_params() -> serde_json::Value {
         serde_json::json!({
             "client_name": "test",
-            "protocol_version": "0.2.0"
+            "protocol_version": "0.3.0"
         })
     }
 

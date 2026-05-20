@@ -42,7 +42,7 @@ impl SessionError {
 }
 
 const SUPPORTED_FAMILIES: &[&str] = &["llama", "mixtral", "gpt-neox", "gpt2"];
-const PROTOCOL_VERSION: &str = "0.2.0";
+const PROTOCOL_VERSION: &str = "0.3.0";
 
 #[derive(Debug)]
 pub struct Session {
@@ -130,6 +130,7 @@ impl Session {
             suggestion,
             current_state: Some(self.state.status),
             valid_states: Some(valid_states),
+            recovery_hint: None,
             context: None,
         })
     }
@@ -153,6 +154,7 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -179,6 +181,7 @@ impl Session {
                 suggestion: "Detach the current model before attaching a new one".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -197,6 +200,7 @@ impl Session {
                         suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
                         current_state: Some(self.state.status),
                         valid_states: None,
+                        recovery_hint: None,
                         context: None,
                     }));
                 }
@@ -214,6 +218,7 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -251,6 +256,10 @@ impl Session {
             hidden_dim,
             num_ranks: req.num_ranks,
             capabilities: Capabilities::phase1_defaults(),
+            component_vocabulary: Vec::new(),
+            module_tree: Vec::new(),
+            alias_table: Vec::new(),
+            tick_map: Vec::new(),
         })
     }
 
@@ -280,6 +289,7 @@ impl Session {
                 suggestion: "No model is currently attached".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -332,6 +342,7 @@ impl Session {
                     suggestion: "Attach a model before calling this method".to_owned(),
                     current_state: Some(self.state.status),
                     valid_states: Some(vec![Status::Stopped]),
+                    recovery_hint: None,
                     context: None,
                 }))
             }
@@ -362,6 +373,7 @@ impl Session {
             suggestion: format!("The {cap} capability is not supported in this build"),
             current_state: Some(self.state.status),
             valid_states: None,
+            recovery_hint: None,
             context: None,
         })
     }
@@ -417,7 +429,7 @@ mod tests {
     fn init_request() -> InitializeRequest {
         InitializeRequest {
             client_name: "test-client".to_owned(),
-            protocol_version: "0.2.0".to_owned(),
+            protocol_version: "0.3.0".to_owned(),
             client_version: None,
             client_capabilities: None,
         }
@@ -487,7 +499,7 @@ mod tests {
         let mut session = Session::new();
         let resp = session.initialize(&init_request()).unwrap();
         let caps = &resp.data.as_ref().unwrap().capabilities;
-        assert_eq!(caps.protocol_version, "0.2.0");
+        assert_eq!(caps.protocol_version, "0.3.0");
         assert_eq!(caps.execution_mode, ExecutionMode::Eager);
     }
 
@@ -702,6 +714,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
+            run_to: None,
         };
         let host_position = TickPosition {
             tick_id: 1,
@@ -713,6 +727,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let result = session.step(&req, &host_position, false);
         assert!(result.is_ok());
@@ -730,6 +745,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: None,
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -741,6 +758,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
@@ -753,6 +771,8 @@ mod tests {
             direction: StepDirection::Backward,
             count: 1,
             granularity: None,
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 0,
@@ -764,6 +784,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(
@@ -779,6 +800,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos1 = TickPosition {
             tick_id: 1,
@@ -790,6 +813,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos1, false).unwrap();
         assert_eq!(session.state().tick_id, Some(1));
@@ -804,6 +828,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos2, false).unwrap();
         assert_eq!(session.state().tick_id, Some(2));
@@ -816,6 +841,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -827,6 +854,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos, false).unwrap();
         let state = session.state();
@@ -843,6 +871,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -854,6 +884,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let envelope = session.step(&req, &pos, false).unwrap();
         assert!(envelope.state.session_id.len() == 36);
@@ -929,6 +960,8 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 5,
@@ -940,6 +973,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos, false).unwrap();
         let tick_before = session.state().tick_id;

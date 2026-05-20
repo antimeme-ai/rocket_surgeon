@@ -50,6 +50,13 @@ pub enum ActionName {
 // Tick model
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TickClock {
+    pub token: u64,
+    pub operator: u64,
+    pub wall_ns: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickPosition {
     pub tick_id: u64,
@@ -64,6 +71,8 @@ pub struct TickPosition {
     pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_position: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<TickClock>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +113,37 @@ pub enum TickGranularity {
     RouterPostTopk,
     Expert,
     MoeLayer,
+}
+
+// ---------------------------------------------------------------------------
+// Discovery types (AttachResponse extensions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentEntry {
+    pub canonical: String,
+    pub event: String,
+    pub tensor_shape: Vec<u64>,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AliasEntry {
+    pub canonical: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickMapEntry {
+    pub granularity: TickGranularity,
+    pub ticks_per_layer: Vec<TickLayerInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickLayerInfo {
+    pub layer: u32,
+    pub components: Vec<String>,
+    pub tick_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +299,8 @@ pub(crate) fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterventionRecipe {
-    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub intervention_type: InterventionType,
     pub target: String,
@@ -281,6 +322,18 @@ pub enum InterventionType {
     Patch,
     Clamp,
     RouteOverride,
+    AttentionMask,
+    EmbedSwap,
+    EmbedNoise,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AblateMode {
+    #[default]
+    Zero,
+    Mean,
+    Resample,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,7 +344,29 @@ pub enum InterventionParams {
     Patch { source_tensor_id: String },
     Clamp { min: f64, max: f64 },
     RouteOverride { token: u64, experts: Vec<u64> },
-    Ablate {},
+    AttentionMask {
+        source_positions: Vec<u64>,
+        target_positions: Vec<u64>,
+        mask_value: f64,
+    },
+    EmbedSwap {
+        position: u64,
+        new_token_id: u64,
+    },
+    EmbedNoise {
+        position: u64,
+        std: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
+    },
+    Ablate {
+        #[serde(default)]
+        mode: AblateMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_run: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_tensor_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,7 +432,7 @@ impl Capabilities {
     #[must_use]
     pub fn phase1_defaults() -> Self {
         Self {
-            protocol_version: "0.2.0".to_owned(),
+            protocol_version: "0.3.0".to_owned(),
             supports_reverse_step: false,
             supports_checkpointing: false,
             supports_moe: false,
@@ -372,13 +447,21 @@ impl Capabilities {
                 InterventionType::Add,
                 InterventionType::Patch,
                 InterventionType::Clamp,
+                InterventionType::AttentionMask,
+                InterventionType::EmbedSwap,
+                InterventionType::EmbedNoise,
             ],
             built_in_views: vec![
                 BuiltInView::ResidualStreamNorm,
                 BuiltInView::AttentionPattern,
+                BuiltInView::LogitLens,
+                BuiltInView::TunedLens,
+                BuiltInView::KvCacheRibbon,
+                BuiltInView::KvCacheDetail,
+                BuiltInView::WorldlineDag,
             ],
             head_granularity: HeadGranularity::Unavailable,
-            transports: vec![Transport::Stdio, Transport::UnixSocket],
+            transports: vec![Transport::Stdio, Transport::UnixSocket, Transport::Websocket],
             wire_formats: vec![WireFormat::Json],
             max_response_bytes: 65536,
             model_family: None,
@@ -423,6 +506,10 @@ pub enum BuiltInView {
     RoutingEntropy,
     FeatureAttribution,
     SaeActivation,
+    TunedLens,
+    KvCacheRibbon,
+    KvCacheDetail,
+    WorldlineDag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -487,11 +574,26 @@ pub struct GranularityScope {
 // Response envelope
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvelopeMode {
+    #[default]
+    Full,
+    Position,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseEnvelope<T> {
     pub state: SessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionEnvelope {
+    pub status: Status,
+    pub position: Option<TickPosition>,
 }
 
 #[cfg(test)]

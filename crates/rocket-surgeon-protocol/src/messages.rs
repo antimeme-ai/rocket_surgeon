@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorCode;
 use crate::types::{
-    BuiltInView, Capabilities, CheckpointRef, DType, GranularityScope, InterventionRecipe,
-    ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary, TickGranularity,
-    TickPosition,
+    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, EnvelopeMode,
+    GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection,
+    TensorSummary, TickGranularity, TickMapEntry, TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,15 @@ pub mod method {
     pub const SUBSCRIBE: &str = "rocket/subscribe";
     pub const UNSUBSCRIBE: &str = "rocket/unsubscribe";
     pub const VIEW: &str = "rocket/view";
+    pub const KV_READ: &str = "rocket/kv.read";
+    pub const KV_INTERVENE: &str = "rocket/kv.intervene";
+    pub const BRANCH_FORK: &str = "rocket/branch.fork";
+    pub const BRANCH_DROP: &str = "rocket/branch.drop";
+    pub const BRANCH_COMPARE: &str = "rocket/branch.compare";
+    pub const DISCOVER: &str = "rocket/discover";
+    pub const SWEEP: &str = "rocket/sweep";
+    pub const VIEW_FOCUS: &str = "rocket/view.focus";
+    pub const VIEW_DEFINE: &str = "rocket/view.define";
 }
 
 pub mod event {
@@ -33,6 +42,12 @@ pub mod event {
     pub const PROBE_FIRED: &str = "probe.fired";
     pub const REPLAY_DIVERGENCE: &str = "replay.divergence";
     pub const ERROR: &str = "error";
+    pub const KV_UPDATE: &str = "kv.update";
+    pub const KV_EVICTED: &str = "kv.evicted";
+    pub const BRANCH_CREATED: &str = "branch.created";
+    pub const BRANCH_TIER_CHANGED: &str = "branch.tier_changed";
+    pub const SPEC_STEP: &str = "spec.step";
+    pub const SWEEP_TRIAL_COMPLETE: &str = "sweep.trial_complete";
 }
 
 pub mod internal {
@@ -99,6 +114,14 @@ pub struct AttachResponse {
     pub hidden_dim: u32,
     pub num_ranks: u32,
     pub capabilities: Capabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_vocabulary: Vec<ComponentEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_tree: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_table: Vec<AliasEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tick_map: Vec<TickMapEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +146,10 @@ pub struct StepRequest {
     pub count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granularity: Option<TickGranularity>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +182,8 @@ pub struct InspectRequest {
     pub format: Option<DType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view: Option<BuiltInView>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -260,6 +289,8 @@ pub struct ReplayRequest {
     pub stop_at: Option<ReplayStopAt>,
     #[serde(default = "crate::types::default_true")]
     pub verify: bool,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -321,7 +352,20 @@ pub enum EventType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeRequest {}
+pub struct SubscribeFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<EventType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<SubscribeFilter>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResponse {
@@ -346,12 +390,246 @@ pub struct ViewRequest {
     pub view: BuiltInView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewResponse {
     pub view: BuiltInView,
     pub data: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/kv.read
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvSlot {
+    K,
+    V,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvMetric {
+    #[default]
+    L2Norm,
+    Mean,
+    AbsMax,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvReadRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heads: Option<Vec<u32>>,
+    #[serde(default)]
+    pub slot: KvSlot,
+    #[serde(default)]
+    pub metric: KvMetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverlay {
+    Sink,
+    HeavyHitter,
+    Evicted,
+    Quantized,
+    PageBoundary,
+    SharedPrefix,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvCacheEntry {
+    pub layer: u32,
+    pub position: u64,
+    pub head: u32,
+    pub k_metric: Option<f64>,
+    pub v_metric: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<KvOverlay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvReadResponse {
+    pub entries: Vec<KvCacheEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/branch.*
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchTier {
+    Live,
+    Spilled,
+    Dropped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchForkRequest {
+    pub from_checkpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchForkResponse {
+    pub branch_id: String,
+    pub tier: BranchTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchDropRequest {
+    pub branch_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchDropResponse {
+    pub branch_id: String,
+    pub freed_mb: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchCompareRequest {
+    pub branch_a: String,
+    pub branch_b: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchCompareResponse {
+    pub cosine_similarity: f64,
+    pub max_relative_error: f64,
+    pub kl_divergence: f64,
+    pub per_layer_norm_delta: Vec<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/discover
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverRequest {
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverMatch {
+    pub canonical: String,
+    pub tensor_shape: Vec<u64>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverResponse {
+    pub matches: Vec<DiscoverMatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/view.focus
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FocusSelector {
+    ById { token_id: u64 },
+    ByPosition { position: u64 },
+    ByRegex { pattern: String },
+    ByAnchor { anchor: FocusAnchor },
+    ByRange { start: u64, end: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusAnchor {
+    Bos,
+    Eos,
+    PadBoundary,
+    Sink,
+    MaxAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewFocusRequest {
+    pub selector: FocusSelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewFocusResponse {
+    pub position: u64,
+    pub token: serde_json::Value,
+    pub per_layer_summaries: Vec<TensorSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/sweep
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepTrial {
+    pub interventions: Vec<InterventionRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepMetric {
+    #[serde(rename = "type")]
+    pub metric_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepRequest {
+    pub baseline_checkpoint: String,
+    pub trials: Vec<SweepTrial>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<SweepMetric>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepTrialResult {
+    pub trial_index: u32,
+    pub stopped_at: TickPosition,
+    pub collected: Vec<TensorSummary>,
+    pub metric_value: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepResponse {
+    pub results: Vec<SweepTrialResult>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/view.define
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewDefineRequest {
+    pub name: String,
+    pub spec: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewDefineResponse {
+    pub name: String,
+    pub registered: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +693,34 @@ pub struct ErrorEvent {
     pub message: String,
     pub details: Option<serde_json::Value>,
     pub fatal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvUpdateEvent {
+    pub layer: u32,
+    pub new_positions: Vec<u64>,
+    pub total_positions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvEvictedEvent {
+    pub layer: u32,
+    pub evicted_positions: Vec<u64>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchCreatedEvent {
+    pub branch_id: String,
+    pub from_checkpoint: String,
+    pub tier: BranchTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchTierChangedEvent {
+    pub branch_id: String,
+    pub old_tier: BranchTier,
+    pub new_tier: BranchTier,
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +995,7 @@ mod tests {
                 replay_of: None,
                 phase: Phase::Decode,
                 token_position: None,
+                clock: None,
             },
             events: vec![],
             forward_complete: false,
@@ -862,7 +1169,7 @@ mod tests {
 
     #[test]
     fn subscribe_request_empty_round_trip() {
-        let req = SubscribeRequest {};
+        let req = SubscribeRequest { filter: None };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, "{}");
         let parsed: SubscribeRequest = serde_json::from_str(&json).unwrap();
@@ -870,10 +1177,10 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_request_ignores_unknown_fields() {
-        let json = r#"{"events":["tick.stopped"],"filter":{"layer":[1]}}"#;
+    fn subscribe_request_backward_compat_no_filter() {
+        let json = r#"{}"#;
         let parsed: SubscribeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed, SubscribeRequest {});
+        assert!(parsed.filter.is_none());
     }
 
     #[test]

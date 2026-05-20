@@ -147,6 +147,8 @@ fn try_orchestrator_step(
                 direction: rocket_surgeon_protocol::types::StepDirection::Forward,
                 count: 1,
                 granularity: None,
+                envelope: Default::default(),
+                run_to: None,
             }),
             |p| serde_json::from_value(p.clone()),
         )
@@ -349,6 +351,7 @@ fn default_position() -> rocket_surgeon_protocol::types::TickPosition {
         replay_of: None,
         phase: rocket_surgeon_protocol::types::Phase::Decode,
         token_position: None,
+        clock: None,
     }
 }
 

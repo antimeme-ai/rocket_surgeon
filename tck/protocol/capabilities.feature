@@ -43,20 +43,46 @@ Feature: Capability negotiation at session initialization
     And the capabilities field "tick_granularities" contains "layer"
     And the capabilities field "tick_granularities" contains "component"
 
-  Scenario: Capabilities lists all 5 MVP intervention types
+  Scenario: Capabilities lists all 8 intervention types
     When the client sends "initialize" with:
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
-    Then the capabilities field "intervention_types" is an array with 5 entries
+    Then the capabilities field "intervention_types" is an array with 8 entries
     And the capabilities field "intervention_types" contains "ablate"
     And the capabilities field "intervention_types" contains "scale"
     And the capabilities field "intervention_types" contains "add"
     And the capabilities field "intervention_types" contains "patch"
     And the capabilities field "intervention_types" contains "clamp"
+    And the capabilities field "intervention_types" contains "attention_mask"
+    And the capabilities field "intervention_types" contains "embed_swap"
+    And the capabilities field "intervention_types" contains "embed_noise"
+
+  Scenario: Capabilities lists v0.3.0 built-in views including lens and KV views
+    When the client sends "initialize" with:
+      """json
+      {
+        "client_name": "tck-runner",
+        "protocol_version": "0.3.0"
+      }
+      """
+    Then the capabilities field "built_in_views" is an array
+    And the capabilities field "built_in_views" contains "tuned_lens"
+    And the capabilities field "built_in_views" contains "kv_cache_ribbon"
+    And the capabilities field "built_in_views" contains "worldline_dag"
+
+  Scenario: Capabilities lists websocket transport in v0.3.0
+    When the client sends "initialize" with:
+      """json
+      {
+        "client_name": "tck-runner",
+        "protocol_version": "0.3.0"
+      }
+      """
+    Then the capabilities field "transports" contains "websocket"
 
   # ── MVP boolean flags ─────────────────────────────────────────────
 

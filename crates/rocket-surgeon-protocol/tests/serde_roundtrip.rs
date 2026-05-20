@@ -3,22 +3,29 @@ use rocket_surgeon_protocol::jsonrpc::{
     JSONRPC_VERSION, Notification, RawMessage, Request, RequestId, Response, RpcError,
 };
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, AttachResponse, CheckpointRequest, CheckpointResponse, CreateCheckpointTier,
-    DetachRequest, DetachResponse, Divergence, ErrorEvent, EventType, HostViewRequest,
-    HostViewResponse, InitializeRequest, InitializeResponse, InspectDetail, InspectRequest,
-    InspectResponse, InterveneRequest, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
-    ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest,
-    StatusResponse, StepRequest, StepResponse, SubscribeRequest, SubscribeResponse,
-    TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewRequest,
-    ViewResponse,
+    AttachRequest, AttachResponse, BranchCompareRequest, BranchCompareResponse,
+    BranchCreatedEvent, BranchDropRequest, BranchDropResponse, BranchForkRequest,
+    BranchForkResponse, BranchTier, BranchTierChangedEvent, CheckpointRequest,
+    CheckpointResponse, CreateCheckpointTier, DetachRequest, DetachResponse, DiscoverMatch,
+    DiscoverRequest, DiscoverResponse, Divergence, ErrorEvent, EventType, FocusAnchor,
+    FocusSelector, HostViewRequest, HostViewResponse, InitializeRequest, InitializeResponse,
+    InspectDetail, InspectRequest, InspectResponse, InterveneRequest, KvCacheEntry,
+    KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest, KvReadResponse, KvSlot, KvUpdateEvent,
+    MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse, ReplayDivergenceEvent,
+    ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest, StatusResponse, StepRequest,
+    StepResponse, SubscribeFilter, SubscribeRequest, SubscribeResponse, SweepMetric,
+    SweepRequest, SweepResponse, SweepTrial, SweepTrialResult, TickHeartbeatEvent,
+    TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest,
+    ViewDefineResponse, ViewFocusRequest, ViewFocusResponse, ViewRequest, ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
-    ActionName, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, CompositionMode, DType,
-    ExecutionMode, GranularityScope, HeadGranularity, Histogram, InterventionParams,
-    InterventionRecipe, InterventionType, Parallelism, Phase, Placement, PlacementType,
-    ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo,
-    Status, StepDirection, TensorHandle, TensorStats, TensorSummary, TickEvent, TickGranularity,
-    TickPosition, TopKEntry, Transport, WireFormat,
+    AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
+    CompositionMode, ComponentEntry, DType, EnvelopeMode, ExecutionMode, GranularityScope,
+    HeadGranularity, Histogram, InterventionParams, InterventionRecipe, InterventionType,
+    Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
+    ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status, StepDirection,
+    TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity,
+    TickLayerInfo, TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat,
 };
 use serde_json::json;
 
@@ -41,6 +48,7 @@ fn sample_tick_position() -> TickPosition {
         replay_of: None,
         phase: Phase::Decode,
         token_position: Some(73),
+        clock: None,
     }
 }
 
@@ -234,7 +242,7 @@ fn probe_action_serde() {
 #[test]
 fn intervention_recipe_roundtrip() {
     let recipe = InterventionRecipe {
-        id: "int-1".to_owned(),
+        id: Some("int-1".to_owned()),
         intervention_type: InterventionType::Scale,
         target: "llama:0:12:attn.o_proj:output".to_owned(),
         params: InterventionParams::Scale { factor: 0.5 },
@@ -251,7 +259,11 @@ fn intervention_recipe_roundtrip() {
 
 #[test]
 fn intervention_params_variants() {
-    roundtrip(&InterventionParams::Ablate {});
+    roundtrip(&InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        });
     roundtrip(&InterventionParams::Scale { factor: 2.0 });
     roundtrip(&InterventionParams::Clamp {
         min: -1.0,
@@ -264,6 +276,118 @@ fn intervention_params_variants() {
         token: 5,
         experts: vec![0, 2, 4],
     });
+    roundtrip(&InterventionParams::AttentionMask {
+        source_positions: vec![0, 3],
+        target_positions: vec![5],
+        mask_value: -10000.0,
+    });
+    roundtrip(&InterventionParams::EmbedSwap {
+        position: 5,
+        new_token_id: 1234,
+    });
+    roundtrip(&InterventionParams::EmbedNoise {
+        position: 5,
+        std: 0.1,
+        seed: Some(42),
+    });
+}
+
+#[test]
+fn ablate_mode_serde() {
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Zero).unwrap(),
+        r#""zero""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Mean).unwrap(),
+        r#""mean""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Resample).unwrap(),
+        r#""resample""#
+    );
+    assert_eq!(AblateMode::default(), AblateMode::Zero);
+}
+
+#[test]
+fn ablate_with_mode_mean_roundtrip() {
+    let params = InterventionParams::Ablate {
+        mode: AblateMode::Mean,
+        reference_run: Some("ckpt-baseline".to_owned()),
+        reference_tensor_id: None,
+    };
+    roundtrip(&params);
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["mode"], "mean");
+    assert_eq!(json["reference_run"], "ckpt-baseline");
+    assert!(json.get("reference_tensor_id").is_none());
+}
+
+#[test]
+fn ablate_empty_json_defaults_to_zero() {
+    let json = serde_json::json!({});
+    let params: InterventionParams = serde_json::from_value(json).unwrap();
+    match params {
+        InterventionParams::Ablate {
+            mode, reference_run, ..
+        } => {
+            assert_eq!(mode, AblateMode::Zero);
+            assert!(reference_run.is_none());
+        }
+        _ => panic!("expected Ablate variant"),
+    }
+}
+
+#[test]
+fn intervention_type_new_variants_serde() {
+    assert_eq!(
+        serde_json::to_string(&InterventionType::AttentionMask).unwrap(),
+        r#""attention_mask""#
+    );
+    assert_eq!(
+        serde_json::to_string(&InterventionType::EmbedSwap).unwrap(),
+        r#""embed_swap""#
+    );
+    assert_eq!(
+        serde_json::to_string(&InterventionType::EmbedNoise).unwrap(),
+        r#""embed_noise""#
+    );
+}
+
+#[test]
+fn embed_noise_without_seed_roundtrip() {
+    let params = InterventionParams::EmbedNoise {
+        position: 3,
+        std: 0.05,
+        seed: None,
+    };
+    roundtrip(&params);
+    let json = serde_json::to_value(&params).unwrap();
+    assert!(json.get("seed").is_none());
+}
+
+#[test]
+fn attention_mask_roundtrip() {
+    let params = InterventionParams::AttentionMask {
+        source_positions: vec![0, 3],
+        target_positions: vec![5],
+        mask_value: -10000.0,
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["source_positions"], serde_json::json!([0, 3]));
+    assert_eq!(json["mask_value"], -10000.0);
+    roundtrip(&params);
+}
+
+#[test]
+fn capabilities_includes_new_intervention_types() {
+    let caps = Capabilities::phase1_defaults();
+    let json = serde_json::to_value(&caps).unwrap();
+    let types = json["intervention_types"].as_array().unwrap();
+    let type_strs: Vec<&str> = types.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(type_strs.contains(&"attention_mask"));
+    assert!(type_strs.contains(&"embed_swap"));
+    assert!(type_strs.contains(&"embed_noise"));
 }
 
 #[test]
@@ -272,7 +396,7 @@ fn capabilities_phase1_defaults_roundtrip() {
     roundtrip(&caps);
 
     let json = serde_json::to_value(&caps).unwrap();
-    assert_eq!(json["protocol_version"], "0.2.0");
+    assert_eq!(json["protocol_version"], "0.3.0");
     assert_eq!(json["supports_moe"], false);
     assert_eq!(json["execution_mode"], "eager");
     assert_eq!(json["parallelism"], "single_gpu");
@@ -342,6 +466,178 @@ fn session_state_roundtrip() {
     roundtrip(&sample_session_state());
 }
 
+// ===== EnvelopeMode =====
+
+#[test]
+fn envelope_mode_serde() {
+    assert_eq!(serde_json::to_string(&EnvelopeMode::Full).unwrap(), r#""full""#);
+    assert_eq!(serde_json::to_string(&EnvelopeMode::Position).unwrap(), r#""position""#);
+    assert_eq!(serde_json::to_string(&EnvelopeMode::None).unwrap(), r#""none""#);
+}
+
+#[test]
+fn envelope_mode_default_is_full() {
+    assert_eq!(EnvelopeMode::default(), EnvelopeMode::Full);
+}
+
+#[test]
+fn position_envelope_roundtrip() {
+    let env = PositionEnvelope {
+        status: Status::Stopped,
+        position: Some(sample_tick_position()),
+    };
+    roundtrip(&env);
+}
+
+#[test]
+fn step_request_envelope_defaults_to_full() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.envelope, EnvelopeMode::Full);
+}
+
+#[test]
+fn step_request_envelope_position() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1,
+        "envelope": "position"
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.envelope, EnvelopeMode::Position);
+}
+
+#[test]
+fn step_request_run_to_roundtrip() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 0,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: Some("llama:*:12:attn.o_proj:output".to_owned()),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["run_to"], "llama:*:12:attn.o_proj:output");
+}
+
+#[test]
+fn step_request_run_to_completion() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 0,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: Some("completion".to_owned()),
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["run_to"], "completion");
+}
+
+#[test]
+fn step_request_run_to_absent_by_default() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert!(req.run_to.is_none());
+}
+
+#[test]
+fn step_request_run_to_omitted_from_json_when_none() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 1,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("run_to").is_none());
+}
+
+// ===== TickClock =====
+
+#[test]
+fn tick_clock_roundtrip() {
+    let clock = TickClock {
+        token: 73,
+        operator: 42,
+        wall_ns: 1_500_000_000,
+    };
+    roundtrip(&clock);
+    let json = serde_json::to_value(&clock).unwrap();
+    assert_eq!(json["token"], 73);
+    assert_eq!(json["operator"], 42);
+    assert_eq!(json["wall_ns"], 1_500_000_000u64);
+}
+
+#[test]
+fn tick_position_with_clock_roundtrip() {
+    let pos = TickPosition {
+        clock: Some(TickClock {
+            token: 73,
+            operator: 42,
+            wall_ns: 1_500_000_000,
+        }),
+        ..sample_tick_position()
+    };
+    roundtrip(&pos);
+    let json = serde_json::to_value(&pos).unwrap();
+    assert_eq!(json["clock"]["token"], 73);
+    assert_eq!(json["clock"]["operator"], 42);
+    assert_eq!(json["tick_id"], json["clock"]["operator"]);
+}
+
+#[test]
+fn tick_position_clock_absent_when_none() {
+    let pos = sample_tick_position();
+    let json = serde_json::to_value(&pos).unwrap();
+    assert!(json.get("clock").is_none());
+}
+
+#[test]
+fn tick_position_backward_compat_no_clock() {
+    let json = json!({
+        "tick_id": 42,
+        "direction": "forward",
+        "rank": null,
+        "layer": 12,
+        "component": "attn.o_proj",
+        "event": "output"
+    });
+    let pos: TickPosition = serde_json::from_value(json).unwrap();
+    assert_eq!(pos.tick_id, 42);
+    assert_eq!(pos.clock, None);
+}
+
+#[test]
+fn tick_position_with_clock_from_json() {
+    let json = json!({
+        "tick_id": 42,
+        "direction": "forward",
+        "rank": null,
+        "layer": 12,
+        "component": "attn.o_proj",
+        "event": "output",
+        "clock": {
+            "token": 73,
+            "operator": 42,
+            "wall_ns": 1500000000
+        }
+    });
+    let pos: TickPosition = serde_json::from_value(json).unwrap();
+    assert!(pos.clock.is_some());
+    let clock = pos.clock.unwrap();
+    assert_eq!(clock.token, 73);
+    assert_eq!(clock.operator, 42);
+    assert_eq!(clock.wall_ns, 1_500_000_000);
+}
+
 // ===== errors.rs =====
 
 #[test]
@@ -386,6 +682,76 @@ fn error_data_roundtrip() {
     assert_eq!(json["numeric_code"], -32001);
     assert_eq!(json["severity"], "recoverable");
     assert!(json.get("current_state").is_none());
+    assert!(json.get("recovery_hint").is_none());
+}
+
+#[test]
+fn error_data_with_recovery_hint() {
+    let mut err = ErrorData::new(ErrorCode::InvalidTarget, "Target not found");
+    err.recovery_hint = Some("Did you mean attn.o_proj?".to_owned());
+    let json = serde_json::to_value(&err).unwrap();
+    assert_eq!(json["recovery_hint"], "Did you mean attn.o_proj?");
+    roundtrip(&err);
+}
+
+#[test]
+fn error_data_recovery_hint_omitted_when_none() {
+    let err = ErrorData::new(ErrorCode::InvalidTarget, "Target not found");
+    let json = serde_json::to_value(&err).unwrap();
+    assert!(json.get("recovery_hint").is_none());
+}
+
+#[test]
+fn error_data_backward_compat_no_recovery_hint() {
+    let json = serde_json::json!({
+        "error_code": "INVALID_STATE",
+        "numeric_code": -32001,
+        "suggestion": "Call initialize first",
+        "severity": "recoverable"
+    });
+    let err: ErrorData = serde_json::from_value(json).unwrap();
+    assert!(err.recovery_hint.is_none());
+}
+
+#[test]
+fn new_error_codes_numeric() {
+    assert_eq!(ErrorCode::BranchNotFound.numeric_code(), -32022);
+    assert_eq!(ErrorCode::BranchMergeRefused.numeric_code(), -32023);
+    assert_eq!(ErrorCode::VramExhausted.numeric_code(), -32024);
+    assert_eq!(ErrorCode::CrossRequestKv.numeric_code(), -32025);
+    assert_eq!(ErrorCode::KvEvicted.numeric_code(), -32026);
+}
+
+#[test]
+fn new_error_codes_serde() {
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::BranchNotFound).unwrap(),
+        "\"BRANCH_NOT_FOUND\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::VramExhausted).unwrap(),
+        "\"VRAM_EXHAUSTED\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::CrossRequestKv).unwrap(),
+        "\"CROSS_REQUEST_KV\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::KvEvicted).unwrap(),
+        "\"KV_EVICTED\""
+    );
+}
+
+#[test]
+fn new_error_codes_severity() {
+    assert_eq!(ErrorCode::VramExhausted.severity(), Severity::Fatal);
+    assert_eq!(ErrorCode::BranchNotFound.severity(), Severity::Recoverable);
+    assert_eq!(
+        ErrorCode::BranchMergeRefused.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(ErrorCode::CrossRequestKv.severity(), Severity::Recoverable);
+    assert_eq!(ErrorCode::KvEvicted.severity(), Severity::Recoverable);
 }
 
 // ===== jsonrpc.rs =====
@@ -523,8 +889,109 @@ fn attach_response_roundtrip() {
         hidden_dim: 4096,
         num_ranks: 1,
         capabilities: Capabilities::phase1_defaults(),
+        component_vocabulary: Vec::new(),
+        module_tree: Vec::new(),
+        alias_table: Vec::new(),
+        tick_map: Vec::new(),
     };
     roundtrip(&resp);
+}
+
+#[test]
+fn attach_response_with_discovery_fields() {
+    let resp = AttachResponse {
+        model_id: "m".repeat(64),
+        model_family: "llama".to_owned(),
+        num_layers: 32,
+        num_heads: 32,
+        hidden_dim: 4096,
+        num_ranks: 1,
+        capabilities: Capabilities::phase1_defaults(),
+        component_vocabulary: vec![ComponentEntry {
+            canonical: "llama:*:0:attn.q:output".to_owned(),
+            event: "output".to_owned(),
+            tensor_shape: vec![1, 32, 4096],
+            category: "attention".to_owned(),
+        }],
+        module_tree: vec![
+            "model".to_owned(),
+            "model.layers".to_owned(),
+            "model.layers.0".to_owned(),
+            "model.layers.0.self_attn".to_owned(),
+        ],
+        alias_table: vec![AliasEntry {
+            canonical: "llama:*:0:attn.q:output".to_owned(),
+            aliases: vec![
+                "blocks.0.attn.hook_q".to_owned(),
+                "L0.attn.q".to_owned(),
+            ],
+        }],
+        tick_map: vec![TickMapEntry {
+            granularity: TickGranularity::Component,
+            ticks_per_layer: vec![TickLayerInfo {
+                layer: 0,
+                components: vec!["attn.q".to_owned(), "attn.k".to_owned()],
+                tick_count: 2,
+            }],
+        }],
+    };
+    roundtrip(&resp);
+
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["component_vocabulary"][0]["canonical"], "llama:*:0:attn.q:output");
+    assert_eq!(json["alias_table"][0]["aliases"][0], "blocks.0.attn.hook_q");
+    assert_eq!(json["tick_map"][0]["granularity"], "component");
+}
+
+#[test]
+fn attach_response_backward_compat_no_discovery_fields() {
+    let json = json!({
+        "model_id": "abc",
+        "model_family": "llama",
+        "num_layers": 32,
+        "num_heads": 32,
+        "hidden_dim": 4096,
+        "num_ranks": 1,
+        "capabilities": Capabilities::phase1_defaults()
+    });
+    let resp: AttachResponse = serde_json::from_value(json).unwrap();
+    assert!(resp.component_vocabulary.is_empty());
+    assert!(resp.module_tree.is_empty());
+    assert!(resp.alias_table.is_empty());
+    assert!(resp.tick_map.is_empty());
+}
+
+#[test]
+fn component_entry_roundtrip() {
+    let entry = ComponentEntry {
+        canonical: "llama:*:12:mlp:output".to_owned(),
+        event: "output".to_owned(),
+        tensor_shape: vec![1, 4096],
+        category: "mlp".to_owned(),
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn alias_entry_roundtrip() {
+    let entry = AliasEntry {
+        canonical: "llama:*:0:attn.q:output".to_owned(),
+        aliases: vec!["L0.q".to_owned(), "blocks.0.hook_q".to_owned()],
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn tick_map_entry_roundtrip() {
+    let entry = TickMapEntry {
+        granularity: TickGranularity::Component,
+        ticks_per_layer: vec![TickLayerInfo {
+            layer: 0,
+            components: vec!["attn.q".to_owned(), "attn.k".to_owned(), "mlp".to_owned()],
+            tick_count: 3,
+        }],
+    };
+    roundtrip(&entry);
 }
 
 #[test]
@@ -541,6 +1008,8 @@ fn step_request_roundtrip() {
         direction: StepDirection::Forward,
         count: 5,
         granularity: Some(TickGranularity::Component),
+        envelope: Default::default(),
+        run_to: None,
     };
     roundtrip(&req);
 }
@@ -575,6 +1044,7 @@ fn inspect_request_roundtrip() {
         slices: Some(vec![[0, 10], [20, 30]]),
         format: Some(DType::Float32),
         view: None,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -593,10 +1063,14 @@ fn inspect_response_roundtrip() {
 fn intervene_request_set_tagged() {
     let req = InterveneRequest::Set {
         recipe: InterventionRecipe {
-            id: "int-1".to_owned(),
+            id: Some("int-1".to_owned()),
             intervention_type: InterventionType::Ablate,
             target: "llama:0:12:mlp:output".to_owned(),
-            params: InterventionParams::Ablate {},
+            params: InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        },
             condition: None,
             priority: 0,
             mode: CompositionMode::Additive,
@@ -717,6 +1191,7 @@ fn replay_request_roundtrip() {
             component: "attn.o_proj".to_owned(),
         }),
         verify: true,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -782,8 +1257,65 @@ fn event_type_serde() {
 
 #[test]
 fn subscribe_request_roundtrip() {
-    let req = SubscribeRequest {};
+    let req = SubscribeRequest { filter: None };
     roundtrip(&req);
+}
+
+#[test]
+fn subscribe_filter_events_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: Some(vec![EventType::TickStopped]),
+            layers: None,
+            components: None,
+        }),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    let filter = &json["filter"];
+    assert_eq!(filter["events"][0], "tick.stopped");
+    assert!(filter.get("layers").is_none());
+    assert!(filter.get("components").is_none());
+}
+
+#[test]
+fn subscribe_filter_layers_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: None,
+            layers: Some(vec![10, 11, 12]),
+            components: None,
+        }),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["filter"]["layers"], serde_json::json!([10, 11, 12]));
+}
+
+#[test]
+fn subscribe_filter_components_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: None,
+            layers: None,
+            components: Some(vec!["attn.*".to_owned()]),
+        }),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn subscribe_filter_absent_by_default() {
+    let json = serde_json::json!({});
+    let req: SubscribeRequest = serde_json::from_value(json).unwrap();
+    assert!(req.filter.is_none());
+}
+
+#[test]
+fn subscribe_filter_omitted_from_json_when_none() {
+    let req = SubscribeRequest { filter: None };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("filter").is_none());
 }
 
 #[test]
@@ -820,6 +1352,7 @@ fn view_request_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::ResidualStreamNorm,
         params: None,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -829,6 +1362,7 @@ fn view_request_with_params_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::AttentionPattern,
         params: Some(json!({"layer": 3, "head": 7})),
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -874,6 +1408,432 @@ fn view_data_unavailable_error_code() {
     );
     let json = serde_json::to_string(&ErrorCode::ViewDataUnavailable).unwrap();
     assert_eq!(json, "\"VIEW_DATA_UNAVAILABLE\"");
+}
+
+// ===== KV cache =====
+
+#[test]
+fn kv_slot_default_is_both() {
+    assert_eq!(KvSlot::default(), KvSlot::Both);
+}
+
+#[test]
+fn kv_metric_default_is_l2_norm() {
+    assert_eq!(KvMetric::default(), KvMetric::L2Norm);
+}
+
+#[test]
+fn kv_read_request_roundtrip() {
+    let req = KvReadRequest {
+        layers: Some(vec![0, 1]),
+        positions: Some(vec![0, 1, 2]),
+        heads: None,
+        slot: KvSlot::Both,
+        metric: KvMetric::L2Norm,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn kv_read_request_minimal() {
+    let json = serde_json::json!({});
+    let req: KvReadRequest = serde_json::from_value(json).unwrap();
+    assert!(req.layers.is_none());
+    assert_eq!(req.slot, KvSlot::Both);
+    assert_eq!(req.metric, KvMetric::L2Norm);
+}
+
+#[test]
+fn kv_cache_entry_roundtrip() {
+    let entry = KvCacheEntry {
+        layer: 0,
+        position: 5,
+        head: 3,
+        k_metric: Some(1.23),
+        v_metric: Some(4.56),
+        overlay: Some(KvOverlay::HeavyHitter),
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn kv_read_response_roundtrip() {
+    let resp = KvReadResponse {
+        entries: vec![KvCacheEntry {
+            layer: 0,
+            position: 0,
+            head: 0,
+            k_metric: Some(0.5),
+            v_metric: None,
+            overlay: None,
+        }],
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn kv_overlay_serde() {
+    assert_eq!(
+        serde_json::to_string(&KvOverlay::Sink).unwrap(),
+        r#""sink""#
+    );
+    assert_eq!(
+        serde_json::to_string(&KvOverlay::SharedPrefix).unwrap(),
+        r#""shared_prefix""#
+    );
+}
+
+// ===== Branch =====
+
+#[test]
+fn branch_tier_serde() {
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Live).unwrap(),
+        r#""live""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Spilled).unwrap(),
+        r#""spilled""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BranchTier::Dropped).unwrap(),
+        r#""dropped""#
+    );
+}
+
+#[test]
+fn branch_fork_request_roundtrip() {
+    let req = BranchForkRequest {
+        from_checkpoint: "ckpt-1".to_owned(),
+        name: Some("experiment-a".to_owned()),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_fork_response_roundtrip() {
+    let resp = BranchForkResponse {
+        branch_id: "br-001".to_owned(),
+        tier: BranchTier::Live,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn branch_drop_request_roundtrip() {
+    let req = BranchDropRequest {
+        branch_id: "br-001".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_drop_response_roundtrip() {
+    let resp = BranchDropResponse {
+        branch_id: "br-001".to_owned(),
+        freed_mb: Some(128.5),
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn branch_compare_request_roundtrip() {
+    let req = BranchCompareRequest {
+        branch_a: "br-001".to_owned(),
+        branch_b: "br-002".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn branch_compare_response_roundtrip() {
+    let resp = BranchCompareResponse {
+        cosine_similarity: 0.98,
+        max_relative_error: 0.02,
+        kl_divergence: 0.001,
+        per_layer_norm_delta: vec![0.01, 0.02, 0.03],
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn kv_update_event_roundtrip() {
+    let evt = KvUpdateEvent {
+        layer: 5,
+        new_positions: vec![10, 11],
+        total_positions: 100,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn kv_evicted_event_roundtrip() {
+    let evt = KvEvictedEvent {
+        layer: 3,
+        evicted_positions: vec![0, 1, 2],
+        reason: "cache full".to_owned(),
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn branch_created_event_roundtrip() {
+    let evt = BranchCreatedEvent {
+        branch_id: "br-001".to_owned(),
+        from_checkpoint: "ckpt-1".to_owned(),
+        tier: BranchTier::Live,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn branch_tier_changed_event_roundtrip() {
+    let evt = BranchTierChangedEvent {
+        branch_id: "br-001".to_owned(),
+        old_tier: BranchTier::Live,
+        new_tier: BranchTier::Dropped,
+    };
+    roundtrip(&evt);
+}
+
+#[test]
+fn method_constants_kv_branch() {
+    use rocket_surgeon_protocol::messages::method;
+    assert_eq!(method::KV_READ, "rocket/kv.read");
+    assert_eq!(method::BRANCH_FORK, "rocket/branch.fork");
+    assert_eq!(method::BRANCH_DROP, "rocket/branch.drop");
+    assert_eq!(method::BRANCH_COMPARE, "rocket/branch.compare");
+}
+
+#[test]
+fn event_constants_kv_branch() {
+    use rocket_surgeon_protocol::messages::event;
+    assert_eq!(event::KV_UPDATE, "kv.update");
+    assert_eq!(event::KV_EVICTED, "kv.evicted");
+    assert_eq!(event::BRANCH_CREATED, "branch.created");
+    assert_eq!(event::BRANCH_TIER_CHANGED, "branch.tier_changed");
+}
+
+#[test]
+fn built_in_view_new_variants_serde() {
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::TunedLens).unwrap(),
+        r#""tuned_lens""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::KvCacheRibbon).unwrap(),
+        r#""kv_cache_ribbon""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BuiltInView::WorldlineDag).unwrap(),
+        r#""worldline_dag""#
+    );
+}
+
+// ===== Discover =====
+
+#[test]
+fn discover_request_roundtrip() {
+    let req = DiscoverRequest {
+        pattern: "llama:*:12:*:output".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn discover_response_with_matches() {
+    let resp = DiscoverResponse {
+        matches: vec![DiscoverMatch {
+            canonical: "attn.o_proj".to_owned(),
+            tensor_shape: vec![1, 32, 4096],
+            aliases: vec!["o_proj".to_owned()],
+        }],
+        suggestions: vec![],
+    };
+    roundtrip(&resp);
+    let json = serde_json::to_value(&resp).unwrap();
+    assert!(json.get("suggestions").is_none());
+}
+
+#[test]
+fn discover_response_with_suggestions() {
+    let resp = DiscoverResponse {
+        matches: vec![],
+        suggestions: vec!["attn.o_proj".to_owned()],
+    };
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["suggestions"][0], "attn.o_proj");
+    roundtrip(&resp);
+}
+
+// ===== View Focus =====
+
+#[test]
+fn focus_selector_by_position_roundtrip() {
+    let sel = FocusSelector::ByPosition { position: 5 };
+    roundtrip(&sel);
+    let json = serde_json::to_value(&sel).unwrap();
+    assert_eq!(json["kind"], "by_position");
+    assert_eq!(json["position"], 5);
+}
+
+#[test]
+fn focus_selector_by_regex_roundtrip() {
+    let sel = FocusSelector::ByRegex {
+        pattern: "defendant".to_owned(),
+    };
+    roundtrip(&sel);
+}
+
+#[test]
+fn focus_selector_by_anchor_roundtrip() {
+    let sel = FocusSelector::ByAnchor {
+        anchor: FocusAnchor::MaxAttention,
+    };
+    roundtrip(&sel);
+    let json = serde_json::to_value(&sel).unwrap();
+    assert_eq!(json["anchor"], "max_attention");
+}
+
+#[test]
+fn focus_selector_by_range_roundtrip() {
+    let sel = FocusSelector::ByRange { start: 0, end: 10 };
+    roundtrip(&sel);
+}
+
+#[test]
+fn focus_anchor_serde() {
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::Bos).unwrap(),
+        r#""bos""#
+    );
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::Sink).unwrap(),
+        r#""sink""#
+    );
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::MaxAttention).unwrap(),
+        r#""max_attention""#
+    );
+}
+
+#[test]
+fn view_focus_request_roundtrip() {
+    let req = ViewFocusRequest {
+        selector: FocusSelector::ByPosition { position: 5 },
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_focus_response_roundtrip() {
+    let resp = ViewFocusResponse {
+        position: 5,
+        token: serde_json::json!({"id": 1234, "text": "the"}),
+        per_layer_summaries: vec![],
+    };
+    roundtrip(&resp);
+}
+
+// ===== Sweep =====
+
+#[test]
+fn sweep_request_roundtrip() {
+    let req = SweepRequest {
+        baseline_checkpoint: "ckpt-clean".to_owned(),
+        trials: vec![SweepTrial {
+            interventions: vec![InterventionRecipe {
+                id: None,
+                intervention_type: InterventionType::Scale,
+                target: "llama:0:12:attn.o_proj:output".to_owned(),
+                params: InterventionParams::Scale { factor: 0.5 },
+                condition: None,
+                priority: 0,
+                mode: CompositionMode::Additive,
+            }],
+            run_to: Some("completion".to_owned()),
+            collect: Some(vec!["llama:*:*:logits:output".to_owned()]),
+        }],
+        metric: Some(SweepMetric {
+            metric_type: "kl_divergence".to_owned(),
+            tokens: None,
+            position: Some(-1),
+        }),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn sweep_trial_minimal() {
+    let trial = SweepTrial {
+        interventions: vec![],
+        run_to: None,
+        collect: None,
+    };
+    let json = serde_json::to_value(&trial).unwrap();
+    assert!(json.get("run_to").is_none());
+    assert!(json.get("collect").is_none());
+    roundtrip(&trial);
+}
+
+#[test]
+fn sweep_response_roundtrip() {
+    let resp = SweepResponse {
+        results: vec![SweepTrialResult {
+            trial_index: 0,
+            stopped_at: sample_tick_position(),
+            collected: vec![],
+            metric_value: Some(0.03),
+        }],
+    };
+    roundtrip(&resp);
+}
+
+// ===== View Define =====
+
+#[test]
+fn view_define_request_roundtrip() {
+    let req = ViewDefineRequest {
+        name: "my_custom_view".to_owned(),
+        spec: serde_json::json!({"type": "composite", "panels": []}),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_define_response_roundtrip() {
+    let resp = ViewDefineResponse {
+        name: "my_custom_view".to_owned(),
+        registered: true,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn method_constants_llm_verbs() {
+    use rocket_surgeon_protocol::messages::method;
+    assert_eq!(method::DISCOVER, "rocket/discover");
+    assert_eq!(method::SWEEP, "rocket/sweep");
+    assert_eq!(method::VIEW_FOCUS, "rocket/view.focus");
+    assert_eq!(method::VIEW_DEFINE, "rocket/view.define");
+}
+
+#[test]
+fn event_constants_sweep() {
+    use rocket_surgeon_protocol::messages::event;
+    assert_eq!(event::SPEC_STEP, "spec.step");
+    assert_eq!(event::SWEEP_TRIAL_COMPLETE, "sweep.trial_complete");
+}
+
+#[test]
+fn intervention_recipe_id_optional() {
+    let json = serde_json::json!({
+        "type": "scale",
+        "target": "llama:0:12:attn.o_proj:output",
+        "params": {"factor": 0.5}
+    });
+    let recipe: InterventionRecipe = serde_json::from_value(json).unwrap();
+    assert!(recipe.id.is_none());
 }
 
 // ===== Event notifications =====
@@ -1042,7 +2002,11 @@ fn inspect_request_detail_default() {
 #[test]
 fn intervention_params_ablate_from_empty_object() {
     let val: InterventionParams = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(val, InterventionParams::Ablate {});
+    assert_eq!(val, InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        });
 }
 
 #[test]
