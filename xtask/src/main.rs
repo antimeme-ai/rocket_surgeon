@@ -102,45 +102,30 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
-    // PyO3 feature unification: rocket-surgeon-python uses `extension-module`
-    // (suppresses libpython linking) while rocket-surgeon-worker uses
-    // `auto-initialize` (requires libpython linking). Cargo unifies these
-    // features when building the workspace, so the worker test binary fails
-    // to link. Fix: test them separately.
-    run(
-        "cargo",
-        &[
-            "test",
-            "--workspace",
-            "--all-targets",
-            "--exclude",
-            "rocket-surgeon-worker",
-        ],
-    )
-    .context("cargo test (workspace) failed")?;
-    run_with_python_lib(
-        "cargo",
-        &["test", "-p", "rocket-surgeon-worker", "--all-targets"],
-    )
-    .context("cargo test (worker) failed")
+    // The whole workspace links and tests in one pass: the shared `pyo3`
+    // workspace dependency is feature-neutral, so the rs-worker binary
+    // (`auto-initialize`) and the cdylib crate no longer collide under Cargo
+    // feature unification. See the comment on `pyo3` in the workspace Cargo.toml.
+    run("cargo", &["test", "--workspace", "--all-targets"]).context("cargo test failed")
 }
 
 fn ruff(fix: bool) -> Result<()> {
+    let ruff = venv_bin("ruff")?;
     if fix {
-        run("ruff", &["check", "--fix", "python/", "tests/"])?;
-        run("ruff", &["format", "python/", "tests/"]).context("ruff format failed")
+        run(&ruff, &["check", "--fix", "python/", "tests/"])?;
+        run(&ruff, &["format", "python/", "tests/"]).context("ruff format failed")
     } else {
-        run("ruff", &["check", "python/", "tests/"]).context("ruff check failed")?;
-        run("ruff", &["format", "--check", "python/", "tests/"]).context("ruff format check failed")
+        run(&ruff, &["check", "python/", "tests/"]).context("ruff check failed")?;
+        run(&ruff, &["format", "--check", "python/", "tests/"]).context("ruff format check failed")
     }
 }
 
 fn mypy() -> Result<()> {
-    run("mypy", &["python/rocket_surgeon"]).context("mypy failed")
+    run(&venv_bin("mypy")?, &["python/rocket_surgeon"]).context("mypy failed")
 }
 
 fn pytest() -> Result<()> {
-    run("python3", &["-m", "pytest", "python/tests", "-v"]).context("pytest failed")
+    run(&venv_python()?, &["-m", "pytest", "python/tests", "-v"]).context("pytest failed")
 }
 
 /// Run every `tests/test_e2e_*.py` script. Each script builds the workspace
@@ -166,9 +151,10 @@ fn e2e() -> Result<()> {
     scripts.sort();
 
     let mut failures = Vec::new();
+    let py = venv_python()?;
     for script in &scripts {
         let path = script.to_str().context("non-utf8 script path")?;
-        if run("python3", &["-u", path]).is_err() {
+        if run(&py, &["-u", path]).is_err() {
             failures.push(path.to_owned());
         }
     }
@@ -184,45 +170,37 @@ fn e2e() -> Result<()> {
 
 fn tck() -> Result<()> {
     run(
-        "python3",
+        &venv_python()?,
         &["-m", "pytest", "python/tests/tck", "-v", "--no-header"],
     )
     .context("tck tests failed")
 }
 
-fn python_libdir() -> Result<String> {
-    let output = Command::new("python3")
-        .args([
-            "-c",
-            "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))",
-        ])
-        .output()
-        .context("failed to query python3 LIBDIR")?;
-    if !output.status.success() {
-        bail!("python3 LIBDIR query failed");
+/// Absolute path to an executable in the project virtualenv's `bin/`.
+///
+/// xtask is invoked from the repo root (guaranteed by the `cargo xtask`
+/// alias), so the venv is always at `./.venv`. Calling venv executables
+/// directly means tasks behave identically whether or not the venv is
+/// activated in the calling shell — and always match `.python-version`.
+fn venv_bin(name: &str) -> Result<String> {
+    let exe = std::env::current_dir()
+        .context("cwd")?
+        .join(".venv/bin")
+        .join(name);
+    if !exe.is_file() {
+        bail!(
+            "{name} not found at {} — run `cargo xtask setup`",
+            exe.display()
+        );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    exe.into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("non-utf8 venv executable path"))
 }
 
-/// Run a command with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH set to the Python
-/// shared library directory. Required for PyO3 `auto-initialize` binaries on
-/// macOS where SIP strips DYLD vars from child processes.
-fn run_with_python_lib(program: &str, args: &[&str]) -> Result<()> {
-    let libdir = python_libdir()?;
-    eprintln!(
-        "==> DYLD_LIBRARY_PATH={libdir} {program} {}",
-        args.join(" ")
-    );
-    let status = Command::new(program)
-        .args(args)
-        .env("DYLD_LIBRARY_PATH", &libdir)
-        .env("LD_LIBRARY_PATH", &libdir)
-        .status()
-        .with_context(|| format!("failed to run {program}"))?;
-    if !status.success() {
-        bail!("{program} exited with {status}");
-    }
-    Ok(())
+/// Absolute path to the project virtualenv's Python interpreter.
+fn venv_python() -> Result<String> {
+    venv_bin("python")
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {

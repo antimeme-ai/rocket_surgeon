@@ -8,8 +8,9 @@ mod tick;
 use std::io::{self, BufReader};
 
 use clap::Parser;
+use pyo3::prelude::*;
 use rocket_surgeon_transport::framing::{read_message, write_message};
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::dispatch::{WorkerState, dispatch};
 
@@ -35,6 +36,8 @@ fn main() {
         .init();
 
     info!("rs-worker starting");
+
+    align_subprocess_interpreter();
 
     let mut state = WorkerState::new();
     let mut reader = BufReader::new(io::stdin().lock());
@@ -93,4 +96,25 @@ fn main() {
     }
 
     info!("rs-worker shutting down");
+}
+
+/// Repoint the embedded interpreter's subprocess-launch paths at a real
+/// Python interpreter.
+///
+/// The worker embeds `CPython`, which reports the `rs-worker` binary as
+/// `sys.executable`. Without this, `multiprocessing` (the `spawn` start
+/// method) and torch compile / distributed workers re-exec `rs-worker -c …`,
+/// which the worker CLI rejects. Best-effort: a failure here only costs
+/// subprocess-spawning features, so it is logged rather than fatal.
+fn align_subprocess_interpreter() {
+    let chosen = Python::with_gil(|py| {
+        py.import("rocket_surgeon.runtime")?
+            .call_method0("align_subprocess_interpreter")?
+            .extract::<Option<String>>()
+    });
+    match chosen {
+        Ok(Some(path)) => info!(interpreter = %path, "aligned subprocess interpreter"),
+        Ok(None) => debug!("subprocess interpreter already a real Python; no alignment needed"),
+        Err(e) => warn!("could not align subprocess interpreter: {e}"),
+    }
 }

@@ -46,8 +46,15 @@ uuid = { version = "1", features = ["v4"] }
 ratatui = "0.30"
 crossterm = "0.29"
 
-# Python bridge
-pyo3 = { version = "0.24", features = ["extension-module"] }
+# Python bridge.
+# Keep this feature-neutral. `extension-module` must NOT be set here: Cargo
+# unifies features across the workspace, so it would leak into the rs-worker
+# *binary*, where it suppresses libpython linking and breaks the link
+# (undefined __Py_* symbols). Each consumer opts in instead:
+#   - rs-worker        -> `auto-initialize` (its own dep entry; links libpython)
+#   - the cdylib crate -> `extension-module` via maturin's
+#                         `[tool.maturin] features` in pyproject.toml
+pyo3 = { version = "0.24" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
