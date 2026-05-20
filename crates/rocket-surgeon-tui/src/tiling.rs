@@ -133,7 +133,7 @@ impl Layout {
 }
 
 pub fn propose_layout(old: &UiState, new: &UiState) -> Option<Layout> {
-    if old.cursor.component != new.cursor.component && new.cursor.component.contains("attn") {
+    if old.cursor.component != new.cursor.component && !new.cursor.component.is_empty() {
         return Some(Layout::hsplit(
             Layout::single(ViewId(0)),
             Layout::single(ViewId(2)),
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn propose_layout_attn_component() {
+    fn propose_layout_on_component_change() {
         let mut old = initial_ui_state();
         old.cursor.component = "mlp".into();
 

@@ -39,7 +39,7 @@ pub async fn update_filter(
             None
         } else {
             let mut sorted: Vec<EventType> = events.iter().copied().collect();
-            sorted.sort_by_key(|e| format!("{e:?}"));
+            sorted.sort();
             Some(sorted)
         };
         Some(SubscribeFilter {
