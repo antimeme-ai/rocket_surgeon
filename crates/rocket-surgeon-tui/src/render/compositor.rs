@@ -1,28 +1,21 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::state::{UiState, ViewId, ViewKind};
 use crate::tiling::Layout;
 
 pub fn render_frame(frame: &mut Frame<'_>, layout: &Layout, state: &UiState) {
-    let area = frame.area();
-    let allocations = layout.resolve(crate::tiling::Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height,
-    });
+    let allocations = layout.resolve(frame.area());
 
-    for (view_id, tile_rect) in &allocations {
-        let rect = Rect::new(tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+    for (view_id, rect) in &allocations {
         let view = state.views.iter().find(|v| &v.id == view_id);
         match view.map(|v| &v.kind) {
-            Some(ViewKind::StatusBar) => render_status_bar(frame, rect, state),
-            Some(ViewKind::CommandLine) => render_command_line(frame, rect, state),
-            _ => render_placeholder(frame, rect, view_id),
+            Some(ViewKind::StatusBar) => render_status_bar(frame, *rect, state),
+            Some(ViewKind::CommandLine) => render_command_line(frame, *rect, state),
+            _ => render_placeholder(frame, *rect, view_id),
         }
     }
 }
@@ -48,7 +41,7 @@ fn render_status_bar(frame: &mut Frame<'_>, rect: Rect, state: &UiState) {
 
 fn render_command_line(frame: &mut Frame<'_>, rect: Rect, state: &UiState) {
     let text = if state.mode == crate::input::mode::Mode::Command {
-        format!(":{}", state.status_line)
+        format!(":{}", state.command_buffer)
     } else {
         state.status_line.clone()
     };
@@ -70,13 +63,13 @@ fn render_placeholder(frame: &mut Frame<'_>, rect: Rect, view_id: &ViewId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
-    use crate::state::{DataDep, ViewSlot};
+    use crate::state::{DataDep, ViewSlot, initial_ui_state};
 
     fn test_state() -> UiState {
-        let mut state = UiState::initial();
+        let mut state = initial_ui_state();
         state.views = vec![
             ViewSlot {
                 id: ViewId(0),
@@ -97,11 +90,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = test_state();
-        let layout = Layout::vsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.9,
-        );
+        let layout = Layout::vsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.9);
 
         terminal
             .draw(|frame| {

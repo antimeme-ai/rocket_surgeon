@@ -11,15 +11,15 @@ use clap::Parser;
 use crossterm::event;
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use render::capability;
 use render::compositor;
-use state::reducer::{reduce, UiEvent};
-use state::{DataDep, UiState, ViewId, ViewKind, ViewSlot};
+use state::reducer::{UiEvent, reduce};
+use state::{DataDep, ViewId, ViewKind, ViewSlot, initial_ui_state};
 use tiling::Layout;
 
 #[derive(Parser)]
@@ -28,7 +28,7 @@ struct Cli {
     #[arg(long, default_value = "/tmp/rocket-surgeon.sock")]
     socket: String,
 
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
     fps: u32,
 }
 
@@ -69,12 +69,16 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let frame_budget = Duration::from_millis(1000 / cli.fps as u64);
 
-    let mut state = UiState::initial();
+    let mut state = initial_ui_state();
     state.views = default_views();
     let layout = default_layout();
 
+    for view in &state.views {
+        state.dirty.insert(view.id.clone());
+    }
+
     loop {
-        if !state.dirty.is_empty() || true {
+        if !state.dirty.is_empty() {
             terminal.draw(|frame| {
                 compositor::render_frame(frame, &layout, &state);
             })?;

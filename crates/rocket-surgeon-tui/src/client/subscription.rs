@@ -1,98 +1,89 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
-use rocket_surgeon_protocol::jsonrpc::Notification;
-use rocket_surgeon_protocol::messages::{
-    method, EventType, SubscribeFilter, SubscribeRequest,
-};
-use tokio::sync::broadcast;
+use rocket_surgeon_protocol::messages::{EventType, SubscribeFilter, SubscribeRequest, method};
 
-use super::connection::{ClientError, Connection};
+use super::connection::{ClientError, ReconnectingClient};
 
-pub struct SubscriptionManager {
-    conn: Arc<Connection>,
-    active_events: HashSet<EventType>,
-    active_layers: Option<Vec<u32>>,
-    active_components: Option<Vec<String>>,
+pub struct SubscriptionState {
+    pub active_events: HashSet<EventType>,
+    pub active_layers: Option<Vec<u32>>,
+    pub active_components: Option<Vec<String>>,
 }
 
-impl SubscriptionManager {
-    pub fn new(conn: Arc<Connection>) -> Self {
-        Self {
-            conn,
-            active_events: HashSet::new(),
-            active_layers: None,
-            active_components: None,
-        }
+pub fn initial_subscription_state() -> SubscriptionState {
+    SubscriptionState {
+        active_events: HashSet::new(),
+        active_layers: None,
+        active_components: None,
+    }
+}
+
+pub async fn update_filter(
+    state: &mut SubscriptionState,
+    client: &ReconnectingClient,
+    events: HashSet<EventType>,
+    layers: Option<Vec<u32>>,
+    components: Option<Vec<String>>,
+) -> Result<(), ClientError> {
+    if events == state.active_events
+        && layers == state.active_layers
+        && components == state.active_components
+    {
+        return Ok(());
     }
 
-    pub fn receiver(&self) -> broadcast::Receiver<Notification> {
-        self.conn.subscribe()
-    }
-
-    pub async fn update_filter(
-        &mut self,
-        events: HashSet<EventType>,
-        layers: Option<Vec<u32>>,
-        components: Option<Vec<String>>,
-    ) -> Result<(), ClientError> {
-        if events == self.active_events
-            && layers == self.active_layers
-            && components == self.active_components
-        {
-            return Ok(());
-        }
-
-        let filter = if events.is_empty() && layers.is_none() && components.is_none() {
+    let filter = if events.is_empty() && layers.is_none() && components.is_none() {
+        None
+    } else {
+        let event_list = if events.is_empty() {
             None
         } else {
-            let event_list = if events.is_empty() {
-                None
-            } else {
-                let mut sorted: Vec<EventType> = events.iter().copied().collect();
-                sorted.sort_by_key(|e| format!("{e:?}"));
-                Some(sorted)
-            };
-            Some(SubscribeFilter {
-                events: event_list,
-                layers: layers.clone(),
-                components: components.clone(),
-            })
+            let mut sorted: Vec<EventType> = events.iter().copied().collect();
+            sorted.sort();
+            Some(sorted)
         };
+        Some(SubscribeFilter {
+            events: event_list,
+            layers: layers.clone(),
+            components: components.clone(),
+        })
+    };
 
-        let req = SubscribeRequest { filter };
-        let params = serde_json::to_value(&req).map_err(ClientError::Json)?;
-        let resp = self.conn.request(method::SUBSCRIBE, params).await?;
+    let req = SubscribeRequest { filter };
+    let params = serde_json::to_value(&req).map_err(ClientError::Json)?;
+    let resp = client.request(method::SUBSCRIBE, params).await?;
 
-        if let Some(err) = resp.error {
-            return Err(ClientError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
-
-        self.active_events = events;
-        self.active_layers = layers;
-        self.active_components = components;
-        Ok(())
+    if let Some(err) = resp.error {
+        return Err(ClientError::Rpc {
+            code: err.code,
+            message: err.message,
+        });
     }
 
-    pub async fn unsubscribe(&mut self) -> Result<(), ClientError> {
-        let params = serde_json::to_value(&serde_json::json!({})).unwrap();
-        let resp = self.conn.request(method::UNSUBSCRIBE, params).await?;
+    state.active_events = events;
+    state.active_layers = layers;
+    state.active_components = components;
+    Ok(())
+}
 
-        if let Some(err) = resp.error {
-            return Err(ClientError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
+pub async fn unsubscribe(
+    state: &mut SubscriptionState,
+    client: &ReconnectingClient,
+) -> Result<(), ClientError> {
+    let params = serde_json::to_value(&serde_json::json!({})).unwrap();
+    let resp = client.request(method::UNSUBSCRIBE, params).await?;
 
-        self.active_events.clear();
-        self.active_layers = None;
-        self.active_components = None;
-        Ok(())
+    if let Some(err) = resp.error {
+        return Err(ClientError::Rpc {
+            code: err.code,
+            message: err.message,
+        });
     }
+
+    state.active_events.clear();
+    state.active_layers = None;
+    state.active_components = None;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -101,19 +92,31 @@ mod tests {
     use rocket_surgeon_protocol::jsonrpc::Response;
     use rocket_surgeon_protocol::messages::{EventType, SubscribeResponse};
     use rocket_surgeon_protocol::types::Status;
-    use tokio::io::{duplex, AsyncWriteExt, BufReader};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use tokio::io::{AsyncWriteExt, BufReader, duplex};
+    use tokio::sync::broadcast;
 
-    use super::super::connection::read_content_length_message;
+    use super::super::connection::{ConnectFn, Connection, read_content_length_message};
 
     fn frame_message(body: &str) -> Vec<u8> {
         format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
     }
 
-    async fn respond_to_subscribe(server: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin)) {
+    fn dummy_connect() -> ConnectFn {
+        Box::new(|_ntx| {
+            Box::pin(async { Err(ClientError::Closed) })
+                as Pin<Box<dyn Future<Output = Result<Arc<Connection>, ClientError>> + Send>>
+        })
+    }
+
+    async fn respond_to_subscribe(
+        server: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    ) {
         let mut reader = BufReader::new(&mut *server);
         let msg = read_content_length_message(&mut reader).await.unwrap();
-        let req: rocket_surgeon_protocol::jsonrpc::Request =
-            serde_json::from_str(&msg).unwrap();
+        let req: rocket_surgeon_protocol::jsonrpc::Request = serde_json::from_str(&msg).unwrap();
 
         let sub_resp = SubscribeResponse {
             available_events: vec![EventType::TickStopped, EventType::ProbeFired],
@@ -126,12 +129,22 @@ mod tests {
         server.flush().await.unwrap();
     }
 
+    fn make_client(
+        notification_tx: broadcast::Sender<rocket_surgeon_protocol::jsonrpc::Notification>,
+        client_read: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        client_write: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) -> ReconnectingClient {
+        let conn = Connection::spawn(client_read, client_write, notification_tx.clone());
+        ReconnectingClient::new(conn, dummy_connect(), notification_tx)
+    }
+
     #[tokio::test]
     async fn subscribe_sends_filter_to_server() {
         let (client_stream, mut server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
-        let conn = Connection::spawn(client_read, client_write);
-        let mut mgr = SubscriptionManager::new(conn);
+        let (notification_tx, _) = broadcast::channel(256);
+        let client = make_client(notification_tx, client_read, client_write);
+        let mut sub_state = initial_subscription_state();
 
         let server_handle = tokio::spawn(async move {
             respond_to_subscribe(&mut server_stream).await;
@@ -140,10 +153,12 @@ mod tests {
 
         let mut events = HashSet::new();
         events.insert(EventType::TickStopped);
-        mgr.update_filter(events, None, None).await.unwrap();
+        update_filter(&mut sub_state, &client, events, None, None)
+            .await
+            .unwrap();
 
-        assert_eq!(mgr.active_events.len(), 1);
-        assert!(mgr.active_events.contains(&EventType::TickStopped));
+        assert_eq!(sub_state.active_events.len(), 1);
+        assert!(sub_state.active_events.contains(&EventType::TickStopped));
 
         server_handle.await.unwrap();
     }
@@ -152,8 +167,9 @@ mod tests {
     async fn no_op_when_filter_unchanged() {
         let (client_stream, mut server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
-        let conn = Connection::spawn(client_read, client_write);
-        let mut mgr = SubscriptionManager::new(conn);
+        let (notification_tx, _) = broadcast::channel(256);
+        let client = make_client(notification_tx, client_read, client_write);
+        let mut sub_state = initial_subscription_state();
 
         let server_handle = tokio::spawn(async move {
             respond_to_subscribe(&mut server_stream).await;
@@ -162,15 +178,15 @@ mod tests {
 
         let mut events = HashSet::new();
         events.insert(EventType::TickStopped);
-        mgr.update_filter(events.clone(), None, None).await.unwrap();
+        update_filter(&mut sub_state, &client, events.clone(), None, None)
+            .await
+            .unwrap();
 
         let _server_stream = server_handle.await.unwrap();
 
-        // Second call with same filter should not send any request
-        // If it did, it would hang since server isn't reading
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            mgr.update_filter(events, None, None),
+            update_filter(&mut sub_state, &client, events, None, None),
         )
         .await;
 
@@ -182,13 +198,12 @@ mod tests {
     async fn unsubscribe_clears_state() {
         let (client_stream, mut server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
-        let conn = Connection::spawn(client_read, client_write);
-        let mut mgr = SubscriptionManager::new(conn);
+        let (notification_tx, _) = broadcast::channel(256);
+        let client = make_client(notification_tx, client_read, client_write);
+        let mut sub_state = initial_subscription_state();
 
         let server_handle = tokio::spawn(async move {
-            // First: handle subscribe
             respond_to_subscribe(&mut server_stream).await;
-            // Second: handle unsubscribe
             let mut reader = BufReader::new(&mut server_stream);
             let msg = read_content_length_message(&mut reader).await.unwrap();
             let req: rocket_surgeon_protocol::jsonrpc::Request =
@@ -207,13 +222,15 @@ mod tests {
 
         let mut events = HashSet::new();
         events.insert(EventType::TickStopped);
-        mgr.update_filter(events, None, None).await.unwrap();
-        assert_eq!(mgr.active_events.len(), 1);
+        update_filter(&mut sub_state, &client, events, None, None)
+            .await
+            .unwrap();
+        assert_eq!(sub_state.active_events.len(), 1);
 
-        mgr.unsubscribe().await.unwrap();
-        assert!(mgr.active_events.is_empty());
-        assert!(mgr.active_layers.is_none());
-        assert!(mgr.active_components.is_none());
+        unsubscribe(&mut sub_state, &client).await.unwrap();
+        assert!(sub_state.active_events.is_empty());
+        assert!(sub_state.active_layers.is_none());
+        assert!(sub_state.active_components.is_none());
 
         server_handle.await.unwrap();
     }

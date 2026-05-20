@@ -37,18 +37,10 @@ fn decode_ctrl(code: KeyCode, _mode: Mode) -> Option<InputEvent> {
 fn decode_normal(code: KeyCode) -> Option<InputEvent> {
     match code {
         // Navigation
-        KeyCode::Up | KeyCode::Char('k') => {
-            Some(InputEvent::Navigation(NavigationEvent::Up))
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            Some(InputEvent::Navigation(NavigationEvent::Down))
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            Some(InputEvent::Navigation(NavigationEvent::Left))
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            Some(InputEvent::Navigation(NavigationEvent::Right))
-        }
+        KeyCode::Up | KeyCode::Char('k') => Some(InputEvent::Navigation(NavigationEvent::Up)),
+        KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::Navigation(NavigationEvent::Down)),
+        KeyCode::Left | KeyCode::Char('h') => Some(InputEvent::Navigation(NavigationEvent::Left)),
+        KeyCode::Right | KeyCode::Char('l') => Some(InputEvent::Navigation(NavigationEvent::Right)),
         KeyCode::PageUp => Some(InputEvent::Navigation(NavigationEvent::PageUp)),
         KeyCode::PageDown => Some(InputEvent::Navigation(NavigationEvent::PageDown)),
         KeyCode::Home => Some(InputEvent::Navigation(NavigationEvent::Home)),
@@ -85,18 +77,10 @@ fn decode_inspect(code: KeyCode) -> Option<InputEvent> {
     match code {
         KeyCode::Esc => Some(InputEvent::Mode(ModeEvent::ExitToNormal)),
         // Navigation still works in inspect mode
-        KeyCode::Up | KeyCode::Char('k') => {
-            Some(InputEvent::Navigation(NavigationEvent::Up))
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            Some(InputEvent::Navigation(NavigationEvent::Down))
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            Some(InputEvent::Navigation(NavigationEvent::Left))
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            Some(InputEvent::Navigation(NavigationEvent::Right))
-        }
+        KeyCode::Up | KeyCode::Char('k') => Some(InputEvent::Navigation(NavigationEvent::Up)),
+        KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::Navigation(NavigationEvent::Down)),
+        KeyCode::Left | KeyCode::Char('h') => Some(InputEvent::Navigation(NavigationEvent::Left)),
+        KeyCode::Right | KeyCode::Char('l') => Some(InputEvent::Navigation(NavigationEvent::Right)),
         KeyCode::Char('+') | KeyCode::Char('=') => {
             Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
         }
@@ -108,18 +92,10 @@ fn decode_inspect(code: KeyCode) -> Option<InputEvent> {
 fn decode_intervene(code: KeyCode) -> Option<InputEvent> {
     match code {
         KeyCode::Esc => Some(InputEvent::Mode(ModeEvent::ExitToNormal)),
-        KeyCode::Up | KeyCode::Char('k') => {
-            Some(InputEvent::Navigation(NavigationEvent::Up))
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            Some(InputEvent::Navigation(NavigationEvent::Down))
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            Some(InputEvent::Navigation(NavigationEvent::Left))
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            Some(InputEvent::Navigation(NavigationEvent::Right))
-        }
+        KeyCode::Up | KeyCode::Char('k') => Some(InputEvent::Navigation(NavigationEvent::Up)),
+        KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::Navigation(NavigationEvent::Down)),
+        KeyCode::Left | KeyCode::Char('h') => Some(InputEvent::Navigation(NavigationEvent::Left)),
+        KeyCode::Right | KeyCode::Char('l') => Some(InputEvent::Navigation(NavigationEvent::Right)),
         _ => None,
     }
 }

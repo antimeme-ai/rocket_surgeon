@@ -1,3 +1,5 @@
+use ratatui::layout::Rect;
+
 use crate::state::{UiState, ViewId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,14 +15,6 @@ pub enum Layout {
         bottom: Box<Layout>,
         ratio: f32,
     },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Rect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
 }
 
 impl Layout {
@@ -58,44 +52,18 @@ impl Layout {
             Layout::HSplit { left, right, ratio } => {
                 let left_width = (area.width as f32 * ratio) as u16;
                 let right_width = area.width.saturating_sub(left_width);
-                left.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y,
-                        width: left_width,
-                        height: area.height,
-                    },
-                    out,
-                );
+                left.resolve_into(Rect::new(area.x, area.y, left_width, area.height), out);
                 right.resolve_into(
-                    Rect {
-                        x: area.x + left_width,
-                        y: area.y,
-                        width: right_width,
-                        height: area.height,
-                    },
+                    Rect::new(area.x + left_width, area.y, right_width, area.height),
                     out,
                 );
             }
             Layout::VSplit { top, bottom, ratio } => {
                 let top_height = (area.height as f32 * ratio) as u16;
                 let bottom_height = area.height.saturating_sub(top_height);
-                top.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y,
-                        width: area.width,
-                        height: top_height,
-                    },
-                    out,
-                );
+                top.resolve_into(Rect::new(area.x, area.y, area.width, top_height), out);
                 bottom.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y + top_height,
-                        width: area.width,
-                        height: bottom_height,
-                    },
+                    Rect::new(area.x, area.y + top_height, area.width, bottom_height),
                     out,
                 );
             }
@@ -133,9 +101,7 @@ impl Layout {
 }
 
 pub fn propose_layout(old: &UiState, new: &UiState) -> Option<Layout> {
-    if old.cursor.component != new.cursor.component
-        && new.cursor.component.contains("attn")
-    {
+    if old.cursor.component != new.cursor.component && !new.cursor.component.is_empty() {
         return Some(Layout::hsplit(
             Layout::single(ViewId(0)),
             Layout::single(ViewId(2)),
@@ -149,14 +115,10 @@ pub fn propose_layout(old: &UiState, new: &UiState) -> Option<Layout> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::initial_ui_state;
 
     fn full_screen() -> Rect {
-        Rect {
-            x: 0,
-            y: 0,
-            width: 200,
-            height: 60,
-        }
+        Rect::new(0, 0, 200, 60)
     }
 
     #[test]
@@ -171,11 +133,7 @@ mod tests {
 
     #[test]
     fn hsplit_divides_width() {
-        let layout = Layout::hsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.5,
-        );
+        let layout = Layout::hsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.5);
         let rects = layout.resolve(full_screen());
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].1.width, 100);
@@ -186,11 +144,7 @@ mod tests {
 
     #[test]
     fn vsplit_divides_height() {
-        let layout = Layout::vsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.5,
-        );
+        let layout = Layout::vsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.5);
         let rects = layout.resolve(full_screen());
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].1.height, 30);
@@ -203,11 +157,7 @@ mod tests {
     fn nested_layout() {
         let layout = Layout::hsplit(
             Layout::single(ViewId(0)),
-            Layout::vsplit(
-                Layout::single(ViewId(1)),
-                Layout::single(ViewId(2)),
-                0.5,
-            ),
+            Layout::vsplit(Layout::single(ViewId(1)), Layout::single(ViewId(2)), 0.5),
             0.5,
         );
         let rects = layout.resolve(full_screen());
@@ -221,11 +171,7 @@ mod tests {
 
     #[test]
     fn ratio_clamped() {
-        let layout = Layout::hsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.0,
-        );
+        let layout = Layout::hsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.0);
         match layout {
             Layout::HSplit { ratio, .. } => assert!((ratio - 0.1).abs() < f32::EPSILON),
             _ => panic!("expected HSplit"),
@@ -234,11 +180,7 @@ mod tests {
 
     #[test]
     fn adjust_ratio() {
-        let mut layout = Layout::hsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.5,
-        );
+        let mut layout = Layout::hsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.5);
         layout.adjust_ratio(0.1);
         match &layout {
             Layout::HSplit { ratio, .. } => assert!((ratio - 0.6).abs() < f32::EPSILON),
@@ -248,11 +190,7 @@ mod tests {
 
     #[test]
     fn adjust_ratio_clamps() {
-        let mut layout = Layout::hsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.85,
-        );
+        let mut layout = Layout::hsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.85);
         layout.adjust_ratio(0.2);
         match &layout {
             Layout::HSplit { ratio, .. } => assert!((ratio - 0.9).abs() < f32::EPSILON),
@@ -264,11 +202,7 @@ mod tests {
     fn view_ids_collects_all() {
         let layout = Layout::hsplit(
             Layout::single(ViewId(0)),
-            Layout::vsplit(
-                Layout::single(ViewId(1)),
-                Layout::single(ViewId(2)),
-                0.5,
-            ),
+            Layout::vsplit(Layout::single(ViewId(1)), Layout::single(ViewId(2)), 0.5),
             0.5,
         );
         let ids = layout.view_ids();
@@ -276,11 +210,11 @@ mod tests {
     }
 
     #[test]
-    fn propose_layout_attn_component() {
-        let mut old = UiState::initial();
+    fn propose_layout_on_component_change() {
+        let mut old = initial_ui_state();
         old.cursor.component = "mlp".into();
 
-        let mut new = UiState::initial();
+        let mut new = initial_ui_state();
         new.cursor.component = "attn.o_proj".into();
 
         let proposal = propose_layout(&old, &new);
@@ -291,7 +225,7 @@ mod tests {
 
     #[test]
     fn propose_layout_no_change() {
-        let state = UiState::initial();
+        let state = initial_ui_state();
         let proposal = propose_layout(&state, &state);
         assert!(proposal.is_none());
     }
