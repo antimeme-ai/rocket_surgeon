@@ -240,7 +240,7 @@ mod tests {
     use perfetto_writer::proto::{self, TracePacket};
     use prost::Message;
     use rocket_surgeon_protocol::types::{
-        DType, Histogram, ProbeAction, StepDirection, TensorStats, TensorSummary, TickEvent,
+        DType, Histogram, Phase, ProbeAction, StepDirection, TensorStats, TensorSummary, TickEvent,
     };
     use tempfile::TempDir;
 
@@ -282,6 +282,8 @@ mod tests {
             component: component.to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         }
     }
 

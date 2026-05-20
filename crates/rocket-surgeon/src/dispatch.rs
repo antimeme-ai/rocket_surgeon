@@ -7,7 +7,7 @@ use rocket_surgeon_protocol::messages::{
     InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, UnsubscribeResponse, ViewRequest, ViewResponse, method,
 };
-use rocket_surgeon_protocol::types::{DType, StepDirection, TickEvent, TickPosition};
+use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, TickPosition};
 
 use crate::session::{Session, SessionError};
 use crate::tensor_store::TensorStore;
@@ -203,6 +203,8 @@ pub fn handle_step(
             component: String::new(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         (pos, false)
     };
@@ -663,7 +665,7 @@ mod tests {
     fn init_params() -> serde_json::Value {
         serde_json::json!({
             "client_name": "test",
-            "protocol_version": "0.1.0"
+            "protocol_version": "0.2.0"
         })
     }
 

@@ -15,9 +15,9 @@ use rocket_surgeon_protocol::messages::{
 use rocket_surgeon_protocol::types::{
     ActionName, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, CompositionMode, DType,
     ExecutionMode, GranularityScope, HeadGranularity, Histogram, InterventionParams,
-    InterventionRecipe, InterventionType, Parallelism, Placement, PlacementType, ProbeAction,
-    ProbeConfig, ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status,
-    StepDirection, TensorHandle, TensorStats, TensorSummary, TickEvent, TickGranularity,
+    InterventionRecipe, InterventionType, Parallelism, Phase, Placement, PlacementType,
+    ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo,
+    Status, StepDirection, TensorHandle, TensorStats, TensorSummary, TickEvent, TickGranularity,
     TickPosition, TopKEntry, Transport, WireFormat,
 };
 use serde_json::json;
@@ -39,6 +39,8 @@ fn sample_tick_position() -> TickPosition {
         component: "attn.o_proj".to_owned(),
         event: TickEvent::Output,
         replay_of: None,
+        phase: Phase::Decode,
+        token_position: Some(73),
     }
 }
 
@@ -270,7 +272,7 @@ fn capabilities_phase1_defaults_roundtrip() {
     roundtrip(&caps);
 
     let json = serde_json::to_value(&caps).unwrap();
-    assert_eq!(json["protocol_version"], "0.1.0");
+    assert_eq!(json["protocol_version"], "0.2.0");
     assert_eq!(json["supports_moe"], false);
     assert_eq!(json["execution_mode"], "eager");
     assert_eq!(json["parallelism"], "single_gpu");
@@ -409,7 +411,7 @@ fn jsonrpc_request_roundtrip() {
     let req = Request::new(
         RequestId::Number(1),
         "initialize",
-        json!({"client_name": "test", "protocol_version": "0.1.0"}),
+        json!({"client_name": "test", "protocol_version": "0.2.0"}),
     );
     assert_eq!(req.jsonrpc, JSONRPC_VERSION);
     roundtrip(&req);
@@ -458,7 +460,7 @@ fn raw_message_request() {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
-        "params": {"client_name": "test", "protocol_version": "0.1.0"}
+        "params": {"client_name": "test", "protocol_version": "0.2.0"}
     }))
     .unwrap();
     assert!(!raw.is_notification());
@@ -483,7 +485,7 @@ fn raw_message_notification() {
 fn initialize_request_roundtrip() {
     let req = InitializeRequest {
         client_name: "rocket-tui".to_owned(),
-        protocol_version: "0.1.0".to_owned(),
+        protocol_version: "0.2.0".to_owned(),
         client_version: Some("1.0.0".to_owned()),
         client_capabilities: None,
     };
@@ -1106,13 +1108,13 @@ fn raw_message_notification_into_request_returns_none() {
 fn initialize_request_from_schema_json() {
     let json = json!({
         "client_name": "rocket-tui",
-        "protocol_version": "0.1.0",
+        "protocol_version": "0.2.0",
         "client_version": "1.0.0",
         "client_capabilities": {"supports_streaming": true}
     });
     let req: InitializeRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.client_name, "rocket-tui");
-    assert_eq!(req.protocol_version, "0.1.0");
+    assert_eq!(req.protocol_version, "0.2.0");
     assert!(req.client_capabilities.is_some());
 }
 
@@ -1157,5 +1159,89 @@ fn session_state_from_schema_json() {
 #[test]
 fn create_checkpoint_tier_rejects_probe_log() {
     let result: Result<CreateCheckpointTier, _> = serde_json::from_value(json!("probe_log"));
+    assert!(result.is_err());
+}
+
+// ===== Phase and token_position (protocol 0.2.0) =====
+
+#[test]
+fn tick_position_has_phase_field() {
+    let pos = sample_tick_position();
+    let json = serde_json::to_value(&pos).unwrap();
+    assert_eq!(json["phase"]["type"], "decode");
+    assert_eq!(json["token_position"], 73);
+}
+
+#[test]
+fn phase_decode_roundtrip() {
+    roundtrip(&Phase::Decode);
+    let json = serde_json::to_value(&Phase::Decode).unwrap();
+    assert_eq!(json["type"], "decode");
+}
+
+#[test]
+fn phase_prefill_roundtrip() {
+    roundtrip(&Phase::Prefill);
+    let json = serde_json::to_value(&Phase::Prefill).unwrap();
+    assert_eq!(json["type"], "prefill");
+}
+
+#[test]
+fn phase_prefill_chunked_roundtrip() {
+    let phase = Phase::PrefillChunked {
+        chunk_size: 512,
+        chunk_index: 2,
+        total_chunks: 4,
+    };
+    roundtrip(&phase);
+    let json = serde_json::to_value(&phase).unwrap();
+    assert_eq!(json["type"], "prefill_chunked");
+    assert_eq!(json["chunk_size"], 512);
+    assert_eq!(json["chunk_index"], 2);
+    assert_eq!(json["total_chunks"], 4);
+}
+
+#[test]
+fn tick_position_with_prefill_phase() {
+    let pos = TickPosition {
+        phase: Phase::Prefill,
+        token_position: None,
+        ..sample_tick_position()
+    };
+    roundtrip(&pos);
+    let json = serde_json::to_value(&pos).unwrap();
+    assert_eq!(json["phase"]["type"], "prefill");
+    assert!(json.get("token_position").is_none());
+}
+
+#[test]
+fn tick_position_forward_compat_no_phase() {
+    let json = json!({
+        "tick_id": 42,
+        "direction": "forward",
+        "rank": null,
+        "layer": 12,
+        "component": "attn.o_proj",
+        "event": "output"
+    });
+    let pos: TickPosition = serde_json::from_value(json).unwrap();
+    assert_eq!(pos.phase, Phase::Decode);
+    assert_eq!(pos.token_position, None);
+}
+
+#[test]
+fn tick_position_token_position_absent_when_none() {
+    let pos = TickPosition {
+        token_position: None,
+        ..sample_tick_position()
+    };
+    let json = serde_json::to_value(&pos).unwrap();
+    assert!(json.get("token_position").is_none());
+}
+
+#[test]
+fn phase_unknown_type_rejected() {
+    let json = json!({"type": "speculative_decode"});
+    let result: Result<Phase, _> = serde_json::from_value(json);
     assert!(result.is_err());
 }

@@ -347,6 +347,8 @@ fn default_position() -> rocket_surgeon_protocol::types::TickPosition {
         component: String::new(),
         event: rocket_surgeon_protocol::types::TickEvent::Output,
         replay_of: None,
+        phase: rocket_surgeon_protocol::types::Phase::Decode,
+        token_position: None,
     }
 }
 
