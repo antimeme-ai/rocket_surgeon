@@ -337,7 +337,20 @@ pub enum EventType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeRequest {}
+pub struct SubscribeFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<EventType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<SubscribeFilter>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResponse {
@@ -881,7 +894,7 @@ mod tests {
 
     #[test]
     fn subscribe_request_empty_round_trip() {
-        let req = SubscribeRequest {};
+        let req = SubscribeRequest { filter: None };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, "{}");
         let parsed: SubscribeRequest = serde_json::from_str(&json).unwrap();
@@ -889,10 +902,10 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_request_ignores_unknown_fields() {
-        let json = r#"{"events":["tick.stopped"],"filter":{"layer":[1]}}"#;
+    fn subscribe_request_backward_compat_no_filter() {
+        let json = r#"{}"#;
         let parsed: SubscribeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed, SubscribeRequest {});
+        assert!(parsed.filter.is_none());
     }
 
     #[test]

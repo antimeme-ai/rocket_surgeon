@@ -8,7 +8,8 @@ use rocket_surgeon_protocol::messages::{
     HostViewResponse, InitializeRequest, InitializeResponse, InspectDetail, InspectRequest,
     InspectResponse, InterveneRequest, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
     ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest,
-    StatusResponse, StepRequest, StepResponse, SubscribeRequest, SubscribeResponse,
+    StatusResponse, StepRequest, StepResponse, SubscribeFilter, SubscribeRequest,
+    SubscribeResponse,
     TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewRequest,
     ViewResponse,
 };
@@ -1061,8 +1062,65 @@ fn event_type_serde() {
 
 #[test]
 fn subscribe_request_roundtrip() {
-    let req = SubscribeRequest {};
+    let req = SubscribeRequest { filter: None };
     roundtrip(&req);
+}
+
+#[test]
+fn subscribe_filter_events_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: Some(vec![EventType::TickStopped]),
+            layers: None,
+            components: None,
+        }),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    let filter = &json["filter"];
+    assert_eq!(filter["events"][0], "tick.stopped");
+    assert!(filter.get("layers").is_none());
+    assert!(filter.get("components").is_none());
+}
+
+#[test]
+fn subscribe_filter_layers_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: None,
+            layers: Some(vec![10, 11, 12]),
+            components: None,
+        }),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["filter"]["layers"], serde_json::json!([10, 11, 12]));
+}
+
+#[test]
+fn subscribe_filter_components_roundtrip() {
+    let req = SubscribeRequest {
+        filter: Some(SubscribeFilter {
+            events: None,
+            layers: None,
+            components: Some(vec!["attn.*".to_owned()]),
+        }),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn subscribe_filter_absent_by_default() {
+    let json = serde_json::json!({});
+    let req: SubscribeRequest = serde_json::from_value(json).unwrap();
+    assert!(req.filter.is_none());
+}
+
+#[test]
+fn subscribe_filter_omitted_from_json_when_none() {
+    let req = SubscribeRequest { filter: None };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("filter").is_none());
 }
 
 #[test]
