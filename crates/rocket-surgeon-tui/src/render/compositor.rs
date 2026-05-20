@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::state::{UiState, ViewId, ViewKind};
 use crate::tiling::Layout;
@@ -48,7 +48,7 @@ fn render_status_bar(frame: &mut Frame<'_>, rect: Rect, state: &UiState) {
 
 fn render_command_line(frame: &mut Frame<'_>, rect: Rect, state: &UiState) {
     let text = if state.mode == crate::input::mode::Mode::Command {
-        format!(":{}", state.status_line)
+        format!(":{}", state.command_buffer)
     } else {
         state.status_line.clone()
     };
@@ -70,13 +70,13 @@ fn render_placeholder(frame: &mut Frame<'_>, rect: Rect, view_id: &ViewId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
-    use crate::state::{DataDep, ViewSlot};
+    use crate::state::{DataDep, ViewSlot, initial_ui_state};
 
     fn test_state() -> UiState {
-        let mut state = UiState::initial();
+        let mut state = initial_ui_state();
         state.views = vec![
             ViewSlot {
                 id: ViewId(0),
@@ -97,11 +97,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = test_state();
-        let layout = Layout::vsplit(
-            Layout::single(ViewId(0)),
-            Layout::single(ViewId(1)),
-            0.9,
-        );
+        let layout = Layout::vsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.9);
 
         terminal
             .draw(|frame| {

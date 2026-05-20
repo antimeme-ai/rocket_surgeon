@@ -25,9 +25,7 @@ pub fn compute_dirty(old: &UiState, new: &UiState) -> HashSet<ViewId> {
 fn changed_data_deps(old: &UiState, new: &UiState) -> Vec<DataDep> {
     let mut changed = Vec::new();
 
-    if old.session.status != new.session.status
-        || old.session.position != new.session.position
-    {
+    if old.session.status != new.session.status || old.session.position != new.session.position {
         changed.push(DataDep::SessionStatus);
     }
 
@@ -54,11 +52,11 @@ fn changed_data_deps(old: &UiState, new: &UiState) -> Vec<DataDep> {
 mod tests {
     use super::*;
     use crate::input::mode::Mode;
-    use crate::state::{ViewKind, ViewSlot};
+    use crate::state::{ViewKind, ViewSlot, initial_ui_state};
     use rocket_surgeon_protocol::types::Status;
 
     fn two_view_state() -> UiState {
-        let mut state = UiState::initial();
+        let mut state = initial_ui_state();
         state.views = vec![
             ViewSlot {
                 id: ViewId(0),

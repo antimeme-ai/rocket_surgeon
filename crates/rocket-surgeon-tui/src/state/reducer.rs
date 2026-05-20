@@ -1,8 +1,6 @@
 use rocket_surgeon_protocol::types::{Status, TickPosition};
 
-use crate::input::events::{
-    CommandEvent, InputEvent, ModeEvent, NavigationEvent,
-};
+use crate::input::events::{CommandEvent, InputEvent, ModeEvent, NavigationEvent};
 use crate::input::mode::Mode;
 
 use super::{DataDep, SessionSnapshot, UiState};
@@ -71,13 +69,11 @@ fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
         NavigationEvent::Left => {
-            state.cursor.token_position =
-                state.cursor.token_position.saturating_sub(1);
+            state.cursor.token_position = state.cursor.token_position.saturating_sub(1);
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
         NavigationEvent::Right => {
-            state.cursor.token_position =
-                state.cursor.token_position.saturating_add(1);
+            state.cursor.token_position = state.cursor.token_position.saturating_add(1);
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
         NavigationEvent::PageUp => {
@@ -109,6 +105,17 @@ fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
     }
+    clamp_cursor(state);
+}
+
+fn clamp_cursor(state: &mut UiState) {
+    if let Some(caps) = &state.session.capabilities {
+        if let Some(num_layers) = caps.num_layers {
+            if num_layers > 0 {
+                state.cursor.layer = state.cursor.layer.min(num_layers - 1);
+            }
+        }
+    }
 }
 
 fn reduce_mode(state: &mut UiState, event: ModeEvent) {
@@ -120,12 +127,31 @@ fn reduce_mode(state: &mut UiState, event: ModeEvent) {
     };
 
     if let Some(new_mode) = state.mode.transition(target) {
+        if new_mode == Mode::Normal {
+            state.command_buffer.clear();
+        }
         state.mode = new_mode;
         mark_dep_dirty(state, &DataDep::Mode);
     }
 }
 
-fn reduce_command(state: &mut UiState, _cmd: CommandEvent) {
+fn reduce_command(state: &mut UiState, cmd: CommandEvent) {
+    match cmd {
+        CommandEvent::Char(c) => {
+            state.command_buffer.push(c);
+        }
+        CommandEvent::Backspace => {
+            state.command_buffer.pop();
+        }
+        CommandEvent::Execute => {
+            state.status_line = format!("executed: {}", state.command_buffer);
+            state.command_buffer.clear();
+        }
+        CommandEvent::Cancel => {
+            state.command_buffer.clear();
+        }
+        _ => {}
+    }
     mark_dep_dirty(state, &DataDep::Mode);
 }
 
@@ -188,10 +214,10 @@ fn mark_all_dirty(state: &mut UiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ViewId, ViewKind, ViewSlot};
+    use crate::state::{ViewId, ViewKind, ViewSlot, initial_ui_state};
 
     fn state_with_views() -> UiState {
-        let mut state = UiState::initial();
+        let mut state = initial_ui_state();
         state.views = vec![
             ViewSlot {
                 id: ViewId(0),
@@ -314,7 +340,7 @@ mod tests {
 
     #[test]
     fn request_counting() {
-        let state = UiState::initial();
+        let state = initial_ui_state();
         let s1 = reduce(state, UiEvent::Internal(InternalEvent::RequestStarted));
         assert_eq!(s1.pending_requests, 1);
         let s2 = reduce(s1, UiEvent::Internal(InternalEvent::RequestStarted));
@@ -357,5 +383,87 @@ mod tests {
         );
         assert_eq!(new.cursor.layer, 0);
         assert_eq!(new.cursor.token_position, 0);
+    }
+
+    fn test_capabilities(num_layers: u32) -> rocket_surgeon_protocol::types::Capabilities {
+        rocket_surgeon_protocol::types::Capabilities {
+            protocol_version: "0.3.0".into(),
+            supports_reverse_step: false,
+            supports_checkpointing: false,
+            supports_moe: false,
+            supports_backward: false,
+            supports_sae: false,
+            execution_mode: rocket_surgeon_protocol::types::ExecutionMode::Eager,
+            parallelism: rocket_surgeon_protocol::types::Parallelism::SingleGpu,
+            tick_granularities: vec![],
+            intervention_types: vec![],
+            built_in_views: vec![],
+            head_granularity: rocket_surgeon_protocol::types::HeadGranularity::Native,
+            transports: vec![],
+            wire_formats: vec![],
+            max_response_bytes: 0,
+            model_family: None,
+            model_id: None,
+            num_layers: Some(num_layers),
+            num_heads: None,
+            hidden_dim: None,
+            num_ranks: None,
+            num_experts: None,
+            top_k_experts: None,
+            shared_memory_supported: false,
+        }
+    }
+
+    #[test]
+    fn nav_down_clamps_to_max_layer() {
+        let mut state = state_with_views();
+        state.session.capabilities = Some(test_capabilities(4));
+        state.cursor.layer = 3;
+        let new = reduce(
+            state,
+            UiEvent::Input(InputEvent::Navigation(NavigationEvent::Down)),
+        );
+        assert_eq!(new.cursor.layer, 3);
+    }
+
+    #[test]
+    fn initial_state_has_empty_command_buffer() {
+        let state = initial_ui_state();
+        assert!(state.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn command_char_appends_to_buffer() {
+        let mut state = state_with_views();
+        state.mode = Mode::Command;
+        let new = reduce(
+            state,
+            UiEvent::Input(InputEvent::Command(CommandEvent::Char('h'))),
+        );
+        assert_eq!(new.command_buffer, "h");
+    }
+
+    #[test]
+    fn command_backspace_removes_last_char() {
+        let mut state = state_with_views();
+        state.mode = Mode::Command;
+        state.command_buffer = "hel".into();
+        let new = reduce(
+            state,
+            UiEvent::Input(InputEvent::Command(CommandEvent::Backspace)),
+        );
+        assert_eq!(new.command_buffer, "he");
+    }
+
+    #[test]
+    fn exit_command_mode_clears_buffer() {
+        let mut state = state_with_views();
+        state.mode = Mode::Command;
+        state.command_buffer = "hello".into();
+        let new = reduce(
+            state,
+            UiEvent::Input(InputEvent::Mode(ModeEvent::ExitToNormal)),
+        );
+        assert!(new.command_buffer.is_empty());
     }
 }

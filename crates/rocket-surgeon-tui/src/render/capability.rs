@@ -62,9 +62,7 @@ fn detect_graphics_tier() -> GraphicsTier {
         return GraphicsTier::Kitty;
     }
 
-    if env::var("TERM_PROGRAM").as_deref() == Ok("mlterm")
-        || env::var("SIXEL_SUPPORT").is_ok()
-    {
+    if env::var("TERM_PROGRAM").as_deref() == Ok("mlterm") || env::var("SIXEL_SUPPORT").is_ok() {
         return GraphicsTier::Sixel;
     }
 

@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use render::capability;
 use render::compositor;
 use state::reducer::{UiEvent, reduce};
-use state::{DataDep, UiState, ViewId, ViewKind, ViewSlot};
+use state::{DataDep, ViewId, ViewKind, ViewSlot, initial_ui_state};
 use tiling::Layout;
 
 #[derive(Parser)]
@@ -69,7 +69,7 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let frame_budget = Duration::from_millis(1000 / cli.fps as u64);
 
-    let mut state = UiState::initial();
+    let mut state = initial_ui_state();
     state.views = default_views();
     let layout = default_layout();
 

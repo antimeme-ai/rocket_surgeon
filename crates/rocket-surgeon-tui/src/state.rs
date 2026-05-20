@@ -4,9 +4,7 @@ pub mod reducer;
 
 use std::collections::HashSet;
 
-use rocket_surgeon_protocol::types::{
-    Capabilities, InterventionRecipe, Status, TickPosition,
-};
+use rocket_surgeon_protocol::types::{Capabilities, InterventionRecipe, Status, TickPosition};
 
 use crate::input::mode::Mode;
 
@@ -21,6 +19,7 @@ pub struct UiState {
     pub views: Vec<ViewSlot>,
     pub pending_requests: u32,
     pub status_line: String,
+    pub command_buffer: String,
     pub dirty: HashSet<ViewId>,
 }
 
@@ -69,27 +68,26 @@ pub enum DataDep {
     Mode,
 }
 
-impl UiState {
-    pub fn initial() -> Self {
-        Self {
-            session: SessionSnapshot {
-                status: Status::Uninitialized,
-                position: None,
-                capabilities: None,
-                active_interventions: Vec::new(),
-                protocol_version: String::new(),
-            },
-            cursor: CursorState {
-                layer: 0,
-                component: String::new(),
-                token_position: 0,
-                focused_view: ViewId(0),
-            },
-            mode: Mode::default(),
-            views: Vec::new(),
-            pending_requests: 0,
-            status_line: String::new(),
-            dirty: HashSet::new(),
-        }
+pub fn initial_ui_state() -> UiState {
+    UiState {
+        session: SessionSnapshot {
+            status: Status::Uninitialized,
+            position: None,
+            capabilities: None,
+            active_interventions: Vec::new(),
+            protocol_version: String::new(),
+        },
+        cursor: CursorState {
+            layer: 0,
+            component: String::new(),
+            token_position: 0,
+            focused_view: ViewId(0),
+        },
+        mode: Mode::default(),
+        views: Vec::new(),
+        pending_requests: 0,
+        status_line: String::new(),
+        command_buffer: String::new(),
+        dirty: HashSet::new(),
     }
 }
