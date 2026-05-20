@@ -133,6 +133,8 @@ pub struct StepRequest {
     pub granularity: Option<TickGranularity>,
     #[serde(default)]
     pub envelope: EnvelopeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -707,6 +707,7 @@ mod tests {
             count: 1,
             granularity: Some(TickGranularity::Component),
             envelope: Default::default(),
+            run_to: None,
         };
         let host_position = TickPosition {
             tick_id: 1,
@@ -737,6 +738,7 @@ mod tests {
             count: 1,
             granularity: None,
             envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -762,6 +764,7 @@ mod tests {
             count: 1,
             granularity: None,
             envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 0,
@@ -790,6 +793,7 @@ mod tests {
             count: 1,
             granularity: Some(TickGranularity::Component),
             envelope: Default::default(),
+            run_to: None,
         };
         let pos1 = TickPosition {
             tick_id: 1,
@@ -830,6 +834,7 @@ mod tests {
             count: 1,
             granularity: Some(TickGranularity::Component),
             envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -859,6 +864,7 @@ mod tests {
             count: 1,
             granularity: Some(TickGranularity::Component),
             envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -947,6 +953,7 @@ mod tests {
             count: 1,
             granularity: Some(TickGranularity::Component),
             envelope: Default::default(),
+            run_to: None,
         };
         let pos = TickPosition {
             tick_id: 5,

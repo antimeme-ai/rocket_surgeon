@@ -388,6 +388,56 @@ fn step_request_envelope_position() {
     assert_eq!(req.envelope, EnvelopeMode::Position);
 }
 
+#[test]
+fn step_request_run_to_roundtrip() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 0,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: Some("llama:*:12:attn.o_proj:output".to_owned()),
+    };
+    roundtrip(&req);
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["run_to"], "llama:*:12:attn.o_proj:output");
+}
+
+#[test]
+fn step_request_run_to_completion() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 0,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: Some("completion".to_owned()),
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["run_to"], "completion");
+}
+
+#[test]
+fn step_request_run_to_absent_by_default() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert!(req.run_to.is_none());
+}
+
+#[test]
+fn step_request_run_to_omitted_from_json_when_none() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 1,
+        granularity: None,
+        envelope: Default::default(),
+        run_to: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("run_to").is_none());
+}
+
 // ===== TickClock =====
 
 #[test]
@@ -767,6 +817,7 @@ fn step_request_roundtrip() {
         count: 5,
         granularity: Some(TickGranularity::Component),
         envelope: Default::default(),
+        run_to: None,
     };
     roundtrip(&req);
 }
