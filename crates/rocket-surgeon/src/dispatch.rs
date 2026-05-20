@@ -3,9 +3,10 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, EventType, HostAttachResponse, HostViewResponse, InitializeRequest,
-    InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, UnsubscribeResponse, ViewRequest, ViewResponse, method,
+    AttachRequest, DiscoverRequest, EventType, HostAttachResponse, HostViewResponse,
+    InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest,
+    ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, TickPosition};
 
@@ -52,6 +53,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::SUBSCRIBE => handle_subscribe(session, request),
         method::UNSUBSCRIBE => handle_unsubscribe(session, request),
         method::VIEW => handle_view(session, request, None),
+        method::DISCOVER => handle_discover(session, request),
+        method::VIEW_DEFINE => handle_view_define(session, request),
         method::INTERVENE | method::CHECKPOINT | method::REPLAY => {
             handle_stub_requires_stopped(session, request)
         }
@@ -646,6 +649,57 @@ pub fn handle_view(
         data: hr.data.clone(),
     };
     serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+/// `rocket/discover` — pattern-match the retained probe-point catalog.
+///
+/// Pure daemon-side work: discovery metadata is retained in session state at
+/// attach time, so no worker round-trip is needed. Delegates matching and
+/// suggestion-building to `Session::discover`.
+pub fn handle_discover(session: &Session, request: &Request) -> Response {
+    let req: DiscoverRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    match session.discover(&req.pattern) {
+        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
+}
+
+/// `rocket/view.define` — register a named view spec in session state.
+///
+/// Stores the spec so a later `rocket/view` can resolve a user-defined view
+/// by name. Pure daemon-side bookkeeping; no worker round-trip.
+pub fn handle_view_define(session: &mut Session, request: &Request) -> Response {
+    let req: ViewDefineRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+                    message: format!("Invalid params: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+
+    match session.define_view(&req.name, req.spec) {
+        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
 }
 
 #[cfg(test)]
@@ -1466,5 +1520,145 @@ mod tests {
         let data = &resp.result.unwrap()["data"];
         assert_eq!(data["view"], "residual_stream_norm");
         assert!(data["data"]["norms"].is_array());
+    }
+
+    // --- discover tests (TCK: tck/protocol/discover.feature) ---
+
+    #[test]
+    fn dispatch_discover_wildcard_returns_matching_points() {
+        // discover.feature scenario 1: wildcard pattern returns matching
+        // points, each with canonical, tensor_shape, aliases.
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/discover",
+            serde_json::json!({"pattern": "llama:*:5:*:output"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        let matches = data["matches"].as_array().unwrap();
+        assert!(!matches.is_empty(), "wildcard should match layer-5 points");
+        for m in matches {
+            assert!(m["canonical"].is_string());
+            assert!(m["tensor_shape"].is_array());
+            assert!(m["aliases"].is_array());
+        }
+    }
+
+    #[test]
+    fn dispatch_discover_partial_match_returns_suggestions() {
+        // discover.feature scenario 2: a near-miss component yields 0 exact
+        // matches plus a "suggestions" list of nearest valid patterns.
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/discover",
+            serde_json::json!({"pattern": "llama:*:12:attn.out_proj:output"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_none());
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["matches"].as_array().unwrap().len(), 0);
+        let suggestions = data["suggestions"].as_array().unwrap();
+        assert!(
+            !suggestions.is_empty(),
+            "expected nearest-pattern suggestions"
+        );
+    }
+
+    #[test]
+    fn dispatch_discover_when_not_attached_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request(
+            "rocket/discover",
+            serde_json::json!({"pattern": "llama:*:*:*:output"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn dispatch_discover_invalid_params_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request("rocket/discover", serde_json::json!({"wrong": true}));
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+        );
+    }
+
+    // --- view.define tests ---
+
+    #[test]
+    fn dispatch_view_define_registers_view() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/view.define",
+            serde_json::json!({
+                "name": "my_residual_view",
+                "spec": {"reduce": "l2_norm"}
+            }),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["name"], "my_residual_view");
+        assert_eq!(data["registered"], true);
+    }
+
+    #[test]
+    fn dispatch_view_define_when_not_attached_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request(
+            "rocket/view.define",
+            serde_json::json!({"name": "v", "spec": {}}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+        let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err_data.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn dispatch_view_define_invalid_params_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        // Missing required "spec" field.
+        let req = make_request("rocket/view.define", serde_json::json!({"name": "v"}));
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+        );
     }
 }
