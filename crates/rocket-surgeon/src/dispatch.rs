@@ -205,6 +205,7 @@ pub fn handle_step(
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         (pos, false)
     };

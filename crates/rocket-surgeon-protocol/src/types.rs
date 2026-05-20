@@ -50,6 +50,13 @@ pub enum ActionName {
 // Tick model
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TickClock {
+    pub token: u64,
+    pub operator: u64,
+    pub wall_ns: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickPosition {
     pub tick_id: u64,
@@ -64,6 +71,8 @@ pub struct TickPosition {
     pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_position: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<TickClock>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

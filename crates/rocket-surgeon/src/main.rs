@@ -349,6 +349,7 @@ fn default_position() -> rocket_surgeon_protocol::types::TickPosition {
         replay_of: None,
         phase: rocket_surgeon_protocol::types::Phase::Decode,
         token_position: None,
+        clock: None,
     }
 }
 

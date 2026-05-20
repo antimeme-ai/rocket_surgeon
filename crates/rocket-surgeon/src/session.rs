@@ -713,6 +713,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let result = session.step(&req, &host_position, false);
         assert!(result.is_ok());
@@ -741,6 +742,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
@@ -764,6 +766,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(
@@ -790,6 +793,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos1, false).unwrap();
         assert_eq!(session.state().tick_id, Some(1));
@@ -804,6 +808,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos2, false).unwrap();
         assert_eq!(session.state().tick_id, Some(2));
@@ -827,6 +832,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos, false).unwrap();
         let state = session.state();
@@ -854,6 +860,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         let envelope = session.step(&req, &pos, false).unwrap();
         assert!(envelope.state.session_id.len() == 36);
@@ -940,6 +947,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         };
         session.step(&req, &pos, false).unwrap();
         let tick_before = session.state().tick_id;

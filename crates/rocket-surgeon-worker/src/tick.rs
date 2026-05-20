@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use rocket_surgeon_protocol::types::{Phase, StepDirection, TickEvent, TickPosition};
+use std::time::Instant;
+
+use rocket_surgeon_protocol::types::{Phase, StepDirection, TickClock, TickEvent, TickPosition};
 
 pub struct TickState {
     tick_id: u64,
@@ -11,6 +13,8 @@ pub struct TickState {
     step_count: u64,
     phase: Phase,
     token_position: Option<u64>,
+    operator_within_token: u64,
+    session_start: Instant,
 }
 
 impl TickState {
@@ -24,15 +28,22 @@ impl TickState {
             step_count: 0,
             phase: Phase::Decode,
             token_position: None,
+            operator_within_token: 0,
+            session_start: Instant::now(),
         }
     }
 
     pub fn advance(&mut self, component: &str, layer: u32, call_index: u32) {
         self.tick_id += 1;
+        self.operator_within_token += 1;
         self.layer = layer;
         component.clone_into(&mut self.component);
         self.call_index = call_index;
         self.step_count += 1;
+    }
+
+    pub fn advance_token(&mut self) {
+        self.operator_within_token = 0;
     }
 
     pub fn set_phase(&mut self, phase: Phase) {
@@ -74,6 +85,11 @@ impl TickState {
             replay_of: None,
             phase: self.phase,
             token_position: self.token_position,
+            clock: Some(TickClock {
+                token: self.token_position.unwrap_or(0),
+                operator: self.operator_within_token,
+                wall_ns: self.session_start.elapsed().as_nanos() as u64,
+            }),
         }
     }
 }

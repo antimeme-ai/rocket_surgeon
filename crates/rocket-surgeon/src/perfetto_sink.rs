@@ -284,6 +284,7 @@ mod tests {
             replay_of: None,
             phase: Phase::Decode,
             token_position: None,
+            clock: None,
         }
     }
 

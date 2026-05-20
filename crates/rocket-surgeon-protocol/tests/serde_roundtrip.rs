@@ -17,8 +17,8 @@ use rocket_surgeon_protocol::types::{
     ExecutionMode, GranularityScope, HeadGranularity, Histogram, InterventionParams,
     InterventionRecipe, InterventionType, Parallelism, Phase, Placement, PlacementType,
     ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo,
-    Status, StepDirection, TensorHandle, TensorStats, TensorSummary, TickEvent, TickGranularity,
-    TickPosition, TopKEntry, Transport, WireFormat,
+    Status, StepDirection, TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent,
+    TickGranularity, TickPosition, TopKEntry, Transport, WireFormat,
 };
 use serde_json::json;
 
@@ -41,6 +41,7 @@ fn sample_tick_position() -> TickPosition {
         replay_of: None,
         phase: Phase::Decode,
         token_position: Some(73),
+        clock: None,
     }
 }
 
@@ -340,6 +341,84 @@ fn response_envelope_roundtrip() {
 #[test]
 fn session_state_roundtrip() {
     roundtrip(&sample_session_state());
+}
+
+// ===== TickClock =====
+
+#[test]
+fn tick_clock_roundtrip() {
+    let clock = TickClock {
+        token: 73,
+        operator: 42,
+        wall_ns: 1_500_000_000,
+    };
+    roundtrip(&clock);
+    let json = serde_json::to_value(&clock).unwrap();
+    assert_eq!(json["token"], 73);
+    assert_eq!(json["operator"], 42);
+    assert_eq!(json["wall_ns"], 1_500_000_000u64);
+}
+
+#[test]
+fn tick_position_with_clock_roundtrip() {
+    let pos = TickPosition {
+        clock: Some(TickClock {
+            token: 73,
+            operator: 42,
+            wall_ns: 1_500_000_000,
+        }),
+        ..sample_tick_position()
+    };
+    roundtrip(&pos);
+    let json = serde_json::to_value(&pos).unwrap();
+    assert_eq!(json["clock"]["token"], 73);
+    assert_eq!(json["clock"]["operator"], 42);
+    assert_eq!(json["tick_id"], json["clock"]["operator"]);
+}
+
+#[test]
+fn tick_position_clock_absent_when_none() {
+    let pos = sample_tick_position();
+    let json = serde_json::to_value(&pos).unwrap();
+    assert!(json.get("clock").is_none());
+}
+
+#[test]
+fn tick_position_backward_compat_no_clock() {
+    let json = json!({
+        "tick_id": 42,
+        "direction": "forward",
+        "rank": null,
+        "layer": 12,
+        "component": "attn.o_proj",
+        "event": "output"
+    });
+    let pos: TickPosition = serde_json::from_value(json).unwrap();
+    assert_eq!(pos.tick_id, 42);
+    assert_eq!(pos.clock, None);
+}
+
+#[test]
+fn tick_position_with_clock_from_json() {
+    let json = json!({
+        "tick_id": 42,
+        "direction": "forward",
+        "rank": null,
+        "layer": 12,
+        "component": "attn.o_proj",
+        "event": "output",
+        "clock": {
+            "token": 73,
+            "operator": 42,
+            "wall_ns": 1500000000
+        }
+    });
+    let pos: TickPosition = serde_json::from_value(json).unwrap();
+    assert!(pos.clock.is_some());
+    let clock = pos.clock.unwrap();
+    assert_eq!(clock.token, 73);
+    assert_eq!(clock.operator, 42);
+    assert_eq!(clock.wall_ns, 1_500_000_000);
 }
 
 // ===== errors.rs =====
