@@ -19,7 +19,7 @@ impl TensorCache {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
-            max_entries,
+            max_entries: max_entries.max(1),
         }
     }
 
@@ -64,9 +64,8 @@ impl TensorCache {
         }
     }
 
-    pub fn prefetch_keys(layer: u32, token: u64, component: &str) -> Vec<CacheKey> {
+    pub fn prefetch_keys(layer: u32, token: u64, component: &str, tick_id: u64) -> Vec<CacheKey> {
         let mut keys = Vec::new();
-        let tick_id = 0; // Current tick — caller provides actual value
 
         if layer > 0 {
             keys.push(CacheKey {
@@ -175,8 +174,15 @@ mod tests {
     }
 
     #[test]
+    fn new_with_zero_capacity_uses_minimum() {
+        let mut cache = TensorCache::new(0);
+        cache.insert(key(0, "a"), make_summary("a"));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
     fn prefetch_keys_adjacent() {
-        let keys = TensorCache::prefetch_keys(5, 10, "attn.o_proj");
+        let keys = TensorCache::prefetch_keys(5, 10, "attn.o_proj", 0);
         assert_eq!(keys.len(), 3);
         assert!(keys.iter().any(|k| k.probe_point.contains("layer_4")));
         assert!(keys.iter().any(|k| k.probe_point.contains("layer_6")));
@@ -185,7 +191,13 @@ mod tests {
 
     #[test]
     fn prefetch_at_layer_zero_skips_negative() {
-        let keys = TensorCache::prefetch_keys(0, 0, "attn.o_proj");
-        assert_eq!(keys.len(), 2); // no layer -1
+        let keys = TensorCache::prefetch_keys(0, 0, "attn.o_proj", 0);
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn prefetch_keys_uses_provided_tick_id() {
+        let keys = TensorCache::prefetch_keys(5, 10, "attn.o_proj", 42);
+        assert!(keys.iter().all(|k| k.tick_id == 42));
     }
 }
