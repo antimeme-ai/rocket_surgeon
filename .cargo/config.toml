@@ -1,2 +1,11 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Pin PyO3's build script to the project venv interpreter. Without this, the
+# build script probes `python3` on PATH, which may be a system interpreter
+# that mismatches `.python-version` (and can be too new for PyO3 to support).
+# `relative = true` resolves the path against the repo root (the parent of
+# this `.cargo/` dir). Create the venv first with `cargo xtask setup`.
+# Not `force`d: an explicit PYO3_PYTHON in the environment still wins.
+[env]
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
