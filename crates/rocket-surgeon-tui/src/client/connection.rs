@@ -59,13 +59,16 @@ enum OutgoingMessage {
 }
 
 impl Connection {
-    pub fn spawn<R, W>(reader: R, writer: W) -> Arc<Self>
+    pub fn spawn<R, W>(
+        reader: R,
+        writer: W,
+        notification_tx: broadcast::Sender<Notification>,
+    ) -> Arc<Self>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (outgoing_tx, outgoing_rx) = mpsc::channel(64);
-        let (notification_tx, _notification_rx) = broadcast::channel(256);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
         let conn = Arc::new(Self {
@@ -109,7 +112,9 @@ impl Connection {
 }
 
 pub type ConnectFn = Box<
-    dyn Fn() -> Pin<Box<dyn Future<Output = Result<Arc<Connection>, ClientError>> + Send>>
+    dyn Fn(
+            broadcast::Sender<Notification>,
+        ) -> Pin<Box<dyn Future<Output = Result<Arc<Connection>, ClientError>> + Send>>
         + Send
         + Sync,
 >;
@@ -117,15 +122,21 @@ pub type ConnectFn = Box<
 pub struct ReconnectingClient {
     conn: tokio::sync::RwLock<Arc<Connection>>,
     connect: ConnectFn,
+    notification_tx: broadcast::Sender<Notification>,
     max_retries: u32,
     base_delay: Duration,
 }
 
 impl ReconnectingClient {
-    pub fn new(conn: Arc<Connection>, connect: ConnectFn) -> Self {
+    pub fn new(
+        conn: Arc<Connection>,
+        connect: ConnectFn,
+        notification_tx: broadcast::Sender<Notification>,
+    ) -> Self {
         Self {
             conn: tokio::sync::RwLock::new(conn),
             connect,
+            notification_tx,
             max_retries: 5,
             base_delay: Duration::from_millis(100),
         }
@@ -140,7 +151,7 @@ impl ReconnectingClient {
         let conn = self.conn.read().await.clone();
         match conn.request(&method, params.clone()).await {
             Ok(resp) => Ok(resp),
-            Err(ClientError::Closed) | Err(ClientError::Cancelled) => {
+            Err(ClientError::Closed | ClientError::Cancelled) => {
                 let new_conn = self.reconnect().await?;
                 new_conn.request(&method, params).await
             }
@@ -148,8 +159,8 @@ impl ReconnectingClient {
         }
     }
 
-    pub async fn subscribe(&self) -> broadcast::Receiver<Notification> {
-        self.conn.read().await.subscribe()
+    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
+        self.notification_tx.subscribe()
     }
 
     pub async fn connection(&self) -> Arc<Connection> {
@@ -157,17 +168,16 @@ impl ReconnectingClient {
     }
 
     async fn reconnect(&self) -> Result<Arc<Connection>, ClientError> {
-        let mut write = self.conn.write().await;
         for attempt in 0..self.max_retries {
             let delay = self.base_delay * 2u32.saturating_pow(attempt);
             tokio::time::sleep(delay).await;
 
-            match (self.connect)().await {
+            match (self.connect)(self.notification_tx.clone()).await {
                 Ok(new_conn) => {
-                    *write = new_conn.clone();
+                    *self.conn.write().await = new_conn.clone();
                     return Ok(new_conn);
                 }
-                Err(_) if attempt + 1 < self.max_retries => continue,
+                Err(_) if attempt + 1 < self.max_retries => {}
                 Err(e) => return Err(e),
             }
         }
@@ -289,8 +299,9 @@ mod tests {
     async fn request_response_roundtrip() {
         let (client_stream, mut server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
+        let (notification_tx, _) = broadcast::channel(256);
 
-        let conn = Connection::spawn(client_read, client_write);
+        let conn = Connection::spawn(client_read, client_write, notification_tx);
 
         let server_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(&mut server_stream);
@@ -325,9 +336,10 @@ mod tests {
     async fn notification_forwarded_to_subscriber() {
         let (client_stream, mut server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
+        let (notification_tx, _) = broadcast::channel(256);
 
-        let conn = Connection::spawn(client_read, client_write);
-        let mut sub = conn.subscribe();
+        let _conn = Connection::spawn(client_read, client_write, notification_tx.clone());
+        let mut sub = notification_tx.subscribe();
 
         let notif = Notification::new(
             "tick.stopped",
@@ -352,11 +364,12 @@ mod tests {
     async fn reconnects_after_disconnect() {
         use std::sync::atomic::AtomicUsize;
 
+        let (notification_tx, _) = broadcast::channel(256);
         let attempt = Arc::new(AtomicUsize::new(0));
         let (server_tx, mut server_rx) = mpsc::channel::<tokio::io::DuplexStream>(4);
 
         let attempt_clone = Arc::clone(&attempt);
-        let connect: ConnectFn = Box::new(move || {
+        let connect: ConnectFn = Box::new(move |ntx| {
             let server_tx = server_tx.clone();
             let attempt = Arc::clone(&attempt_clone);
             Box::pin(async move {
@@ -367,15 +380,19 @@ mod tests {
                     .await
                     .map_err(|_| ClientError::Closed)?;
                 let (r, w) = tokio::io::split(client_stream);
-                Ok(Connection::spawn(r, w))
+                Ok(Connection::spawn(r, w, ntx))
             })
         });
 
         // Initial connection
         let (client_stream, first_server) = tokio::io::duplex(4096);
         let (r, w) = tokio::io::split(client_stream);
-        let initial_conn = Connection::spawn(r, w);
-        let client = Arc::new(ReconnectingClient::new(initial_conn, connect));
+        let initial_conn = Connection::spawn(r, w, notification_tx.clone());
+        let client = Arc::new(ReconnectingClient::new(
+            initial_conn,
+            connect,
+            notification_tx,
+        ));
 
         // Drop first server to simulate disconnect
         drop(first_server);
@@ -412,8 +429,9 @@ mod tests {
     async fn closed_transport_returns_error() {
         let (client_stream, server_stream) = duplex(4096);
         let (client_read, client_write) = tokio::io::split(client_stream);
+        let (notification_tx, _) = broadcast::channel(256);
 
-        let conn = Connection::spawn(client_read, client_write);
+        let conn = Connection::spawn(client_read, client_write, notification_tx);
 
         drop(server_stream);
 
