@@ -561,6 +561,76 @@ fn error_data_roundtrip() {
     assert_eq!(json["numeric_code"], -32001);
     assert_eq!(json["severity"], "recoverable");
     assert!(json.get("current_state").is_none());
+    assert!(json.get("recovery_hint").is_none());
+}
+
+#[test]
+fn error_data_with_recovery_hint() {
+    let mut err = ErrorData::new(ErrorCode::InvalidTarget, "Target not found");
+    err.recovery_hint = Some("Did you mean attn.o_proj?".to_owned());
+    let json = serde_json::to_value(&err).unwrap();
+    assert_eq!(json["recovery_hint"], "Did you mean attn.o_proj?");
+    roundtrip(&err);
+}
+
+#[test]
+fn error_data_recovery_hint_omitted_when_none() {
+    let err = ErrorData::new(ErrorCode::InvalidTarget, "Target not found");
+    let json = serde_json::to_value(&err).unwrap();
+    assert!(json.get("recovery_hint").is_none());
+}
+
+#[test]
+fn error_data_backward_compat_no_recovery_hint() {
+    let json = serde_json::json!({
+        "error_code": "INVALID_STATE",
+        "numeric_code": -32001,
+        "suggestion": "Call initialize first",
+        "severity": "recoverable"
+    });
+    let err: ErrorData = serde_json::from_value(json).unwrap();
+    assert!(err.recovery_hint.is_none());
+}
+
+#[test]
+fn new_error_codes_numeric() {
+    assert_eq!(ErrorCode::BranchNotFound.numeric_code(), -32022);
+    assert_eq!(ErrorCode::BranchMergeRefused.numeric_code(), -32023);
+    assert_eq!(ErrorCode::VramExhausted.numeric_code(), -32024);
+    assert_eq!(ErrorCode::CrossRequestKv.numeric_code(), -32025);
+    assert_eq!(ErrorCode::KvEvicted.numeric_code(), -32026);
+}
+
+#[test]
+fn new_error_codes_serde() {
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::BranchNotFound).unwrap(),
+        "\"BRANCH_NOT_FOUND\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::VramExhausted).unwrap(),
+        "\"VRAM_EXHAUSTED\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::CrossRequestKv).unwrap(),
+        "\"CROSS_REQUEST_KV\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ErrorCode::KvEvicted).unwrap(),
+        "\"KV_EVICTED\""
+    );
+}
+
+#[test]
+fn new_error_codes_severity() {
+    assert_eq!(ErrorCode::VramExhausted.severity(), Severity::Fatal);
+    assert_eq!(ErrorCode::BranchNotFound.severity(), Severity::Recoverable);
+    assert_eq!(
+        ErrorCode::BranchMergeRefused.severity(),
+        Severity::Recoverable
+    );
+    assert_eq!(ErrorCode::CrossRequestKv.severity(), Severity::Recoverable);
+    assert_eq!(ErrorCode::KvEvicted.severity(), Severity::Recoverable);
 }
 
 // ===== jsonrpc.rs =====

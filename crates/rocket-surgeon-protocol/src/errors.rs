@@ -52,6 +52,16 @@ pub enum ErrorCode {
     /// `BEAD-0008`.
     #[serde(rename = "BACKEND_ATTACH_FAILED")]
     BackendAttachFailed,
+    #[serde(rename = "BRANCH_NOT_FOUND")]
+    BranchNotFound,
+    #[serde(rename = "BRANCH_MERGE_REFUSED")]
+    BranchMergeRefused,
+    #[serde(rename = "VRAM_EXHAUSTED")]
+    VramExhausted,
+    #[serde(rename = "CROSS_REQUEST_KV")]
+    CrossRequestKv,
+    #[serde(rename = "KV_EVICTED")]
+    KvEvicted,
 }
 
 impl ErrorCode {
@@ -80,13 +90,20 @@ impl ErrorCode {
             Self::InvalidPoint => -32019,
             Self::ViewDataUnavailable => -32020,
             Self::BackendAttachFailed => -32021,
+            Self::BranchNotFound => -32022,
+            Self::BranchMergeRefused => -32023,
+            Self::VramExhausted => -32024,
+            Self::CrossRequestKv => -32025,
+            Self::KvEvicted => -32026,
         }
     }
 
     #[must_use]
     pub fn severity(self) -> Severity {
         match self {
-            Self::HostError | Self::GpuOom | Self::NcclTimeout => Severity::Fatal,
+            Self::HostError | Self::GpuOom | Self::NcclTimeout | Self::VramExhausted => {
+                Severity::Fatal
+            }
             _ => Severity::Recoverable,
         }
     }
@@ -110,6 +127,8 @@ pub struct ErrorData {
     pub valid_states: Option<Vec<super::types::Status>>,
     pub suggestion: String,
     pub severity: Severity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
 }
@@ -124,6 +143,7 @@ impl ErrorData {
             suggestion: suggestion.into(),
             current_state: None,
             valid_states: None,
+            recovery_hint: None,
             context: None,
         }
     }

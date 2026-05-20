@@ -130,6 +130,7 @@ impl Session {
             suggestion,
             current_state: Some(self.state.status),
             valid_states: Some(valid_states),
+            recovery_hint: None,
             context: None,
         })
     }
@@ -153,6 +154,7 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -179,6 +181,7 @@ impl Session {
                 suggestion: "Detach the current model before attaching a new one".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -197,6 +200,7 @@ impl Session {
                         suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
                         current_state: Some(self.state.status),
                         valid_states: None,
+                        recovery_hint: None,
                         context: None,
                     }));
                 }
@@ -214,6 +218,7 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -284,6 +289,7 @@ impl Session {
                 suggestion: "No model is currently attached".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
+                recovery_hint: None,
                 context: None,
             }));
         }
@@ -336,6 +342,7 @@ impl Session {
                     suggestion: "Attach a model before calling this method".to_owned(),
                     current_state: Some(self.state.status),
                     valid_states: Some(vec![Status::Stopped]),
+                    recovery_hint: None,
                     context: None,
                 }))
             }
@@ -366,6 +373,7 @@ impl Session {
             suggestion: format!("The {cap} capability is not supported in this build"),
             current_state: Some(self.state.status),
             valid_states: None,
+            recovery_hint: None,
             context: None,
         })
     }
