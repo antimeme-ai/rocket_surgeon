@@ -5,11 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rocket_surgeon_protocol::jsonrpc::{
-    Notification, RawMessage, Request, RequestId, Response,
-};
+use rocket_surgeon_protocol::jsonrpc::{Notification, RawMessage, Request, RequestId, Response};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+const MAX_HEADER_COUNT: usize = 16;
+const MAX_HEADER_LINE_LEN: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -27,9 +29,23 @@ pub enum ClientError {
     Cancelled,
     #[error("rpc error: code={code} message={message}")]
     Rpc { code: i32, message: String },
+    #[error("message too large (max {MAX_MESSAGE_SIZE} bytes)")]
+    MessageTooLarge,
+    #[error("too many headers (max {MAX_HEADER_COUNT})")]
+    TooManyHeaders,
+    #[error("header line too long (max {MAX_HEADER_LINE_LEN} bytes)")]
+    HeaderLineTooLong,
 }
 
 type PendingMap = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Response, ClientError>>>>>;
+
+fn lock_pending(
+    pending: &PendingMap,
+) -> std::sync::MutexGuard<'_, HashMap<RequestId, oneshot::Sender<Result<Response, ClientError>>>> {
+    pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 pub struct Connection {
     outgoing_tx: mpsc::Sender<OutgoingMessage>,
@@ -77,7 +93,7 @@ impl Connection {
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes();
 
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        lock_pending(&self.pending).insert(id, tx);
 
         self.outgoing_tx
             .send(OutgoingMessage::Raw(frame))
@@ -164,6 +180,7 @@ pub(crate) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
 ) -> Result<String, ClientError> {
     let mut content_length: Option<usize> = None;
     let mut line = String::new();
+    let mut header_count = 0usize;
 
     loop {
         line.clear();
@@ -172,9 +189,18 @@ pub(crate) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
             return Err(ClientError::Closed);
         }
 
+        if line.len() > MAX_HEADER_LINE_LEN {
+            return Err(ClientError::HeaderLineTooLong);
+        }
+
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
+        }
+
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT {
+            return Err(ClientError::TooManyHeaders);
         }
 
         if let Some((key, value)) = trimmed.split_once(':') {
@@ -190,6 +216,9 @@ pub(crate) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
     }
 
     let len = content_length.ok_or(ClientError::MissingContentLength)?;
+    if len > MAX_MESSAGE_SIZE {
+        return Err(ClientError::MessageTooLarge);
+    }
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body).await?;
     String::from_utf8(body)
@@ -221,7 +250,7 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
         let msg = match read_content_length_message(&mut reader).await {
             Ok(m) => m,
             Err(_) => {
-                let mut map = pending.lock().unwrap();
+                let mut map = lock_pending(&pending);
                 for (_, tx) in map.drain() {
                     let _ = tx.send(Err(ClientError::Closed));
                 }
@@ -230,7 +259,7 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
         };
 
         if let Ok(resp) = serde_json::from_str::<Response>(&msg) {
-            if let Some(tx) = pending.lock().unwrap().remove(&resp.id) {
+            if let Some(tx) = lock_pending(&pending).remove(&resp.id) {
                 let _ = tx.send(Ok(resp));
             }
             continue;
@@ -239,8 +268,11 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
         if let Ok(raw) = serde_json::from_str::<RawMessage>(&msg) {
             if let Some(notif) = raw.into_notification() {
                 let _ = notification_tx.send(notif);
+                continue;
             }
         }
+
+        tracing::warn!(msg_len = msg.len(), "dropping unparseable message");
     }
 }
 
@@ -275,7 +307,10 @@ mod tests {
         });
 
         let resp = conn
-            .request("initialize", serde_json::json!({"client_name": "test", "protocol_version": "0.3.0"}))
+            .request(
+                "initialize",
+                serde_json::json!({"client_name": "test", "protocol_version": "0.3.0"}),
+            )
             .await
             .unwrap();
 
@@ -294,7 +329,10 @@ mod tests {
         let conn = Connection::spawn(client_read, client_write);
         let mut sub = conn.subscribe();
 
-        let notif = Notification::new("tick.stopped", serde_json::json!({"position": {"tick_id": 42}}));
+        let notif = Notification::new(
+            "tick.stopped",
+            serde_json::json!({"position": {"tick_id": 42}}),
+        );
         let body = serde_json::to_string(&notif).unwrap();
         let frame = frame_message(&body);
 
@@ -302,13 +340,10 @@ mod tests {
         server_stream.write_all(&frame).await.unwrap();
         server_stream.flush().await.unwrap();
 
-        let received = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            sub.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(received.method, "tick.stopped");
     }
@@ -327,7 +362,10 @@ mod tests {
             Box::pin(async move {
                 attempt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let (client_stream, server_stream) = tokio::io::duplex(4096);
-                server_tx.send(server_stream).await.map_err(|_| ClientError::Closed)?;
+                server_tx
+                    .send(server_stream)
+                    .await
+                    .map_err(|_| ClientError::Closed)?;
                 let (r, w) = tokio::io::split(client_stream);
                 Ok(Connection::spawn(r, w))
             })
@@ -379,10 +417,49 @@ mod tests {
 
         drop(server_stream);
 
-        let result = conn
-            .request("initialize", serde_json::json!({}))
-            .await;
+        let result = conn.request("initialize", serde_json::json!({})).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_content_length() {
+        let msg = b"Content-Length: 999999999\r\n\r\n";
+        let mut reader = tokio::io::BufReader::new(&msg[..]);
+        let result = read_content_length_message(&mut reader).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClientError::MessageTooLarge => {}
+            other => panic!("expected MessageTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_too_many_headers() {
+        let mut msg = String::new();
+        for i in 0..20 {
+            msg.push_str(&format!("X-Header-{i}: value\r\n"));
+        }
+        msg.push_str("\r\n");
+        let mut reader = tokio::io::BufReader::new(msg.as_bytes());
+        let result = read_content_length_message(&mut reader).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClientError::TooManyHeaders => {}
+            other => panic!("expected TooManyHeaders, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_header_line() {
+        let long_value = "x".repeat(2048);
+        let msg = format!("Content-Length: {long_value}\r\n\r\n");
+        let mut reader = tokio::io::BufReader::new(msg.as_bytes());
+        let result = read_content_length_message(&mut reader).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClientError::HeaderLineTooLong => {}
+            other => panic!("expected HeaderLineTooLong, got {other:?}"),
+        }
     }
 }
