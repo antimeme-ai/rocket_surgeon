@@ -14,12 +14,12 @@ use rocket_surgeon_protocol::messages::{
 };
 use rocket_surgeon_protocol::types::{
     ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
-    CompositionMode, ComponentEntry, DType, ExecutionMode, GranularityScope, HeadGranularity,
-    Histogram, InterventionParams, InterventionRecipe, InterventionType, Parallelism, Phase,
-    Placement, PlacementType, ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope,
-    SessionState, ShardingInfo, Status, StepDirection, TensorHandle, TensorStats, TensorSummary,
-    TickClock, TickEvent, TickGranularity, TickLayerInfo, TickMapEntry, TickPosition, TopKEntry,
-    Transport, WireFormat,
+    CompositionMode, ComponentEntry, DType, EnvelopeMode, ExecutionMode, GranularityScope,
+    HeadGranularity, Histogram, InterventionParams, InterventionRecipe, InterventionType,
+    Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
+    ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status, StepDirection,
+    TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity,
+    TickLayerInfo, TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat,
 };
 use serde_json::json;
 
@@ -342,6 +342,50 @@ fn response_envelope_roundtrip() {
 #[test]
 fn session_state_roundtrip() {
     roundtrip(&sample_session_state());
+}
+
+// ===== EnvelopeMode =====
+
+#[test]
+fn envelope_mode_serde() {
+    assert_eq!(serde_json::to_string(&EnvelopeMode::Full).unwrap(), r#""full""#);
+    assert_eq!(serde_json::to_string(&EnvelopeMode::Position).unwrap(), r#""position""#);
+    assert_eq!(serde_json::to_string(&EnvelopeMode::None).unwrap(), r#""none""#);
+}
+
+#[test]
+fn envelope_mode_default_is_full() {
+    assert_eq!(EnvelopeMode::default(), EnvelopeMode::Full);
+}
+
+#[test]
+fn position_envelope_roundtrip() {
+    let env = PositionEnvelope {
+        status: Status::Stopped,
+        position: Some(sample_tick_position()),
+    };
+    roundtrip(&env);
+}
+
+#[test]
+fn step_request_envelope_defaults_to_full() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.envelope, EnvelopeMode::Full);
+}
+
+#[test]
+fn step_request_envelope_position() {
+    let json = json!({
+        "direction": "forward",
+        "count": 1,
+        "envelope": "position"
+    });
+    let req: StepRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.envelope, EnvelopeMode::Position);
 }
 
 // ===== TickClock =====
@@ -722,6 +766,7 @@ fn step_request_roundtrip() {
         direction: StepDirection::Forward,
         count: 5,
         granularity: Some(TickGranularity::Component),
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -756,6 +801,7 @@ fn inspect_request_roundtrip() {
         slices: Some(vec![[0, 10], [20, 30]]),
         format: Some(DType::Float32),
         view: None,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -898,6 +944,7 @@ fn replay_request_roundtrip() {
             component: "attn.o_proj".to_owned(),
         }),
         verify: true,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -1001,6 +1048,7 @@ fn view_request_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::ResidualStreamNorm,
         params: None,
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }
@@ -1010,6 +1058,7 @@ fn view_request_with_params_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::AttentionPattern,
         params: Some(json!({"layer": 3, "head": 7})),
+        envelope: Default::default(),
     };
     roundtrip(&req);
 }

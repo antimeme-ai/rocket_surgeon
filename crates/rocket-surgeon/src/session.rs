@@ -706,6 +706,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
         };
         let host_position = TickPosition {
             tick_id: 1,
@@ -735,6 +736,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: None,
+            envelope: Default::default(),
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -759,6 +761,7 @@ mod tests {
             direction: StepDirection::Backward,
             count: 1,
             granularity: None,
+            envelope: Default::default(),
         };
         let pos = TickPosition {
             tick_id: 0,
@@ -786,6 +789,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
         };
         let pos1 = TickPosition {
             tick_id: 1,
@@ -825,6 +829,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -853,6 +858,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
         };
         let pos = TickPosition {
             tick_id: 1,
@@ -940,6 +946,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
+            envelope: Default::default(),
         };
         let pos = TickPosition {
             tick_id: 5,

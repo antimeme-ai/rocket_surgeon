@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorCode;
 use crate::types::{
-    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, GranularityScope,
-    InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary,
-    TickGranularity, TickMapEntry, TickPosition,
+    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, EnvelopeMode,
+    GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection,
+    TensorSummary, TickGranularity, TickMapEntry, TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,8 @@ pub struct StepRequest {
     pub count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granularity: Option<TickGranularity>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +165,8 @@ pub struct InspectRequest {
     pub format: Option<DType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view: Option<BuiltInView>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,6 +272,8 @@ pub struct ReplayRequest {
     pub stop_at: Option<ReplayStopAt>,
     #[serde(default = "crate::types::default_true")]
     pub verify: bool,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -354,6 +360,8 @@ pub struct ViewRequest {
     pub view: BuiltInView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub envelope: EnvelopeMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

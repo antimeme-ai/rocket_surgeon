@@ -527,11 +527,26 @@ pub struct GranularityScope {
 // Response envelope
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvelopeMode {
+    #[default]
+    Full,
+    Position,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseEnvelope<T> {
     pub state: SessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionEnvelope {
+    pub status: Status,
+    pub position: Option<TickPosition>,
 }
 
 #[cfg(test)]

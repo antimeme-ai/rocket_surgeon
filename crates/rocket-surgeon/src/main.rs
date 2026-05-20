@@ -147,6 +147,7 @@ fn try_orchestrator_step(
                 direction: rocket_surgeon_protocol::types::StepDirection::Forward,
                 count: 1,
                 granularity: None,
+                envelope: Default::default(),
             }),
             |p| serde_json::from_value(p.clone()),
         )
