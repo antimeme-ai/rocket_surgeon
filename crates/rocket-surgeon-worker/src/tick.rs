@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use rocket_surgeon_protocol::types::{StepDirection, TickEvent, TickPosition};
+use rocket_surgeon_protocol::types::{Phase, StepDirection, TickEvent, TickPosition};
 
 pub struct TickState {
     tick_id: u64,
@@ -9,6 +9,8 @@ pub struct TickState {
     component: String,
     call_index: u32,
     step_count: u64,
+    phase: Phase,
+    token_position: Option<u64>,
 }
 
 impl TickState {
@@ -20,6 +22,8 @@ impl TickState {
             component: String::new(),
             call_index: 0,
             step_count: 0,
+            phase: Phase::Decode,
+            token_position: None,
         }
     }
 
@@ -29,6 +33,14 @@ impl TickState {
         component.clone_into(&mut self.component);
         self.call_index = call_index;
         self.step_count += 1;
+    }
+
+    pub fn set_phase(&mut self, phase: Phase) {
+        self.phase = phase;
+    }
+
+    pub fn set_token_position(&mut self, pos: u64) {
+        self.token_position = Some(pos);
     }
 
     pub fn tick_id(&self) -> u64 {
@@ -60,6 +72,8 @@ impl TickState {
             component: self.component.clone(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: self.phase,
+            token_position: self.token_position,
         }
     }
 }

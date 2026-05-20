@@ -42,7 +42,7 @@ impl SessionError {
 }
 
 const SUPPORTED_FAMILIES: &[&str] = &["llama", "mixtral", "gpt-neox", "gpt2"];
-const PROTOCOL_VERSION: &str = "0.1.0";
+const PROTOCOL_VERSION: &str = "0.2.0";
 
 #[derive(Debug)]
 pub struct Session {
@@ -410,14 +410,14 @@ mod tests {
     use super::*;
     use rocket_surgeon_protocol::messages::StepRequest;
     use rocket_surgeon_protocol::types::{
-        DType, ExecutionMode, StepDirection, TensorStats, TensorSummary, TickEvent,
+        DType, ExecutionMode, Phase, StepDirection, TensorStats, TensorSummary, TickEvent,
         TickGranularity, TickPosition, TopKEntry,
     };
 
     fn init_request() -> InitializeRequest {
         InitializeRequest {
             client_name: "test-client".to_owned(),
-            protocol_version: "0.1.0".to_owned(),
+            protocol_version: "0.2.0".to_owned(),
             client_version: None,
             client_capabilities: None,
         }
@@ -487,7 +487,7 @@ mod tests {
         let mut session = Session::new();
         let resp = session.initialize(&init_request()).unwrap();
         let caps = &resp.data.as_ref().unwrap().capabilities;
-        assert_eq!(caps.protocol_version, "0.1.0");
+        assert_eq!(caps.protocol_version, "0.2.0");
         assert_eq!(caps.execution_mode, ExecutionMode::Eager);
     }
 
@@ -711,6 +711,8 @@ mod tests {
             component: "q_proj".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         let result = session.step(&req, &host_position, false);
         assert!(result.is_ok());
@@ -737,6 +739,8 @@ mod tests {
             component: String::new(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
@@ -758,6 +762,8 @@ mod tests {
             component: String::new(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         let err = session.step(&req, &pos, false).unwrap_err();
         assert_eq!(
@@ -782,6 +788,8 @@ mod tests {
             component: "q_proj".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         session.step(&req, &pos1, false).unwrap();
         assert_eq!(session.state().tick_id, Some(1));
@@ -794,6 +802,8 @@ mod tests {
             component: "k_proj".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         session.step(&req, &pos2, false).unwrap();
         assert_eq!(session.state().tick_id, Some(2));
@@ -815,6 +825,8 @@ mod tests {
             component: "gate_proj".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         session.step(&req, &pos, false).unwrap();
         let state = session.state();
@@ -840,6 +852,8 @@ mod tests {
             component: "embed".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         let envelope = session.step(&req, &pos, false).unwrap();
         assert!(envelope.state.session_id.len() == 36);
@@ -924,6 +938,8 @@ mod tests {
             component: "q_proj".to_owned(),
             event: TickEvent::Output,
             replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
         };
         session.step(&req, &pos, false).unwrap();
         let tick_before = session.state().tick_id;

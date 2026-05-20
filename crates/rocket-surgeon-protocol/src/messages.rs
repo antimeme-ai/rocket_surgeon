@@ -577,7 +577,7 @@ pub struct HostViewResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TickEvent;
+    use crate::types::{Phase, TickEvent};
 
     #[test]
     fn host_attach_request_round_trip() {
@@ -687,6 +687,8 @@ mod tests {
                 component: "q_proj".to_owned(),
                 event: TickEvent::Output,
                 replay_of: None,
+                phase: Phase::Decode,
+                token_position: None,
             },
             events: vec![],
             forward_complete: false,

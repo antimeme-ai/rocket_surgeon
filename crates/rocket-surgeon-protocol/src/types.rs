@@ -60,6 +60,23 @@ pub struct TickPosition {
     pub event: TickEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_of: Option<u64>,
+    #[serde(default)]
+    pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_position: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Phase {
+    Prefill,
+    #[default]
+    Decode,
+    PrefillChunked {
+        chunk_size: u32,
+        chunk_index: u32,
+        total_chunks: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -340,7 +357,7 @@ impl Capabilities {
     #[must_use]
     pub fn phase1_defaults() -> Self {
         Self {
-            protocol_version: "0.1.0".to_owned(),
+            protocol_version: "0.2.0".to_owned(),
             supports_reverse_step: false,
             supports_checkpointing: false,
             supports_moe: false,
