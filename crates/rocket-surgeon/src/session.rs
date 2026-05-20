@@ -251,6 +251,10 @@ impl Session {
             hidden_dim,
             num_ranks: req.num_ranks,
             capabilities: Capabilities::phase1_defaults(),
+            component_vocabulary: Vec::new(),
+            module_tree: Vec::new(),
+            alias_table: Vec::new(),
+            tick_map: Vec::new(),
         })
     }
 

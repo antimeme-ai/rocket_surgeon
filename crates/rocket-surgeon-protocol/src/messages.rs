@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorCode;
 use crate::types::{
-    BuiltInView, Capabilities, CheckpointRef, DType, GranularityScope, InterventionRecipe,
-    ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary, TickGranularity,
-    TickPosition,
+    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, GranularityScope,
+    InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection, TensorSummary,
+    TickGranularity, TickMapEntry, TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,6 +99,14 @@ pub struct AttachResponse {
     pub hidden_dim: u32,
     pub num_ranks: u32,
     pub capabilities: Capabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_vocabulary: Vec<ComponentEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_tree: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_table: Vec<AliasEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tick_map: Vec<TickMapEntry>,
 }
 
 // ---------------------------------------------------------------------------

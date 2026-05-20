@@ -13,12 +13,13 @@ use rocket_surgeon_protocol::messages::{
     ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
-    ActionName, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, CompositionMode, DType,
-    ExecutionMode, GranularityScope, HeadGranularity, Histogram, InterventionParams,
-    InterventionRecipe, InterventionType, Parallelism, Phase, Placement, PlacementType,
-    ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo,
-    Status, StepDirection, TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent,
-    TickGranularity, TickPosition, TopKEntry, Transport, WireFormat,
+    ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
+    CompositionMode, ComponentEntry, DType, ExecutionMode, GranularityScope, HeadGranularity,
+    Histogram, InterventionParams, InterventionRecipe, InterventionType, Parallelism, Phase,
+    Placement, PlacementType, ProbeAction, ProbeConfig, ProbeDefinition, ResponseEnvelope,
+    SessionState, ShardingInfo, Status, StepDirection, TensorHandle, TensorStats, TensorSummary,
+    TickClock, TickEvent, TickGranularity, TickLayerInfo, TickMapEntry, TickPosition, TopKEntry,
+    Transport, WireFormat,
 };
 use serde_json::json;
 
@@ -602,8 +603,109 @@ fn attach_response_roundtrip() {
         hidden_dim: 4096,
         num_ranks: 1,
         capabilities: Capabilities::phase1_defaults(),
+        component_vocabulary: Vec::new(),
+        module_tree: Vec::new(),
+        alias_table: Vec::new(),
+        tick_map: Vec::new(),
     };
     roundtrip(&resp);
+}
+
+#[test]
+fn attach_response_with_discovery_fields() {
+    let resp = AttachResponse {
+        model_id: "m".repeat(64),
+        model_family: "llama".to_owned(),
+        num_layers: 32,
+        num_heads: 32,
+        hidden_dim: 4096,
+        num_ranks: 1,
+        capabilities: Capabilities::phase1_defaults(),
+        component_vocabulary: vec![ComponentEntry {
+            canonical: "llama:*:0:attn.q:output".to_owned(),
+            event: "output".to_owned(),
+            tensor_shape: vec![1, 32, 4096],
+            category: "attention".to_owned(),
+        }],
+        module_tree: vec![
+            "model".to_owned(),
+            "model.layers".to_owned(),
+            "model.layers.0".to_owned(),
+            "model.layers.0.self_attn".to_owned(),
+        ],
+        alias_table: vec![AliasEntry {
+            canonical: "llama:*:0:attn.q:output".to_owned(),
+            aliases: vec![
+                "blocks.0.attn.hook_q".to_owned(),
+                "L0.attn.q".to_owned(),
+            ],
+        }],
+        tick_map: vec![TickMapEntry {
+            granularity: TickGranularity::Component,
+            ticks_per_layer: vec![TickLayerInfo {
+                layer: 0,
+                components: vec!["attn.q".to_owned(), "attn.k".to_owned()],
+                tick_count: 2,
+            }],
+        }],
+    };
+    roundtrip(&resp);
+
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["component_vocabulary"][0]["canonical"], "llama:*:0:attn.q:output");
+    assert_eq!(json["alias_table"][0]["aliases"][0], "blocks.0.attn.hook_q");
+    assert_eq!(json["tick_map"][0]["granularity"], "component");
+}
+
+#[test]
+fn attach_response_backward_compat_no_discovery_fields() {
+    let json = json!({
+        "model_id": "abc",
+        "model_family": "llama",
+        "num_layers": 32,
+        "num_heads": 32,
+        "hidden_dim": 4096,
+        "num_ranks": 1,
+        "capabilities": Capabilities::phase1_defaults()
+    });
+    let resp: AttachResponse = serde_json::from_value(json).unwrap();
+    assert!(resp.component_vocabulary.is_empty());
+    assert!(resp.module_tree.is_empty());
+    assert!(resp.alias_table.is_empty());
+    assert!(resp.tick_map.is_empty());
+}
+
+#[test]
+fn component_entry_roundtrip() {
+    let entry = ComponentEntry {
+        canonical: "llama:*:12:mlp:output".to_owned(),
+        event: "output".to_owned(),
+        tensor_shape: vec![1, 4096],
+        category: "mlp".to_owned(),
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn alias_entry_roundtrip() {
+    let entry = AliasEntry {
+        canonical: "llama:*:0:attn.q:output".to_owned(),
+        aliases: vec!["L0.q".to_owned(), "blocks.0.hook_q".to_owned()],
+    };
+    roundtrip(&entry);
+}
+
+#[test]
+fn tick_map_entry_roundtrip() {
+    let entry = TickMapEntry {
+        granularity: TickGranularity::Component,
+        ticks_per_layer: vec![TickLayerInfo {
+            layer: 0,
+            components: vec!["attn.q".to_owned(), "attn.k".to_owned(), "mlp".to_owned()],
+            tick_count: 3,
+        }],
+    };
+    roundtrip(&entry);
 }
 
 #[test]

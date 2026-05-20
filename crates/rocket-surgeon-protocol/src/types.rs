@@ -116,6 +116,37 @@ pub enum TickGranularity {
 }
 
 // ---------------------------------------------------------------------------
+// Discovery types (AttachResponse extensions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentEntry {
+    pub canonical: String,
+    pub event: String,
+    pub tensor_shape: Vec<u64>,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AliasEntry {
+    pub canonical: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickMapEntry {
+    pub granularity: TickGranularity,
+    pub ticks_per_layer: Vec<TickLayerInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickLayerInfo {
+    pub layer: u32,
+    pub components: Vec<String>,
+    pub tick_count: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Tensor types
 // ---------------------------------------------------------------------------
 
