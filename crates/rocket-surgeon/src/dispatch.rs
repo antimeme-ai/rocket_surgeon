@@ -557,8 +557,16 @@ pub fn handle_probe(
     }
 }
 
-pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
-    let _req: SubscribeRequest = match parse_params(request) {
+/// Handle a `subscribe` request.
+///
+/// Beyond enabling the event stream, this captures the optional
+/// [`SubscribeFilter`] into session state (TCK `subscribe-filter.feature`).
+/// The event fan-out in `notifications.rs` consults
+/// [`Session::event_filter`] so that events not matching the subscriber's
+/// filter are never delivered. A subscribe with no `filter` clears any
+/// prior filter, restoring an unfiltered stream.
+pub fn handle_subscribe(session: &mut Session, request: &Request) -> Response {
+    let req: SubscribeRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => {
             return Response::error(
@@ -575,6 +583,10 @@ pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
     if let Err(ref e) = session.require_stopped("rocket/subscribe") {
         return session_error_to_response(request.id.clone(), e);
     }
+
+    // Store the negotiated event filter (or clear it when absent) so the
+    // notification fan-out can drop non-matching events for this subscriber.
+    session.set_event_filter(req.filter);
 
     let resp = SubscribeResponse {
         available_events: vec![
@@ -1317,7 +1329,7 @@ mod tests {
         test_attach_dispatch(&mut session);
 
         let req = make_request("rocket/subscribe", serde_json::json!({}));
-        let resp = handle_subscribe(&session, &req);
+        let resp = handle_subscribe(&mut session, &req);
         assert!(
             resp.error.is_none(),
             "Expected success, got: {:?}",
@@ -1339,10 +1351,65 @@ mod tests {
         dispatch(&mut session, &make_request("initialize", init_params()));
 
         let req = make_request("rocket/subscribe", serde_json::json!({}));
-        let resp = handle_subscribe(&session, &req);
+        let resp = handle_subscribe(&mut session, &req);
         assert!(resp.error.is_some());
         let err_data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
         assert_eq!(err_data.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn handle_subscribe_with_filter_stores_it_in_session_state() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/subscribe",
+            serde_json::json!({
+                "filter": {
+                    "events": ["tick.stopped"],
+                    "layers": [10, 11, 12],
+                    "components": ["attn.*"]
+                }
+            }),
+        );
+        let resp = handle_subscribe(&mut session, &req);
+        assert!(resp.error.is_none(), "got: {:?}", resp.error);
+
+        let filter = session.event_filter().expect("filter stored");
+        assert_eq!(
+            filter.events.as_deref(),
+            Some(&[EventType::TickStopped][..])
+        );
+        assert_eq!(filter.layers.as_deref(), Some(&[10, 11, 12][..]));
+        assert_eq!(
+            filter.components.as_deref(),
+            Some(&["attn.*".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn handle_subscribe_without_filter_clears_prior_filter() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        // First subscribe with a filter.
+        handle_subscribe(
+            &mut session,
+            &make_request(
+                "rocket/subscribe",
+                serde_json::json!({ "filter": { "events": ["tick.stopped"] } }),
+            ),
+        );
+        assert!(session.event_filter().is_some());
+
+        // Re-subscribe with no filter -> unfiltered stream again.
+        handle_subscribe(
+            &mut session,
+            &make_request("rocket/subscribe", serde_json::json!({})),
+        );
+        assert!(session.event_filter().is_none());
     }
 
     #[test]

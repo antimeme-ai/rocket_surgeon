@@ -1,11 +1,12 @@
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, DetachResponse, InitializeRequest, InitializeResponse,
-    InspectResponse, MemoryUsage, StatusResponse, StepRequest, StepResponse,
+    InspectResponse, MemoryUsage, StatusResponse, StepRequest, StepResponse, SubscribeFilter,
 };
 use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
-    ActionName, Capabilities, ResponseEnvelope, SessionState, Status, TensorSummary,
+    ActionName, Capabilities, EnvelopeMode, PositionEnvelope, ResponseEnvelope, SessionState,
+    Status, TensorSummary,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +51,11 @@ pub struct Session {
     start_time: std::time::Instant,
     #[allow(dead_code)]
     detached_model_id: Option<String>,
+    /// Event-stream filter captured from the most recent `subscribe` request.
+    /// `None` means no subscription (or an unfiltered subscription); the
+    /// event fan-out in `notifications.rs` consults this to decide which
+    /// notifications a subscriber should receive.
+    event_filter: Option<SubscribeFilter>,
 }
 
 impl Session {
@@ -67,12 +73,24 @@ impl Session {
             },
             start_time: std::time::Instant::now(),
             detached_model_id: None,
+            event_filter: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn state(&self) -> &SessionState {
         &self.state
+    }
+
+    /// Store the event-stream filter negotiated by a `subscribe` request.
+    /// Passing `None` clears any prior filter (unfiltered subscription).
+    pub fn set_event_filter(&mut self, filter: Option<SubscribeFilter>) {
+        self.event_filter = filter;
+    }
+
+    /// The event-stream filter currently in force, if any.
+    pub fn event_filter(&self) -> Option<&SubscribeFilter> {
+        self.event_filter.as_ref()
     }
 
     pub fn envelope<T>(&self, data: T) -> ResponseEnvelope<T> {
@@ -87,6 +105,45 @@ impl Session {
         ResponseEnvelope {
             state: self.state.clone(),
             data: None,
+        }
+    }
+
+    /// Build a response body honouring the client-requested [`EnvelopeMode`].
+    ///
+    /// LLM clients negotiate envelope verbosity to manage context-window
+    /// pressure (TCK `envelope-compactness.feature`):
+    /// - [`EnvelopeMode::Full`] — the complete [`SessionState`] envelope, the
+    ///   historical default. Identical wire shape to [`Self::envelope`].
+    /// - [`EnvelopeMode::Position`] — a compact [`PositionEnvelope`] carrying
+    ///   only `status` and tick `position`; omits `active_probes`,
+    ///   `checkpoints`, and the rest of [`SessionState`].
+    /// - [`EnvelopeMode::None`] — the bare `data` payload, with no envelope
+    ///   wrapper at all.
+    ///
+    /// The return type is [`serde_json::Value`] because the three modes have
+    /// genuinely different wire shapes; callers hand the result straight to
+    /// `serialize_envelope`.
+    pub fn envelope_with_mode<T: serde::Serialize>(
+        &self,
+        mode: EnvelopeMode,
+        data: T,
+    ) -> serde_json::Value {
+        match mode {
+            EnvelopeMode::Full => serde_json::to_value(self.envelope(data))
+                .unwrap_or_else(|_| serde_json::Value::Null),
+            EnvelopeMode::Position => {
+                let position = PositionEnvelope {
+                    status: self.state.status,
+                    position: self.state.position.clone(),
+                };
+                serde_json::json!({
+                    "state": position,
+                    "data": data,
+                })
+            }
+            EnvelopeMode::None => {
+                serde_json::to_value(data).unwrap_or_else(|_| serde_json::Value::Null)
+            }
         }
     }
 
@@ -378,13 +435,20 @@ impl Session {
         })
     }
 
+    /// Execute a step and build the response honouring `req.envelope`.
+    ///
+    /// The response wire shape depends on the client-requested
+    /// [`EnvelopeMode`] (TCK `envelope-compactness.feature`): `Full` carries
+    /// the complete [`SessionState`], `Position` only status + tick position,
+    /// `None` only the bare [`StepResponse`] data payload. The return type is
+    /// [`serde_json::Value`] so all three shapes flow through one path.
     #[allow(dead_code)]
     pub fn step(
         &mut self,
         req: &StepRequest,
         host_position: &TickPosition,
         _forward_complete: bool,
-    ) -> Result<ResponseEnvelope<StepResponse>, SessionError> {
+    ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/step")?;
 
         if req.direction == rocket_surgeon_protocol::types::StepDirection::Backward {
@@ -395,10 +459,11 @@ impl Session {
         self.state.position = Some(host_position.clone());
         self.update_available_actions();
 
-        Ok(self.envelope(StepResponse {
+        let data = StepResponse {
             ticks_executed: req.count,
             stopped_at: host_position.clone(),
-        }))
+        };
+        Ok(self.envelope_with_mode(req.envelope, data))
     }
 
     #[allow(dead_code)]
@@ -732,10 +797,10 @@ mod tests {
         let result = session.step(&req, &host_position, false);
         assert!(result.is_ok());
         let envelope = result.unwrap();
-        assert_eq!(envelope.state.status, Status::Stopped);
-        let data = envelope.data.as_ref().unwrap();
-        assert_eq!(data.ticks_executed, 1);
-        assert_eq!(data.stopped_at.component, "q_proj");
+        assert_eq!(envelope["state"]["status"], "stopped");
+        let data = &envelope["data"];
+        assert_eq!(data["ticks_executed"], 1);
+        assert_eq!(data["stopped_at"]["component"], "q_proj");
     }
 
     #[test]
@@ -887,10 +952,11 @@ mod tests {
             clock: None,
         };
         let envelope = session.step(&req, &pos, false).unwrap();
-        assert!(envelope.state.session_id.len() == 36);
-        assert!(envelope.state.model_id.is_some());
-        assert_eq!(envelope.state.status, Status::Stopped);
-        assert!(envelope.state.available_actions.contains(&ActionName::Step));
+        assert_eq!(envelope["state"]["session_id"].as_str().unwrap().len(), 36);
+        assert!(envelope["state"]["model_id"].is_string());
+        assert_eq!(envelope["state"]["status"], "stopped");
+        let actions = envelope["state"]["available_actions"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "step"));
     }
 
     fn sample_tensor_summary() -> TensorSummary {
@@ -984,5 +1050,128 @@ mod tests {
         assert_eq!(session.state().tick_id, tick_before);
         assert_eq!(session.state().position, pos_before);
         assert_eq!(session.state().status, Status::Stopped);
+    }
+
+    // --- EnvelopeMode tests (TCK envelope-compactness.feature) ---
+
+    fn step_req(envelope: EnvelopeMode) -> StepRequest {
+        StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+            envelope,
+            run_to: None,
+        }
+    }
+
+    fn step_pos() -> TickPosition {
+        TickPosition {
+            tick_id: 9,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 4,
+            component: "attn.q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
+            clock: None,
+        }
+    }
+
+    #[test]
+    fn step_full_envelope_includes_complete_session_state() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::Full), &step_pos(), false)
+            .unwrap();
+        let state = &value["state"];
+        // The full envelope carries the entire SessionState.
+        assert!(state.get("session_id").is_some());
+        assert!(state.get("status").is_some());
+        assert!(state.get("active_probes").is_some());
+        assert!(state.get("checkpoints").is_some());
+        assert!(state.get("available_actions").is_some());
+        assert!(value.get("data").is_some());
+    }
+
+    #[test]
+    fn step_default_envelope_is_full() {
+        // No explicit envelope field -> EnvelopeMode default -> Full.
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::default()), &step_pos(), false)
+            .unwrap();
+        assert!(value["state"].get("active_probes").is_some());
+        assert!(value["state"].get("checkpoints").is_some());
+    }
+
+    #[test]
+    fn step_position_envelope_has_status_and_position_only() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::Position), &step_pos(), false)
+            .unwrap();
+        let state = &value["state"];
+        // Position envelope keeps status and tick position...
+        assert_eq!(state["status"], "stopped");
+        assert_eq!(state["position"]["layer"], 4);
+        assert_eq!(state["position"]["component"], "attn.q_proj");
+        // ...but omits the heavier SessionState fields.
+        assert!(state.get("active_probes").is_none());
+        assert!(state.get("checkpoints").is_none());
+        assert!(state.get("session_id").is_none());
+        assert!(state.get("available_actions").is_none());
+        // The data payload is still present.
+        assert_eq!(value["data"]["ticks_executed"], 1);
+    }
+
+    #[test]
+    fn step_none_envelope_is_data_payload_only() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::None), &step_pos(), false)
+            .unwrap();
+        // No envelope wrapper at all: the StepResponse fields are top-level.
+        assert!(value.get("state").is_none());
+        assert!(value.get("data").is_none());
+        assert_eq!(value["ticks_executed"], 1);
+        assert_eq!(value["stopped_at"]["component"], "attn.q_proj");
+    }
+
+    #[test]
+    fn envelope_with_mode_position_reflects_no_position_before_step() {
+        // Position envelope on a freshly-stopped session: status is set,
+        // position is still null (no step taken yet).
+        let session = stopped_session();
+        let value = session.envelope_with_mode(EnvelopeMode::Position, serde_json::json!({"x": 1}));
+        assert_eq!(value["state"]["status"], "stopped");
+        assert!(value["state"]["position"].is_null());
+        assert_eq!(value["data"]["x"], 1);
+    }
+
+    // --- SubscribeFilter session-state tests ---
+
+    #[test]
+    fn event_filter_defaults_to_none() {
+        let session = stopped_session();
+        assert!(session.event_filter().is_none());
+    }
+
+    #[test]
+    fn set_event_filter_stores_and_clears() {
+        let mut session = stopped_session();
+        let filter = SubscribeFilter {
+            events: Some(vec![
+                rocket_surgeon_protocol::messages::EventType::TickStopped,
+            ]),
+            layers: Some(vec![10, 11, 12]),
+            components: None,
+        };
+        session.set_event_filter(Some(filter.clone()));
+        assert_eq!(session.event_filter(), Some(&filter));
+
+        session.set_event_filter(None);
+        assert!(session.event_filter().is_none());
     }
 }
