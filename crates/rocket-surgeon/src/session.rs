@@ -691,21 +691,24 @@ impl Session {
             }));
         };
 
-        let mut matches: Vec<DiscoverMatch> = self
+        let mut entries: Vec<&ProbePointEntry> = self
             .catalog
             .iter()
             .filter(|entry| parsed.matches(entry))
+            .collect();
+        entries.sort_by(|a, b| {
+            a.layer
+                .cmp(&b.layer)
+                .then_with(|| a.canonical.cmp(&b.canonical))
+        });
+        let matches: Vec<DiscoverMatch> = entries
+            .into_iter()
             .map(|entry| DiscoverMatch {
                 canonical: entry.canonical.clone(),
                 tensor_shape: entry.tensor_shape.clone(),
                 aliases: entry.aliases.clone(),
             })
             .collect();
-        matches.sort_by(|a, b| {
-            a.tensor_shape
-                .cmp(&b.tensor_shape)
-                .then_with(|| a.canonical.cmp(&b.canonical))
-        });
 
         let suggestions = if matches.is_empty() {
             self.suggest_patterns(pattern, &parsed)

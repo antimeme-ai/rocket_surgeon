@@ -763,16 +763,7 @@ pub fn handle_probe(
 pub fn handle_subscribe(session: &mut Session, request: &Request) -> Response {
     let req: SubscribeRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     if let Err(ref e) = session.require_stopped("rocket/subscribe") {
@@ -845,16 +836,7 @@ pub fn handle_view(
 pub fn handle_discover(session: &Session, request: &Request) -> Response {
     let req: DiscoverRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     match session.discover(&req.pattern) {
@@ -870,16 +852,7 @@ pub fn handle_discover(session: &Session, request: &Request) -> Response {
 pub fn handle_view_define(session: &mut Session, request: &Request) -> Response {
     let req: ViewDefineRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     match session.define_view(&req.name, req.spec) {
