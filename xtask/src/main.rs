@@ -28,6 +28,8 @@ enum Xtask {
     Mypy,
     /// Run Python tests
     Pytest,
+    /// Run end-to-end tests (spawn the daemon, drive the JSON-RPC protocol)
+    E2e,
     /// Run TCK (Technology Compatibility Kit) tests
     Tck,
     /// Run full CI suite (all lints + all tests)
@@ -51,6 +53,7 @@ fn main() -> Result<()> {
         Xtask::Ruff { fix } => ruff(fix)?,
         Xtask::Mypy => mypy()?,
         Xtask::Pytest => pytest()?,
+        Xtask::E2e => e2e()?,
         Xtask::Tck => tck()?,
         Xtask::Ci => {
             fmt(true)?;
@@ -59,6 +62,7 @@ fn main() -> Result<()> {
             mypy()?;
             test()?;
             pytest()?;
+            e2e()?;
         }
         Xtask::Setup => setup()?,
     }
@@ -137,6 +141,45 @@ fn mypy() -> Result<()> {
 
 fn pytest() -> Result<()> {
     run("python3", &["-m", "pytest", "python/tests", "-v"]).context("pytest failed")
+}
+
+/// Run every `tests/test_e2e_*.py` script. Each script builds the workspace
+/// binaries and sets its own child-process environment, so the recipe just
+/// invokes them. All scripts run even if one fails, so a single push surfaces
+/// every regression at once.
+fn e2e() -> Result<()> {
+    let tests_dir = std::env::current_dir().context("cwd")?.join("tests");
+    let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(&tests_dir)
+        .with_context(|| format!("read {}", tests_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("test_e2e_") && n.ends_with(".py"))
+        })
+        .collect();
+    if scripts.is_empty() {
+        bail!("no e2e test scripts found in {}", tests_dir.display());
+    }
+    scripts.sort();
+
+    let mut failures = Vec::new();
+    for script in &scripts {
+        let path = script.to_str().context("non-utf8 script path")?;
+        if run("python3", &["-u", path]).is_err() {
+            failures.push(path.to_owned());
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} e2e test(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn tck() -> Result<()> {
