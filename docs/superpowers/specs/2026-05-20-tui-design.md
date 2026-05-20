@@ -609,11 +609,11 @@ context. `recovery_hint` carries human-readable guidance.
 
 | Code | Name | Trigger | `details` must include |
 |------|------|---------|----------------------|
-| 32007 | `E_CROSS_REQUEST_KV` | KV read/intervene crosses a request boundary unsafely | `{ position, boundary_tick, current_tick }` |
-| 32008 | `E_BRANCH_NOT_FOUND` | Referenced branch does not exist | `{ branch_id, available_branches: [...] }` |
-| 32009 | `E_KV_EVICTED` | Referenced KV position was evicted between request and response | `{ position, evicted_at_tick, current_tick, nearest_checkpoint }` |
-| 32010 | `E_BRANCH_MERGE_REFUSED` | Branch merge would violate causality constraints | `{ source_branch, target_branch, reason }` |
-| 32011 | `E_VRAM_EXHAUSTED` | Operation would exceed VRAM budget | `{ used_mb, total_mb, headroom_mb, per_branch: [{id, size_mb, tier}], recommendation }` |
+| -32022 | `E_BRANCH_NOT_FOUND` | Referenced branch does not exist | `{ branch_id, available_branches: [...] }` |
+| -32023 | `E_BRANCH_MERGE_REFUSED` | Branch merge would violate causality constraints | `{ source_branch, target_branch, reason }` |
+| -32024 | `E_VRAM_EXHAUSTED` | Operation would exceed VRAM budget | `{ used_mb, total_mb, headroom_mb, per_branch: [{id, size_mb, tier}], recommendation }` |
+| -32025 | `E_CROSS_REQUEST_KV` | KV read/intervene crosses a request boundary unsafely | `{ position, boundary_tick, current_tick }` |
+| -32026 | `E_KV_EVICTED` | Referenced KV position was evicted between request and response | `{ position, evicted_at_tick, current_tick, nearest_checkpoint }` |
 
 Existing errors also adopt this contract. `INVALID_TARGET` gains `details: { attempted,
 nearest_matches: [...], valid_components_at_layer: [...] }`. `GPU_OOM` gains per-checkpoint
