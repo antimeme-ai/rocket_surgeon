@@ -608,6 +608,11 @@ fn run_step_loop(
         if let Some(fwd) = state.forward_pass.as_mut() {
             fwd.forward_complete = true;
         }
+        // The initial forward pass is a prefill of the prompt. Once it
+        // completes, the model is positioned to generate the next token, so
+        // advance the token clock (which resets the operator clock to 0) and
+        // transition the phase from prefill to decode.
+        state.tick_state.advance_token();
     }
 
     let position = state.tick_state.to_tick_position();
