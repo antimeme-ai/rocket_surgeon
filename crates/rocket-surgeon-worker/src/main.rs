@@ -10,7 +10,7 @@ use std::io::{self, BufReader};
 use clap::Parser;
 use pyo3::prelude::*;
 use rocket_surgeon_transport::framing::{read_message, write_message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::dispatch::{WorkerState, dispatch};
 
@@ -114,7 +114,7 @@ fn align_subprocess_interpreter() {
     });
     match chosen {
         Ok(Some(path)) => info!(interpreter = %path, "aligned subprocess interpreter"),
-        Ok(None) => {}
+        Ok(None) => debug!("subprocess interpreter already a real Python; no alignment needed"),
         Err(e) => warn!("could not align subprocess interpreter: {e}"),
     }
 }
