@@ -263,3 +263,30 @@ Feature: Surgical interventions on the forward pass
     And the error "data.error_code" is "INVALID_STATE"
     And the error "data.current_state" is "stepping"
     And the error "data.severity" is "recoverable"
+
+  # ── Extended activation patching ─────────────────────────────────
+
+  Scenario: Ablate with mode zero (default)
+    Given an intervention recipe with type "ablate" and params {"mode": "zero"}
+    Then the intervention deserializes successfully
+    And mode is AblateMode::Zero
+
+  Scenario: Ablate with mode mean
+    Given an intervention recipe with type "ablate" and params {"mode": "mean", "reference_run": "ckpt-baseline"}
+    Then the intervention deserializes successfully
+    And mode is AblateMode::Mean
+
+  Scenario: AttentionMask intervention
+    Given an intervention recipe with type "attention_mask"
+    And params {"source_positions": [0, 3], "target_positions": [5], "mask_value": -10000.0}
+    Then the intervention deserializes successfully
+
+  Scenario: EmbedSwap intervention
+    Given an intervention recipe with type "embed_swap"
+    And params {"position": 5, "new_token_id": 1234}
+    Then the intervention deserializes successfully
+
+  Scenario: EmbedNoise intervention
+    Given an intervention recipe with type "embed_noise"
+    And params {"position": 5, "std": 0.1, "seed": 42}
+    Then the intervention deserializes successfully

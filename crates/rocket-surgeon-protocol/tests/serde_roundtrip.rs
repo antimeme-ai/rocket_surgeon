@@ -14,7 +14,7 @@ use rocket_surgeon_protocol::messages::{
     ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
-    ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
+    AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
     CompositionMode, ComponentEntry, DType, EnvelopeMode, ExecutionMode, GranularityScope,
     HeadGranularity, Histogram, InterventionParams, InterventionRecipe, InterventionType,
     Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
@@ -254,7 +254,11 @@ fn intervention_recipe_roundtrip() {
 
 #[test]
 fn intervention_params_variants() {
-    roundtrip(&InterventionParams::Ablate {});
+    roundtrip(&InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        });
     roundtrip(&InterventionParams::Scale { factor: 2.0 });
     roundtrip(&InterventionParams::Clamp {
         min: -1.0,
@@ -267,6 +271,118 @@ fn intervention_params_variants() {
         token: 5,
         experts: vec![0, 2, 4],
     });
+    roundtrip(&InterventionParams::AttentionMask {
+        source_positions: vec![0, 3],
+        target_positions: vec![5],
+        mask_value: -10000.0,
+    });
+    roundtrip(&InterventionParams::EmbedSwap {
+        position: 5,
+        new_token_id: 1234,
+    });
+    roundtrip(&InterventionParams::EmbedNoise {
+        position: 5,
+        std: 0.1,
+        seed: Some(42),
+    });
+}
+
+#[test]
+fn ablate_mode_serde() {
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Zero).unwrap(),
+        r#""zero""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Mean).unwrap(),
+        r#""mean""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AblateMode::Resample).unwrap(),
+        r#""resample""#
+    );
+    assert_eq!(AblateMode::default(), AblateMode::Zero);
+}
+
+#[test]
+fn ablate_with_mode_mean_roundtrip() {
+    let params = InterventionParams::Ablate {
+        mode: AblateMode::Mean,
+        reference_run: Some("ckpt-baseline".to_owned()),
+        reference_tensor_id: None,
+    };
+    roundtrip(&params);
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["mode"], "mean");
+    assert_eq!(json["reference_run"], "ckpt-baseline");
+    assert!(json.get("reference_tensor_id").is_none());
+}
+
+#[test]
+fn ablate_empty_json_defaults_to_zero() {
+    let json = serde_json::json!({});
+    let params: InterventionParams = serde_json::from_value(json).unwrap();
+    match params {
+        InterventionParams::Ablate {
+            mode, reference_run, ..
+        } => {
+            assert_eq!(mode, AblateMode::Zero);
+            assert!(reference_run.is_none());
+        }
+        _ => panic!("expected Ablate variant"),
+    }
+}
+
+#[test]
+fn intervention_type_new_variants_serde() {
+    assert_eq!(
+        serde_json::to_string(&InterventionType::AttentionMask).unwrap(),
+        r#""attention_mask""#
+    );
+    assert_eq!(
+        serde_json::to_string(&InterventionType::EmbedSwap).unwrap(),
+        r#""embed_swap""#
+    );
+    assert_eq!(
+        serde_json::to_string(&InterventionType::EmbedNoise).unwrap(),
+        r#""embed_noise""#
+    );
+}
+
+#[test]
+fn embed_noise_without_seed_roundtrip() {
+    let params = InterventionParams::EmbedNoise {
+        position: 3,
+        std: 0.05,
+        seed: None,
+    };
+    roundtrip(&params);
+    let json = serde_json::to_value(&params).unwrap();
+    assert!(json.get("seed").is_none());
+}
+
+#[test]
+fn attention_mask_roundtrip() {
+    let params = InterventionParams::AttentionMask {
+        source_positions: vec![0, 3],
+        target_positions: vec![5],
+        mask_value: -10000.0,
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["source_positions"], serde_json::json!([0, 3]));
+    assert_eq!(json["mask_value"], -10000.0);
+    roundtrip(&params);
+}
+
+#[test]
+fn capabilities_includes_new_intervention_types() {
+    let caps = Capabilities::phase1_defaults();
+    let json = serde_json::to_value(&caps).unwrap();
+    let types = json["intervention_types"].as_array().unwrap();
+    let type_strs: Vec<&str> = types.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(type_strs.contains(&"attention_mask"));
+    assert!(type_strs.contains(&"embed_swap"));
+    assert!(type_strs.contains(&"embed_noise"));
 }
 
 #[test]
@@ -945,7 +1061,11 @@ fn intervene_request_set_tagged() {
             id: "int-1".to_owned(),
             intervention_type: InterventionType::Ablate,
             target: "llama:0:12:mlp:output".to_owned(),
-            params: InterventionParams::Ablate {},
+            params: InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        },
             condition: None,
             priority: 0,
             mode: CompositionMode::Additive,
@@ -1451,7 +1571,11 @@ fn inspect_request_detail_default() {
 #[test]
 fn intervention_params_ablate_from_empty_object() {
     let val: InterventionParams = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(val, InterventionParams::Ablate {});
+    assert_eq!(val, InterventionParams::Ablate {
+            mode: AblateMode::default(),
+            reference_run: None,
+            reference_tensor_id: None,
+        });
 }
 
 #[test]

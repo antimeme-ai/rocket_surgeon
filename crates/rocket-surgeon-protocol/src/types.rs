@@ -321,6 +321,18 @@ pub enum InterventionType {
     Patch,
     Clamp,
     RouteOverride,
+    AttentionMask,
+    EmbedSwap,
+    EmbedNoise,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AblateMode {
+    #[default]
+    Zero,
+    Mean,
+    Resample,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,7 +343,29 @@ pub enum InterventionParams {
     Patch { source_tensor_id: String },
     Clamp { min: f64, max: f64 },
     RouteOverride { token: u64, experts: Vec<u64> },
-    Ablate {},
+    AttentionMask {
+        source_positions: Vec<u64>,
+        target_positions: Vec<u64>,
+        mask_value: f64,
+    },
+    EmbedSwap {
+        position: u64,
+        new_token_id: u64,
+    },
+    EmbedNoise {
+        position: u64,
+        std: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
+    },
+    Ablate {
+        #[serde(default)]
+        mode: AblateMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_run: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_tensor_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -412,6 +446,9 @@ impl Capabilities {
                 InterventionType::Add,
                 InterventionType::Patch,
                 InterventionType::Clamp,
+                InterventionType::AttentionMask,
+                InterventionType::EmbedSwap,
+                InterventionType::EmbedNoise,
             ],
             built_in_views: vec![
                 BuiltInView::ResidualStreamNorm,
