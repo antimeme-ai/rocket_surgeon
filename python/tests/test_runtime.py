@@ -10,6 +10,7 @@ from __future__ import annotations
 import multiprocessing
 import multiprocessing.spawn
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,6 +45,45 @@ def test_find_real_interpreter_returns_existing_python() -> None:
     assert path.name.lower().startswith("python")
 
 
+def test_find_real_interpreter_result_actually_runs() -> None:
+    """The chosen interpreter executes and reports the running Python version.
+
+    This is the property the worker depends on: the repaired `sys.executable`
+    must be a launchable interpreter, not just an existing file.
+    """
+    found = find_real_interpreter()
+    assert found is not None
+    result = subprocess.run(
+        [found, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert result.stdout.strip() == expected
+
+
+def test_find_real_interpreter_prefers_venv_when_on_path() -> None:
+    """Under the project venv, the discovered interpreter lives in that venv."""
+    found = find_real_interpreter()
+    assert found is not None
+    # A venv interpreter sits at <venv>/bin/python*; <venv> has a pyvenv.cfg.
+    venv_root = Path(found).parent.parent
+    assert (venv_root / "pyvenv.cfg").is_file()
+
+
+def test_find_real_interpreter_returns_none_when_no_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With no venv on the path and empty prefixes, discovery yields None."""
+    monkeypatch.setattr(sys, "path", [])
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(sys, "exec_prefix", str(tmp_path))
+    assert find_real_interpreter() is None
+
+
 def test_align_is_noop_when_executable_is_already_python(
     restore_interpreter_state: None,
 ) -> None:
@@ -61,7 +101,7 @@ def test_align_repairs_embedded_host_binary(restore_interpreter_state: None) -> 
     assert chosen is not None
     assert Path(chosen).name.lower().startswith("python")
     assert sys.executable == chosen
-    assert sys._base_executable == chosen
+    assert getattr(sys, "_base_executable", None) == chosen
     # multiprocessing fsencodes the executable on POSIX; normalise before compare.
     assert os.fsdecode(multiprocessing.spawn.get_executable()) == chosen
 
