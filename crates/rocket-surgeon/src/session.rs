@@ -130,7 +130,9 @@ impl Session {
             suggestion,
             current_state: Some(self.state.status),
             valid_states: Some(valid_states),
-            recovery_hint: None,
+            recovery_hint: Some(
+                crate::dispatch::recovery_hint_for(ErrorCode::InvalidState).to_owned(),
+            ),
             context: None,
         })
     }
@@ -154,8 +156,13 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
-                context: None,
+                recovery_hint: Some(format!(
+                    "Reconnect with protocol_version '{PROTOCOL_VERSION}'."
+                )),
+                context: Some(serde_json::json!({
+                    "requested_version": req.protocol_version,
+                    "supported_version": PROTOCOL_VERSION,
+                })),
             }));
         }
 
@@ -181,7 +188,9 @@ impl Session {
                 suggestion: "Detach the current model before attaching a new one".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::ModelAlreadyAttached).to_owned(),
+                ),
                 context: None,
             }));
         }
@@ -200,7 +209,10 @@ impl Session {
                         suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
                         current_state: Some(self.state.status),
                         valid_states: None,
-                        recovery_hint: None,
+                        recovery_hint: Some(
+                            crate::dispatch::recovery_hint_for(ErrorCode::CompiledModel)
+                                .to_owned(),
+                        ),
                         context: None,
                     }));
                 }
@@ -218,8 +230,13 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
-                context: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::UnsupportedModel).to_owned(),
+                ),
+                context: Some(serde_json::json!({
+                    "attempted_family": req.model_family,
+                    "supported_families": SUPPORTED_FAMILIES,
+                })),
             }));
         }
 
@@ -289,7 +306,9 @@ impl Session {
                 suggestion: "No model is currently attached".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::ModelNotAttached).to_owned(),
+                ),
                 context: None,
             }));
         }
@@ -342,7 +361,9 @@ impl Session {
                     suggestion: "Attach a model before calling this method".to_owned(),
                     current_state: Some(self.state.status),
                     valid_states: Some(vec![Status::Stopped]),
-                    recovery_hint: None,
+                    recovery_hint: Some(
+                        crate::dispatch::recovery_hint_for(ErrorCode::ModelNotAttached).to_owned(),
+                    ),
                     context: None,
                 }))
             }
@@ -373,8 +394,10 @@ impl Session {
             suggestion: format!("The {cap} capability is not supported in this build"),
             current_state: Some(self.state.status),
             valid_states: None,
-            recovery_hint: None,
-            context: None,
+            recovery_hint: Some(
+                crate::dispatch::recovery_hint_for(ErrorCode::CapabilityNotSupported).to_owned(),
+            ),
+            context: Some(serde_json::json!({ "capability": cap })),
         })
     }
 

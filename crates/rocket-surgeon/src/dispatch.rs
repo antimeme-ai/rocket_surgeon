@@ -12,6 +12,214 @@ use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, Tic
 use crate::session::{Session, SessionError};
 use crate::tensor_store::TensorStore;
 
+/// Canonical, actionable recovery hint for an error code.
+///
+/// Every error response the daemon emits MUST carry a `recovery_hint` — a
+/// short, imperative string telling the caller how to recover. This is the
+/// single source of truth (TCK `error-expressiveness.feature`, scenario
+/// `ErrorData includes recovery_hint`). Hints are kept terse and free of
+/// tenant-identifying detail so they are safe to surface verbatim.
+pub fn recovery_hint_for(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::InvalidState => {
+            "Check `state.status` and `valid_states`, then issue an action allowed from the current state."
+        }
+        ErrorCode::InvalidTarget => {
+            "Pick a target from `context.nearest_matches` or `context.valid_components_at_layer`."
+        }
+        ErrorCode::InvalidRecipe => "Fix the recipe params and resubmit the intervention.",
+        ErrorCode::ModelNotAttached | ErrorCode::BackendAttachFailed => {
+            "Call `rocket/attach` with a valid model before retrying."
+        }
+        ErrorCode::ModelAlreadyAttached => "Call `rocket/detach` first, then attach the new model.",
+        ErrorCode::TensorNotFound => {
+            "Run `rocket/step` to advance the forward pass so the tensor is captured, then retry."
+        }
+        ErrorCode::CheckpointNotFound => {
+            "List checkpoints via `rocket/status` and restore an id that exists."
+        }
+        ErrorCode::ProbeNotFound => {
+            "List probes with `rocket/probe action=list` and use a known id."
+        }
+        ErrorCode::CapabilityNotSupported => {
+            "Check `initialize` capabilities; this build does not support the requested feature."
+        }
+        ErrorCode::SliceOutOfBounds => {
+            "Inspect with `detail=summary` to read the tensor shape, then request an in-bounds slice."
+        }
+        ErrorCode::ResponseTooLarge => {
+            "Narrow the target or request a slice instead of the full tensor."
+        }
+        ErrorCode::HostError => {
+            "Inspect the daemon logs; the host worker hit an unrecoverable fault."
+        }
+        ErrorCode::GpuOom => "Free GPU memory or attach a smaller model, then retry.",
+        ErrorCode::NcclTimeout => {
+            "Check inter-rank connectivity; restart the session if ranks are unreachable."
+        }
+        ErrorCode::ReplayDivergence => {
+            "Re-capture from a fresh checkpoint; the replay diverged from the recorded run."
+        }
+        ErrorCode::UnsupportedModel => "Attach a model from a supported family (see `suggestion`).",
+        ErrorCode::CompiledModel => {
+            "Remove the torch.compile() wrapper and re-export the model in eager mode."
+        }
+        ErrorCode::InvalidParams => "Fix the request params to match the method schema and retry.",
+        ErrorCode::DuplicateProbeId => {
+            "Choose a unique probe id, or remove the existing probe first."
+        }
+        ErrorCode::InvalidPoint => {
+            "Fix the probe point grammar (family:rank:layer:component:slot:event)."
+        }
+        ErrorCode::ViewDataUnavailable => {
+            "Step the forward pass so view data is computed, then retry the view."
+        }
+        ErrorCode::BranchNotFound => "List branches and target one that exists.",
+        ErrorCode::BranchMergeRefused => {
+            "Resolve the divergence before merging, or merge into a compatible branch."
+        }
+        ErrorCode::VramExhausted => {
+            "Drop branches or checkpoints to reclaim VRAM (see `context.recommendation`)."
+        }
+        ErrorCode::CrossRequestKv => {
+            "Scope KV access to the originating request; cross-request KV reads are not allowed."
+        }
+        ErrorCode::KvEvicted => "Re-run the prefill; the KV-cache entry was evicted.",
+    }
+}
+
+/// Build `ErrorData` with the canonical `recovery_hint` already populated.
+fn error_with_hint(code: ErrorCode, suggestion: impl Into<String>) -> ErrorData {
+    let mut data = ErrorData::new(code, suggestion);
+    data.recovery_hint = Some(recovery_hint_for(code).to_owned());
+    data
+}
+
+/// Build `ErrorData` with both a `recovery_hint` and structured `context`.
+fn error_with_context(
+    code: ErrorCode,
+    suggestion: impl Into<String>,
+    context: serde_json::Value,
+) -> ErrorData {
+    let mut data = error_with_hint(code, suggestion);
+    data.context = Some(context);
+    data
+}
+
+/// Canonical leaf-component names a target's `component` field may name.
+///
+/// Targets follow the grammar `family:rank:layer:component:event`, where
+/// `component` is a (possibly dotted) path such as `attn.o_proj` or a bare
+/// leaf such as `o_proj`. Validation matches the *final* dotted segment
+/// against this vocabulary. When a caller names a component outside this
+/// set we cannot resolve it to a tensor, so the daemon answers
+/// `INVALID_TARGET` with nearest matches drawn from this vocabulary (TCK
+/// `error-expressiveness.feature`, scenario `INVALID_TARGET includes
+/// nearest matches`).
+const CANONICAL_COMPONENTS: &[&str] = &[
+    "embed",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "scores",
+    "mlp",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "router",
+    "residual_pre",
+    "residual_post",
+    "ln_1",
+    "ln_2",
+    "lm_head",
+];
+
+/// The final dotted segment of a component path (`attn.o_proj` -> `o_proj`).
+fn component_leaf(component: &str) -> &str {
+    component.rsplit('.').next().unwrap_or(component)
+}
+
+/// Levenshtein edit distance between two byte strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// Extract the `component` field (index 3) from an inspect target string of
+/// the form `family:rank:layer:component:event`. Returns `None` when the
+/// target does not have enough colon-separated fields.
+fn target_component(target: &str) -> Option<&str> {
+    target.split(':').nth(3).filter(|c| !c.is_empty())
+}
+
+/// Closest canonical components to `attempted`, ranked by edit distance.
+///
+/// Always returns at least one entry (the global nearest) so the TCK's
+/// "non-empty array" expectation holds even for wildly malformed input.
+fn nearest_components(attempted: &str) -> Vec<&'static str> {
+    let mut scored: Vec<(usize, &'static str)> = CANONICAL_COMPONENTS
+        .iter()
+        .map(|&c| (edit_distance(attempted, c), c))
+        .collect();
+    scored.sort_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)));
+    let best = scored.first().map_or(usize::MAX, |s| s.0);
+    // Keep the global nearest plus anything within a small radius of it.
+    scored
+        .into_iter()
+        .filter(|&(dist, _)| dist <= best.saturating_add(2))
+        .take(5)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// Build the `INVALID_TARGET` error for an inspect target whose `component`
+/// field names something the daemon cannot resolve. The structured context
+/// carries the attempted component, nearest spelling matches, and the full
+/// set of valid components so a caller (human or LLM) can self-correct.
+fn invalid_target_error(target: &str) -> ErrorData {
+    let attempted = target_component(target).unwrap_or(target);
+    let nearest = nearest_components(component_leaf(attempted));
+    let suggestion = match nearest.first() {
+        Some(best) => format!("Unknown component '{attempted}' in target — did you mean '{best}'?"),
+        None => format!("Unknown component '{attempted}' in target"),
+    };
+    error_with_context(
+        ErrorCode::InvalidTarget,
+        suggestion,
+        serde_json::json!({
+            "attempted": attempted,
+            "nearest_matches": nearest,
+            "valid_components_at_layer": CANONICAL_COMPONENTS,
+        }),
+    )
+}
+
+/// Build an `INVALID_PARAMS` response for a params-deserialization failure.
+///
+/// Routed through `ErrorData` (rather than a bare `RpcError`) so the
+/// response carries a `recovery_hint` and the raw serde diagnostic in
+/// `context.parse_error`, per TCK `error-expressiveness.feature`.
+fn invalid_params_response(id: RequestId, err: &serde_json::Error) -> Response {
+    let data = error_with_context(
+        ErrorCode::InvalidParams,
+        format!("Invalid params: {err}"),
+        serde_json::json!({ "parse_error": err.to_string() }),
+    );
+    Response::error(id, RpcError::from_error_data(data))
+}
+
 fn session_error_to_response(id: RequestId, err: &SessionError) -> Response {
     let rpc_error = RpcError::from_error_data(err.error_data().clone());
     Response::error(id, rpc_error)
@@ -77,16 +285,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, 
 fn handle_initialize(session: &mut Session, request: &Request) -> Response {
     let req: InitializeRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     match session.initialize(&req) {
@@ -113,23 +312,17 @@ pub fn handle_attach(
 ) -> Response {
     let req: AttachRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     let host = match backend_result {
         Ok(h) => h,
         Err(message) => {
-            let mut data = ErrorData::new(ErrorCode::BackendAttachFailed, message.to_owned());
-            data.context = Some(serde_json::json!({ "backend_error": message }));
+            let data = error_with_context(
+                ErrorCode::BackendAttachFailed,
+                message.to_owned(),
+                serde_json::json!({ "backend_error": message }),
+            );
             return Response::error(request.id.clone(), RpcError::from_error_data(data));
         }
     };
@@ -139,8 +332,16 @@ pub fn handle_attach(
             "worker returned invalid metadata: num_layers={}, num_heads={}, hidden_dim={}",
             host.num_layers, host.num_heads, host.hidden_dim
         );
-        let mut data = ErrorData::new(ErrorCode::BackendAttachFailed, message.clone());
-        data.context = Some(serde_json::json!({ "backend_error": message }));
+        let data = error_with_context(
+            ErrorCode::BackendAttachFailed,
+            message.clone(),
+            serde_json::json!({
+                "backend_error": message,
+                "num_layers": host.num_layers,
+                "num_heads": host.num_heads,
+                "hidden_dim": host.hidden_dim,
+            }),
+        );
         return Response::error(request.id.clone(), RpcError::from_error_data(data));
     }
 
@@ -179,16 +380,7 @@ pub fn handle_step(
 ) -> Response {
     let req: StepRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     let (position, forward_complete) = if let Some(hr) = host_response {
@@ -237,7 +429,7 @@ fn handle_inspect_no_store(session: &Session, request: &Request) -> Response {
     }
     Response::error(
         request.id.clone(),
-        RpcError::from_error_data(ErrorData::new(
+        RpcError::from_error_data(error_with_hint(
             ErrorCode::TensorNotFound,
             "No orchestrator available to capture tensors",
         )),
@@ -281,20 +473,26 @@ pub fn handle_inspect(
 ) -> Response {
     let req: InspectRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     if let Err(ref e) = session.require_stopped("rocket/inspect") {
         return session_error_to_response(request.id.clone(), e);
+    }
+
+    // Validate the target's `component` field before consulting the host:
+    // an unresolvable component is a caller mistake (INVALID_TARGET), not a
+    // "tensor not captured yet" condition. The structured context lets the
+    // caller self-correct without a round-trip.
+    if let Some(component) = target_component(&req.target) {
+        // A `*` wildcard component matches everything — leave resolution to
+        // the host. Otherwise the leaf must be a known canonical component.
+        if component != "*" && !CANONICAL_COMPONENTS.contains(&component_leaf(component)) {
+            return Response::error(
+                request.id.clone(),
+                RpcError::from_error_data(invalid_target_error(&req.target)),
+            );
+        }
     }
 
     let captured = match host_response {
@@ -302,7 +500,7 @@ pub fn handle_inspect(
         None => {
             return Response::error(
                 request.id.clone(),
-                RpcError::from_error_data(ErrorData::new(
+                RpcError::from_error_data(error_with_hint(
                     ErrorCode::TensorNotFound,
                     "No orchestrator available to capture tensors",
                 )),
@@ -313,7 +511,7 @@ pub fn handle_inspect(
     if captured.is_empty() {
         return Response::error(
             request.id.clone(),
-            RpcError::from_error_data(ErrorData::new(
+            RpcError::from_error_data(error_with_hint(
                 ErrorCode::TensorNotFound,
                 "Target matched components but no tensors have been captured yet (step first)",
             )),
@@ -439,7 +637,7 @@ fn ingest_and_respond(
                     Err(crate::tensor_store::StoreError::SliceOutOfBounds { .. }) => {
                         return Response::error(
                             request.id.clone(),
-                            RpcError::from_error_data(ErrorData::new(
+                            RpcError::from_error_data(error_with_hint(
                                 ErrorCode::SliceOutOfBounds,
                                 "Slice indices exceed tensor data size",
                             )),
@@ -489,23 +687,26 @@ fn registry_error_to_response(id: RequestId, err: RegistryError) -> Response {
     match err {
         RegistryError::DuplicateId { id: pid } => Response::error(
             id,
-            RpcError::from_error_data(ErrorData::new(
+            RpcError::from_error_data(error_with_context(
                 ErrorCode::DuplicateProbeId,
                 format!("Probe with id '{pid}' already exists"),
+                serde_json::json!({ "probe_id": pid }),
             )),
         ),
         RegistryError::InvalidPoint(e) => Response::error(
             id,
-            RpcError::from_error_data(ErrorData::new(
+            RpcError::from_error_data(error_with_context(
                 ErrorCode::InvalidPoint,
                 format!("Invalid probe point: {e}"),
+                serde_json::json!({ "parse_error": e.to_string() }),
             )),
         ),
         RegistryError::NotFound { id: pid } => Response::error(
             id,
-            RpcError::from_error_data(ErrorData::new(
+            RpcError::from_error_data(error_with_context(
                 ErrorCode::ProbeNotFound,
                 format!("Probe '{pid}' not found"),
+                serde_json::json!({ "probe_id": pid }),
             )),
         ),
     }
@@ -522,16 +723,7 @@ pub fn handle_probe(
 
     let req: ProbeRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     match req {
@@ -590,16 +782,7 @@ pub fn handle_subscribe(session: &Session, request: &Request) -> Response {
 pub fn handle_unsubscribe(session: &Session, request: &Request) -> Response {
     let _req: UnsubscribeRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     let resp = UnsubscribeResponse {
@@ -615,16 +798,7 @@ pub fn handle_view(
 ) -> Response {
     let _req: ViewRequest = match parse_params(request) {
         Ok(r) => r,
-        Err(e) => {
-            return Response::error(
-                request.id.clone(),
-                RpcError {
-                    code: rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
-                    message: format!("Invalid params: {e}"),
-                    data: None,
-                },
-            );
-        }
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
     if let Err(ref e) = session.require_stopped("rocket/view") {
@@ -634,7 +808,7 @@ pub fn handle_view(
     let Some(hr) = host_response else {
         return Response::error(
             request.id.clone(),
-            RpcError::from_error_data(ErrorData::new(
+            RpcError::from_error_data(error_with_hint(
                 ErrorCode::ViewDataUnavailable,
                 "No orchestrator available to compute view",
             )),
@@ -1466,5 +1640,155 @@ mod tests {
         let data = &resp.result.unwrap()["data"];
         assert_eq!(data["view"], "residual_stream_norm");
         assert!(data["data"]["norms"].is_array());
+    }
+
+    // --- Error expressiveness (TCK protocol/error-expressiveness.feature) ---
+
+    /// Every `ErrorCode` maps to a non-empty, actionable recovery hint.
+    #[test]
+    fn every_error_code_has_a_recovery_hint() {
+        use rocket_surgeon_protocol::errors::ErrorCode::{
+            BackendAttachFailed, BranchMergeRefused, BranchNotFound, CapabilityNotSupported,
+            CheckpointNotFound, CompiledModel, CrossRequestKv, DuplicateProbeId, GpuOom, HostError,
+            InvalidParams, InvalidPoint, InvalidRecipe, InvalidState, InvalidTarget, KvEvicted,
+            ModelAlreadyAttached, ModelNotAttached, NcclTimeout, ProbeNotFound, ReplayDivergence,
+            ResponseTooLarge, SliceOutOfBounds, TensorNotFound, UnsupportedModel,
+            ViewDataUnavailable, VramExhausted,
+        };
+        for code in [
+            InvalidState,
+            InvalidTarget,
+            InvalidRecipe,
+            ModelNotAttached,
+            TensorNotFound,
+            CheckpointNotFound,
+            ProbeNotFound,
+            CapabilityNotSupported,
+            SliceOutOfBounds,
+            ResponseTooLarge,
+            HostError,
+            GpuOom,
+            NcclTimeout,
+            ReplayDivergence,
+            UnsupportedModel,
+            CompiledModel,
+            ModelAlreadyAttached,
+            InvalidParams,
+            DuplicateProbeId,
+            InvalidPoint,
+            ViewDataUnavailable,
+            BackendAttachFailed,
+            BranchNotFound,
+            BranchMergeRefused,
+            VramExhausted,
+            CrossRequestKv,
+            KvEvicted,
+        ] {
+            let hint = recovery_hint_for(code);
+            assert!(!hint.is_empty(), "{code:?} has an empty recovery hint");
+        }
+    }
+
+    /// Scenario: `ErrorData` includes `recovery_hint` — a representative
+    /// daemon error response carries a non-null `recovery_hint` string.
+    #[test]
+    fn error_response_carries_recovery_hint() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        // rocket/view before attach -> MODEL_NOT_ATTACHED with a hint.
+        let resp = handle_view(
+            &session,
+            &make_request(
+                "rocket/view",
+                serde_json::json!({"view": "residual_stream_norm"}),
+            ),
+            None,
+        );
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert!(
+            data.recovery_hint.as_deref().is_some_and(|h| !h.is_empty()),
+            "recovery_hint should be a non-empty string"
+        );
+    }
+
+    /// `INVALID_PARAMS` responses are routed through `ErrorData` so they
+    /// too carry a `recovery_hint` and the raw serde diagnostic in context.
+    #[test]
+    fn invalid_params_response_carries_recovery_hint_and_context() {
+        let mut session = Session::new();
+        let resp = dispatch(
+            &mut session,
+            &make_request("initialize", serde_json::json!({"wrong_field": 42})),
+        );
+        let err = resp.error.as_ref().unwrap();
+        assert_eq!(err.code, rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS);
+        let data = err.data.as_ref().expect("INVALID_PARAMS carries ErrorData");
+        assert!(data.recovery_hint.as_deref().is_some_and(|h| !h.is_empty()));
+        assert!(data.context.as_ref().unwrap()["parse_error"].is_string());
+    }
+
+    /// Scenario: `INVALID_TARGET` includes nearest matches — inspecting a
+    /// target whose component is misspelled yields `INVALID_TARGET` with the
+    /// attempted name, non-empty `nearest_matches`, and valid components.
+    #[test]
+    fn invalid_target_includes_nearest_matches() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "llama:*:12:attn.out_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, None, &mut store, None);
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(data.error_code, ErrorCode::InvalidTarget);
+        assert!(data.recovery_hint.as_deref().is_some_and(|h| !h.is_empty()));
+
+        let ctx = data
+            .context
+            .as_ref()
+            .expect("INVALID_TARGET carries context");
+        assert_eq!(ctx["attempted"], "attn.out_proj");
+        let nearest = ctx["nearest_matches"]
+            .as_array()
+            .expect("nearest_matches array");
+        assert!(!nearest.is_empty(), "nearest_matches must be non-empty");
+        // `o_proj` is one edit away from `out_proj`.
+        assert!(nearest.iter().any(|m| m == "o_proj"));
+        assert!(ctx["valid_components_at_layer"].is_array());
+    }
+
+    /// A well-formed target with a known component is not rejected as
+    /// `INVALID_TARGET` — it falls through to the normal capture path.
+    #[test]
+    fn valid_target_component_is_not_rejected() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "summary"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, None, &mut store, None);
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        // Falls through to the host path -> TENSOR_NOT_FOUND, not INVALID_TARGET.
+        assert_eq!(data.error_code, ErrorCode::TensorNotFound);
+    }
+
+    #[test]
+    fn nearest_components_is_always_non_empty() {
+        assert!(!nearest_components("totally_bogus_xyz").is_empty());
+        assert!(!nearest_components("").is_empty());
     }
 }
