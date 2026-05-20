@@ -339,11 +339,23 @@ pub enum AblateMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InterventionParams {
-    Scale { factor: f64 },
-    Add { vector: AddVector },
-    Patch { source_tensor_id: String },
-    Clamp { min: f64, max: f64 },
-    RouteOverride { token: u64, experts: Vec<u64> },
+    Scale {
+        factor: f64,
+    },
+    Add {
+        vector: AddVector,
+    },
+    Patch {
+        source_tensor_id: String,
+    },
+    Clamp {
+        min: f64,
+        max: f64,
+    },
+    RouteOverride {
+        token: u64,
+        experts: Vec<u64>,
+    },
     AttentionMask {
         source_positions: Vec<u64>,
         target_positions: Vec<u64>,
@@ -461,7 +473,11 @@ impl Capabilities {
                 BuiltInView::WorldlineDag,
             ],
             head_granularity: HeadGranularity::Unavailable,
-            transports: vec![Transport::Stdio, Transport::UnixSocket, Transport::Websocket],
+            transports: vec![
+                Transport::Stdio,
+                Transport::UnixSocket,
+                Transport::Websocket,
+            ],
             wire_formats: vec![WireFormat::Json],
             max_response_bytes: 65536,
             model_family: None,

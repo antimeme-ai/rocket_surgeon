@@ -33,7 +33,7 @@ def run_test() -> None:  # noqa: PLR0915
             proc,
             make_request(
                 "initialize",
-                {"client_name": "e2e-probe-test", "protocol_version": "0.1.0"},
+                {"client_name": "e2e-probe-test", "protocol_version": "0.3.0"},
                 req_id=1,
             ),
         )

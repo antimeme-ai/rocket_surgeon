@@ -1,11 +1,15 @@
+use std::collections::HashMap;
+
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, AttachResponse, DetachResponse, InitializeRequest, InitializeResponse,
-    InspectResponse, MemoryUsage, StatusResponse, StepRequest, StepResponse,
+    AttachRequest, AttachResponse, DetachResponse, DiscoverMatch, DiscoverResponse,
+    InitializeRequest, InitializeResponse, InspectResponse, MemoryUsage, StatusResponse,
+    StepRequest, StepResponse, SubscribeFilter, ViewDefineResponse,
 };
 use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
-    ActionName, Capabilities, ResponseEnvelope, SessionState, Status, TensorSummary,
+    ActionName, Capabilities, EnvelopeMode, PositionEnvelope, ResponseEnvelope, SessionState,
+    Status, TensorSummary,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,12 +48,158 @@ impl SessionError {
 const SUPPORTED_FAMILIES: &[&str] = &["llama", "mixtral", "gpt-neox", "gpt2"];
 const PROTOCOL_VERSION: &str = "0.3.0";
 
+/// A single discoverable probe-point retained in session state after attach.
+///
+/// `rocket/discover` pattern-matches over a `Vec<ProbePointEntry>` to answer
+/// "what can I probe?" without the client guessing probe-point strings. Each
+/// entry corresponds to one concrete `family:rank:layer:component:event`
+/// coordinate the worker exposed (the daemon retains this from the attach
+/// metadata so later verbs do not need a worker round-trip).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbePointEntry {
+    /// Model family the point belongs to (e.g. `"llama"`).
+    pub family: String,
+    /// Layer index the component lives in.
+    pub layer: u32,
+    /// Canonical component name (e.g. `"attn.q_proj"`).
+    pub canonical: String,
+    /// Capture event (`"input"` / `"output"` / `"pre_topk"` / ...).
+    pub event: String,
+    /// Tensor shape produced at this point.
+    pub tensor_shape: Vec<u64>,
+    /// Alternate names (HookedTransformer-style aliases, etc.).
+    pub aliases: Vec<String>,
+}
+
+/// One catalog segment of a discover pattern: `*` is a wildcard.
+enum PatternSeg<'a> {
+    Wild,
+    Lit(&'a str),
+}
+
+impl<'a> PatternSeg<'a> {
+    fn parse(raw: &'a str) -> Self {
+        if raw == "*" {
+            Self::Wild
+        } else {
+            Self::Lit(raw)
+        }
+    }
+
+    fn matches(&self, target: &str) -> bool {
+        match self {
+            Self::Wild => true,
+            Self::Lit(lit) => *lit == target,
+        }
+    }
+}
+
+/// A parsed 5-segment discover pattern: `family:rank:layer:component:event`.
+///
+/// Note this is intentionally distinct from the 6-segment probe-point grammar
+/// (`rocket-surgeon-probes`): discover patterns omit `call_index` per the
+/// `tck/protocol/discover.feature` spec (`llama:*:12:*:output`).
+struct DiscoverPattern<'a> {
+    family: PatternSeg<'a>,
+    layer: PatternSeg<'a>,
+    component: PatternSeg<'a>,
+    event: PatternSeg<'a>,
+}
+
+impl<'a> DiscoverPattern<'a> {
+    /// Parse a discover pattern. The `rank` segment is accepted but ignored
+    /// for matching (probe-points are layer/component coordinates; rank is a
+    /// runtime sharding concern, not a discovery axis).
+    fn parse(pattern: &'a str) -> Option<Self> {
+        let segs: Vec<&str> = pattern.split(':').collect();
+        if segs.len() != 5 || segs.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        Some(Self {
+            family: PatternSeg::parse(segs[0]),
+            layer: PatternSeg::parse(segs[2]),
+            component: PatternSeg::parse(segs[3]),
+            event: PatternSeg::parse(segs[4]),
+        })
+    }
+
+    fn matches(&self, entry: &ProbePointEntry) -> bool {
+        let layer_str = entry.layer.to_string();
+        self.family.matches(&entry.family)
+            && self.layer.matches(&layer_str)
+            && self.component.matches(&entry.canonical)
+            && self.event.matches(&entry.event)
+    }
+}
+
+/// Build the default discoverable probe-point catalog for a freshly attached
+/// model. The daemon retains this so `rocket/discover` can answer without a
+/// worker round-trip. Shapes are derived from the worker-reported model
+/// metadata (`hidden_dim`, `num_heads`).
+fn default_catalog(
+    family: &str,
+    num_layers: u32,
+    num_heads: u32,
+    hidden_dim: u32,
+) -> Vec<ProbePointEntry> {
+    let hidden = u64::from(hidden_dim);
+    let heads = u64::from(num_heads);
+    // (canonical, event, shape, alias-suffix)
+    // alias-suffix is appended to the HookedTransformer-style `blocks.{l}.`
+    // prefix to form a per-layer alias.
+    let components: &[(&str, &str, Vec<u64>, &str)] = &[
+        ("attn.q_proj", "output", vec![1, hidden], "attn.hook_q"),
+        ("attn.k_proj", "output", vec![1, hidden], "attn.hook_k"),
+        ("attn.v_proj", "output", vec![1, hidden], "attn.hook_v"),
+        ("attn.o_proj", "output", vec![1, hidden], "attn.hook_z"),
+        (
+            "attn.scores",
+            "output",
+            vec![1, heads, 1, 1],
+            "attn.hook_pattern",
+        ),
+        ("mlp", "output", vec![1, hidden], "hook_mlp_out"),
+        (
+            "residual_post",
+            "output",
+            vec![1, hidden],
+            "hook_resid_post",
+        ),
+    ];
+
+    let mut catalog = Vec::with_capacity(num_layers as usize * components.len());
+    for layer in 0..num_layers {
+        for (canonical, event, shape, alias_suffix) in components {
+            catalog.push(ProbePointEntry {
+                family: family.to_owned(),
+                layer,
+                canonical: (*canonical).to_owned(),
+                event: (*event).to_owned(),
+                tensor_shape: shape.clone(),
+                aliases: vec![format!("blocks.{layer}.{alias_suffix}")],
+            });
+        }
+    }
+    catalog
+}
+
 #[derive(Debug)]
 pub struct Session {
     state: SessionState,
     start_time: std::time::Instant,
     #[allow(dead_code)]
     detached_model_id: Option<String>,
+    /// Discoverable probe-points retained from the most recent attach.
+    /// Empty until a model is attached; cleared on detach.
+    catalog: Vec<ProbePointEntry>,
+    /// Named view specifications registered via `rocket/view.define`.
+    /// Keyed by view name; cleared on detach.
+    defined_views: HashMap<String, serde_json::Value>,
+    /// Event-stream filter captured from the most recent `subscribe` request.
+    /// `None` means no subscription (or an unfiltered subscription); the
+    /// event fan-out in `notifications.rs` consults this to decide which
+    /// notifications a subscriber should receive.
+    event_filter: Option<SubscribeFilter>,
 }
 
 impl Session {
@@ -67,12 +217,26 @@ impl Session {
             },
             start_time: std::time::Instant::now(),
             detached_model_id: None,
+            catalog: Vec::new(),
+            defined_views: HashMap::new(),
+            event_filter: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn state(&self) -> &SessionState {
         &self.state
+    }
+
+    /// Store the event-stream filter negotiated by a `subscribe` request.
+    /// Passing `None` clears any prior filter (unfiltered subscription).
+    pub fn set_event_filter(&mut self, filter: Option<SubscribeFilter>) {
+        self.event_filter = filter;
+    }
+
+    /// The event-stream filter currently in force, if any.
+    pub fn event_filter(&self) -> Option<&SubscribeFilter> {
+        self.event_filter.as_ref()
     }
 
     pub fn envelope<T>(&self, data: T) -> ResponseEnvelope<T> {
@@ -87,6 +251,44 @@ impl Session {
         ResponseEnvelope {
             state: self.state.clone(),
             data: None,
+        }
+    }
+
+    /// Build a response body honouring the client-requested [`EnvelopeMode`].
+    ///
+    /// LLM clients negotiate envelope verbosity to manage context-window
+    /// pressure (TCK `envelope-compactness.feature`):
+    /// - [`EnvelopeMode::Full`] — the complete [`SessionState`] envelope, the
+    ///   historical default. Identical wire shape to [`Self::envelope`].
+    /// - [`EnvelopeMode::Position`] — a compact [`PositionEnvelope`] carrying
+    ///   only `status` and tick `position`; omits `active_probes`,
+    ///   `checkpoints`, and the rest of [`SessionState`].
+    /// - [`EnvelopeMode::None`] — the bare `data` payload, with no envelope
+    ///   wrapper at all.
+    ///
+    /// The return type is [`serde_json::Value`] because the three modes have
+    /// genuinely different wire shapes; callers hand the result straight to
+    /// `serialize_envelope`.
+    pub fn envelope_with_mode<T: serde::Serialize>(
+        &self,
+        mode: EnvelopeMode,
+        data: T,
+    ) -> serde_json::Value {
+        match mode {
+            EnvelopeMode::Full => {
+                serde_json::to_value(self.envelope(data)).unwrap_or(serde_json::Value::Null)
+            }
+            EnvelopeMode::Position => {
+                let position = PositionEnvelope {
+                    status: self.state.status,
+                    position: self.state.position.clone(),
+                };
+                serde_json::json!({
+                    "state": position,
+                    "data": data,
+                })
+            }
+            EnvelopeMode::None => serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
         }
     }
 
@@ -130,7 +332,9 @@ impl Session {
             suggestion,
             current_state: Some(self.state.status),
             valid_states: Some(valid_states),
-            recovery_hint: None,
+            recovery_hint: Some(
+                crate::dispatch::recovery_hint_for(ErrorCode::InvalidState).to_owned(),
+            ),
             context: None,
         })
     }
@@ -154,8 +358,13 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
-                context: None,
+                recovery_hint: Some(format!(
+                    "Reconnect with protocol_version '{PROTOCOL_VERSION}'."
+                )),
+                context: Some(serde_json::json!({
+                    "requested_version": req.protocol_version,
+                    "supported_version": PROTOCOL_VERSION,
+                })),
             }));
         }
 
@@ -181,7 +390,9 @@ impl Session {
                 suggestion: "Detach the current model before attaching a new one".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::ModelAlreadyAttached).to_owned(),
+                ),
                 context: None,
             }));
         }
@@ -200,7 +411,10 @@ impl Session {
                         suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
                         current_state: Some(self.state.status),
                         valid_states: None,
-                        recovery_hint: None,
+                        recovery_hint: Some(
+                            crate::dispatch::recovery_hint_for(ErrorCode::CompiledModel)
+                                .to_owned(),
+                        ),
                         context: None,
                     }));
                 }
@@ -218,8 +432,13 @@ impl Session {
                 ),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
-                context: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::UnsupportedModel).to_owned(),
+                ),
+                context: Some(serde_json::json!({
+                    "attempted_family": req.model_family,
+                    "supported_families": SUPPORTED_FAMILIES,
+                })),
             }));
         }
 
@@ -246,6 +465,10 @@ impl Session {
         self.state.status = Status::Stopped;
         self.state.position = None;
         self.state.tick_id = None;
+        // Retain the discoverable probe-point catalog so `rocket/discover`
+        // can answer without a worker round-trip. Built from the worker's
+        // reported model metadata (BEAD-0008: metadata reflects the backend).
+        self.catalog = default_catalog(worker_model_type, num_layers, num_heads, hidden_dim);
         self.update_available_actions();
 
         self.envelope(AttachResponse {
@@ -289,7 +512,9 @@ impl Session {
                 suggestion: "No model is currently attached".to_owned(),
                 current_state: Some(self.state.status),
                 valid_states: None,
-                recovery_hint: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::ModelNotAttached).to_owned(),
+                ),
                 context: None,
             }));
         }
@@ -305,6 +530,10 @@ impl Session {
         self.state.tick_id = None;
         self.state.active_probes.clear();
         self.state.checkpoints.clear();
+        // Discovery metadata and view registrations belong to the attached
+        // model; drop them so a stale catalog cannot leak across attaches.
+        self.catalog.clear();
+        self.defined_views.clear();
         self.update_available_actions();
 
         Ok(self.envelope(DetachResponse {
@@ -342,7 +571,9 @@ impl Session {
                     suggestion: "Attach a model before calling this method".to_owned(),
                     current_state: Some(self.state.status),
                     valid_states: Some(vec![Status::Stopped]),
-                    recovery_hint: None,
+                    recovery_hint: Some(
+                        crate::dispatch::recovery_hint_for(ErrorCode::ModelNotAttached).to_owned(),
+                    ),
                     context: None,
                 }))
             }
@@ -373,18 +604,27 @@ impl Session {
             suggestion: format!("The {cap} capability is not supported in this build"),
             current_state: Some(self.state.status),
             valid_states: None,
-            recovery_hint: None,
-            context: None,
+            recovery_hint: Some(
+                crate::dispatch::recovery_hint_for(ErrorCode::CapabilityNotSupported).to_owned(),
+            ),
+            context: Some(serde_json::json!({ "capability": cap })),
         })
     }
 
+    /// Execute a step and build the response honouring `req.envelope`.
+    ///
+    /// The response wire shape depends on the client-requested
+    /// [`EnvelopeMode`] (TCK `envelope-compactness.feature`): `Full` carries
+    /// the complete [`SessionState`], `Position` only status + tick position,
+    /// `None` only the bare [`StepResponse`] data payload. The return type is
+    /// [`serde_json::Value`] so all three shapes flow through one path.
     #[allow(dead_code)]
     pub fn step(
         &mut self,
         req: &StepRequest,
         host_position: &TickPosition,
         _forward_complete: bool,
-    ) -> Result<ResponseEnvelope<StepResponse>, SessionError> {
+    ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/step")?;
 
         if req.direction == rocket_surgeon_protocol::types::StepDirection::Backward {
@@ -395,10 +635,11 @@ impl Session {
         self.state.position = Some(host_position.clone());
         self.update_available_actions();
 
-        Ok(self.envelope(StepResponse {
+        let data = StepResponse {
             ticks_executed: req.count,
             stopped_at: host_position.clone(),
-        }))
+        };
+        Ok(self.envelope_with_mode(req.envelope, data))
     }
 
     #[allow(dead_code)]
@@ -414,6 +655,160 @@ impl Session {
             view_result: None,
             slice_data,
         }))
+    }
+
+    /// Discover probe-points matching a wildcard `pattern`.
+    ///
+    /// `pattern` is a 5-segment `family:rank:layer:component:event` string
+    /// where any segment may be `*`. Returns every retained probe-point that
+    /// matches, sorted by `(layer, canonical)` for deterministic output.
+    ///
+    /// On zero exact matches, `suggestions` is populated with nearest valid
+    /// patterns — distinct canonical component names from the catalog that
+    /// share at least the family/layer/event of the requested pattern — so an
+    /// LLM client can self-correct a typo'd component name.
+    pub fn discover(
+        &self,
+        pattern: &str,
+    ) -> Result<ResponseEnvelope<DiscoverResponse>, SessionError> {
+        self.require_stopped("rocket/discover")?;
+
+        let Some(parsed) = DiscoverPattern::parse(pattern) else {
+            return Err(SessionError::InvalidParams(ErrorData {
+                error_code: ErrorCode::InvalidParams,
+                numeric_code: Some(ErrorCode::InvalidParams.numeric_code()),
+                severity: Severity::Recoverable,
+                suggestion: format!(
+                    "Discover pattern '{pattern}' is not a 5-segment \
+                     'family:rank:layer:component:event' string"
+                ),
+                current_state: Some(self.state.status),
+                valid_states: None,
+                recovery_hint: Some(
+                    "Use a pattern like 'llama:*:12:*:output'; segments may be '*'".to_owned(),
+                ),
+                context: None,
+            }));
+        };
+
+        let mut entries: Vec<&ProbePointEntry> = self
+            .catalog
+            .iter()
+            .filter(|entry| parsed.matches(entry))
+            .collect();
+        entries.sort_by(|a, b| {
+            a.layer
+                .cmp(&b.layer)
+                .then_with(|| a.canonical.cmp(&b.canonical))
+        });
+        let matches: Vec<DiscoverMatch> = entries
+            .into_iter()
+            .map(|entry| DiscoverMatch {
+                canonical: entry.canonical.clone(),
+                tensor_shape: entry.tensor_shape.clone(),
+                aliases: entry.aliases.clone(),
+            })
+            .collect();
+
+        let suggestions = if matches.is_empty() {
+            self.suggest_patterns(pattern, &parsed)
+        } else {
+            Vec::new()
+        };
+
+        Ok(self.envelope(DiscoverResponse {
+            matches,
+            suggestions,
+        }))
+    }
+
+    /// Build "nearest valid pattern" suggestions for a discover query that
+    /// returned no matches. We relax the component segment to each distinct
+    /// canonical name available under the requested family/event, rewriting
+    /// the requested pattern's component slot.
+    ///
+    /// The layer constraint is first applied, then dropped as a fallback: a
+    /// near-miss on a layer that does not exist (e.g. `llama:*:12:...` on a
+    /// 7-layer model) still yields useful component-name corrections.
+    fn suggest_patterns(&self, pattern: &str, parsed: &DiscoverPattern<'_>) -> Vec<String> {
+        let segs: Vec<&str> = pattern.split(':').collect();
+        // `parse` already guaranteed exactly 5 non-empty segments.
+        debug_assert_eq!(segs.len(), 5);
+
+        let collect_canonicals = |respect_layer: bool| -> Vec<String> {
+            let mut canonicals: Vec<&str> = self
+                .catalog
+                .iter()
+                .filter(|e| {
+                    parsed.family.matches(&e.family)
+                        && (!respect_layer || parsed.layer.matches(&e.layer.to_string()))
+                        && parsed.event.matches(&e.event)
+                })
+                .map(|e| e.canonical.as_str())
+                .collect();
+            canonicals.sort_unstable();
+            canonicals.dedup();
+            canonicals
+                .into_iter()
+                .map(|canonical| {
+                    format!(
+                        "{}:{}:{}:{}:{}",
+                        segs[0], segs[1], segs[2], canonical, segs[4]
+                    )
+                })
+                .collect()
+        };
+
+        let strict = collect_canonicals(true);
+        if strict.is_empty() {
+            // Layer is out of range — relax it so component typos still get
+            // corrected.
+            collect_canonicals(false)
+        } else {
+            strict
+        }
+    }
+
+    /// Register a named view specification (`rocket/view.define`).
+    ///
+    /// Stores `spec` under `name` so a later `rocket/view` could resolve a
+    /// user-defined view by name. Redefining an existing name overwrites the
+    /// prior spec and is reported as `registered: true` (idempotent upsert).
+    pub fn define_view(
+        &mut self,
+        name: &str,
+        spec: serde_json::Value,
+    ) -> Result<ResponseEnvelope<ViewDefineResponse>, SessionError> {
+        self.require_stopped("rocket/view.define")?;
+
+        if name.trim().is_empty() {
+            return Err(SessionError::InvalidParams(ErrorData {
+                error_code: ErrorCode::InvalidParams,
+                numeric_code: Some(ErrorCode::InvalidParams.numeric_code()),
+                severity: Severity::Recoverable,
+                suggestion: "View name must be a non-empty string".to_owned(),
+                current_state: Some(self.state.status),
+                valid_states: None,
+                recovery_hint: Some(
+                    "Provide a 'name' field identifying the view, e.g. \"my_view\"".to_owned(),
+                ),
+                context: None,
+            }));
+        }
+
+        self.defined_views.insert(name.to_owned(), spec);
+
+        Ok(self.envelope(ViewDefineResponse {
+            name: name.to_owned(),
+            registered: true,
+        }))
+    }
+
+    /// Look up a previously-defined view spec by name. Used by `rocket/view`
+    /// to resolve user-defined views.
+    #[allow(dead_code)]
+    pub fn defined_view(&self, name: &str) -> Option<&serde_json::Value> {
+        self.defined_views.get(name)
     }
 }
 
@@ -714,7 +1109,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let host_position = TickPosition {
@@ -732,10 +1127,10 @@ mod tests {
         let result = session.step(&req, &host_position, false);
         assert!(result.is_ok());
         let envelope = result.unwrap();
-        assert_eq!(envelope.state.status, Status::Stopped);
-        let data = envelope.data.as_ref().unwrap();
-        assert_eq!(data.ticks_executed, 1);
-        assert_eq!(data.stopped_at.component, "q_proj");
+        assert_eq!(envelope["state"]["status"], "stopped");
+        let data = &envelope["data"];
+        assert_eq!(data["ticks_executed"], 1);
+        assert_eq!(data["stopped_at"]["component"], "q_proj");
     }
 
     #[test]
@@ -745,7 +1140,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: None,
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -771,7 +1166,7 @@ mod tests {
             direction: StepDirection::Backward,
             count: 1,
             granularity: None,
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -800,7 +1195,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos1 = TickPosition {
@@ -841,7 +1236,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -871,7 +1266,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -887,10 +1282,11 @@ mod tests {
             clock: None,
         };
         let envelope = session.step(&req, &pos, false).unwrap();
-        assert!(envelope.state.session_id.len() == 36);
-        assert!(envelope.state.model_id.is_some());
-        assert_eq!(envelope.state.status, Status::Stopped);
-        assert!(envelope.state.available_actions.contains(&ActionName::Step));
+        assert_eq!(envelope["state"]["session_id"].as_str().unwrap().len(), 36);
+        assert!(envelope["state"]["model_id"].is_string());
+        assert_eq!(envelope["state"]["status"], "stopped");
+        let actions = envelope["state"]["available_actions"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "step"));
     }
 
     fn sample_tensor_summary() -> TensorSummary {
@@ -960,7 +1356,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -984,5 +1380,306 @@ mod tests {
         assert_eq!(session.state().tick_id, tick_before);
         assert_eq!(session.state().position, pos_before);
         assert_eq!(session.state().status, Status::Stopped);
+    }
+
+    // --- discover tests ---
+
+    #[test]
+    fn discover_wildcard_returns_matching_points() {
+        let session = stopped_session();
+        // model_family in test_attach is "llama"; layer 5 exists (7 layers).
+        let envelope = session.discover("llama:*:5:*:output").unwrap();
+        let data = envelope.data.as_ref().unwrap();
+        assert!(
+            !data.matches.is_empty(),
+            "wildcard component should match layer-5 points"
+        );
+        for m in &data.matches {
+            assert!(!m.canonical.is_empty());
+            assert!(!m.tensor_shape.is_empty());
+            assert!(!m.aliases.is_empty(), "every match carries aliases");
+        }
+        assert!(
+            data.suggestions.is_empty(),
+            "exact matches => no suggestions"
+        );
+    }
+
+    #[test]
+    fn discover_specific_component_matches_one_per_layer() {
+        let session = stopped_session();
+        // attn.q_proj exists once per layer => exactly TEST_NUM_LAYERS matches.
+        let envelope = session.discover("llama:*:*:attn.q_proj:output").unwrap();
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.matches.len(), TEST_NUM_LAYERS as usize);
+        for m in &data.matches {
+            assert_eq!(m.canonical, "attn.q_proj");
+        }
+    }
+
+    #[test]
+    fn discover_no_match_returns_suggestions() {
+        let session = stopped_session();
+        // out_proj is not a real canonical name (it is o_proj) => 0 matches.
+        let envelope = session.discover("llama:*:5:attn.out_proj:output").unwrap();
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.matches.len(), 0);
+        assert!(
+            !data.suggestions.is_empty(),
+            "a near-miss component should produce suggestions"
+        );
+        // Suggestions rewrite only the component slot, preserving structure.
+        for s in &data.suggestions {
+            assert_eq!(s.split(':').count(), 5);
+            assert!(s.starts_with("llama:*:5:"));
+            assert!(s.ends_with(":output"));
+        }
+        // The real component (attn.o_proj) is among the suggestions.
+        assert!(
+            data.suggestions
+                .iter()
+                .any(|s| s == "llama:*:5:attn.o_proj:output")
+        );
+    }
+
+    #[test]
+    fn discover_family_mismatch_returns_no_matches() {
+        let session = stopped_session();
+        let envelope = session.discover("mixtral:*:5:*:output").unwrap();
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.matches.len(), 0);
+    }
+
+    #[test]
+    fn discover_invalid_pattern_returns_invalid_params_with_recovery_hint() {
+        let session = stopped_session();
+        // 6 segments — a probe-point string, not a discover pattern.
+        let err = session
+            .discover("llama:0:5:attn.q_proj:0:output")
+            .unwrap_err();
+        let data = err.error_data();
+        assert_eq!(data.error_code, ErrorCode::InvalidParams);
+        assert!(
+            data.recovery_hint.is_some(),
+            "v0.3.0 requires recovery_hint"
+        );
+    }
+
+    #[test]
+    fn discover_when_not_attached_returns_model_not_attached() {
+        let session = initialized_session();
+        let err = session.discover("llama:*:*:*:output").unwrap_err();
+        assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn discover_catalog_cleared_after_detach() {
+        let mut session = stopped_session();
+        assert!(!session.catalog.is_empty());
+        session.detach().unwrap();
+        assert!(session.catalog.is_empty(), "detach drops the catalog");
+    }
+
+    #[test]
+    fn discover_results_are_deterministically_sorted() {
+        let session = stopped_session();
+        let first = session.discover("llama:*:3:*:output").unwrap();
+        let second = session.discover("llama:*:3:*:output").unwrap();
+        assert_eq!(
+            first.data.as_ref().unwrap().matches,
+            second.data.as_ref().unwrap().matches
+        );
+    }
+
+    // --- view.define tests ---
+
+    #[test]
+    fn define_view_registers_spec() {
+        let mut session = stopped_session();
+        let spec = serde_json::json!({"reduce": "l2_norm", "over": "residual"});
+        let envelope = session.define_view("my_view", spec.clone()).unwrap();
+        let data = envelope.data.as_ref().unwrap();
+        assert_eq!(data.name, "my_view");
+        assert!(data.registered);
+        assert_eq!(session.defined_view("my_view"), Some(&spec));
+    }
+
+    #[test]
+    fn define_view_redefine_overwrites_spec() {
+        let mut session = stopped_session();
+        session
+            .define_view("v", serde_json::json!({"version": 1}))
+            .unwrap();
+        let envelope = session
+            .define_view("v", serde_json::json!({"version": 2}))
+            .unwrap();
+        assert!(envelope.data.as_ref().unwrap().registered);
+        assert_eq!(
+            session.defined_view("v"),
+            Some(&serde_json::json!({"version": 2}))
+        );
+    }
+
+    #[test]
+    fn define_view_empty_name_returns_invalid_params_with_recovery_hint() {
+        let mut session = stopped_session();
+        let err = session
+            .define_view("   ", serde_json::json!({}))
+            .unwrap_err();
+        let data = err.error_data();
+        assert_eq!(data.error_code, ErrorCode::InvalidParams);
+        assert!(
+            data.recovery_hint.is_some(),
+            "v0.3.0 requires recovery_hint"
+        );
+    }
+
+    #[test]
+    fn define_view_when_not_attached_returns_model_not_attached() {
+        let mut session = initialized_session();
+        let err = session.define_view("v", serde_json::json!({})).unwrap_err();
+        assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn define_view_registry_cleared_after_detach() {
+        let mut session = stopped_session();
+        session
+            .define_view("v", serde_json::json!({"k": "v"}))
+            .unwrap();
+        session.detach().unwrap();
+        assert!(
+            session.defined_views.is_empty(),
+            "detach drops view registry"
+        );
+    }
+
+    #[test]
+    fn unknown_defined_view_returns_none() {
+        let session = stopped_session();
+        assert!(session.defined_view("does_not_exist").is_none());
+    }
+
+    // --- EnvelopeMode tests (TCK envelope-compactness.feature) ---
+
+    fn step_req(envelope: EnvelopeMode) -> StepRequest {
+        StepRequest {
+            direction: StepDirection::Forward,
+            count: 1,
+            granularity: Some(TickGranularity::Component),
+            envelope,
+            run_to: None,
+        }
+    }
+
+    fn step_pos() -> TickPosition {
+        TickPosition {
+            tick_id: 9,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 4,
+            component: "attn.q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+            phase: Phase::Decode,
+            token_position: None,
+            clock: None,
+        }
+    }
+
+    #[test]
+    fn step_full_envelope_includes_complete_session_state() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::Full), &step_pos(), false)
+            .unwrap();
+        let state = &value["state"];
+        // The full envelope carries the entire SessionState.
+        assert!(state.get("session_id").is_some());
+        assert!(state.get("status").is_some());
+        assert!(state.get("active_probes").is_some());
+        assert!(state.get("checkpoints").is_some());
+        assert!(state.get("available_actions").is_some());
+        assert!(value.get("data").is_some());
+    }
+
+    #[test]
+    fn step_default_envelope_is_full() {
+        // No explicit envelope field -> EnvelopeMode default -> Full.
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::default()), &step_pos(), false)
+            .unwrap();
+        assert!(value["state"].get("active_probes").is_some());
+        assert!(value["state"].get("checkpoints").is_some());
+    }
+
+    #[test]
+    fn step_position_envelope_has_status_and_position_only() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::Position), &step_pos(), false)
+            .unwrap();
+        let state = &value["state"];
+        // Position envelope keeps status and tick position...
+        assert_eq!(state["status"], "stopped");
+        assert_eq!(state["position"]["layer"], 4);
+        assert_eq!(state["position"]["component"], "attn.q_proj");
+        // ...but omits the heavier SessionState fields.
+        assert!(state.get("active_probes").is_none());
+        assert!(state.get("checkpoints").is_none());
+        assert!(state.get("session_id").is_none());
+        assert!(state.get("available_actions").is_none());
+        // The data payload is still present.
+        assert_eq!(value["data"]["ticks_executed"], 1);
+    }
+
+    #[test]
+    fn step_none_envelope_is_data_payload_only() {
+        let mut session = stopped_session();
+        let value = session
+            .step(&step_req(EnvelopeMode::None), &step_pos(), false)
+            .unwrap();
+        // No envelope wrapper at all: the StepResponse fields are top-level.
+        assert!(value.get("state").is_none());
+        assert!(value.get("data").is_none());
+        assert_eq!(value["ticks_executed"], 1);
+        assert_eq!(value["stopped_at"]["component"], "attn.q_proj");
+    }
+
+    #[test]
+    fn envelope_with_mode_position_reflects_no_position_before_step() {
+        // Position envelope on a freshly-stopped session: status is set,
+        // position is still null (no step taken yet).
+        let session = stopped_session();
+        let value = session.envelope_with_mode(EnvelopeMode::Position, serde_json::json!({"x": 1}));
+        assert_eq!(value["state"]["status"], "stopped");
+        assert!(value["state"]["position"].is_null());
+        assert_eq!(value["data"]["x"], 1);
+    }
+
+    // --- SubscribeFilter session-state tests ---
+
+    #[test]
+    fn event_filter_defaults_to_none() {
+        let session = stopped_session();
+        assert!(session.event_filter().is_none());
+    }
+
+    #[test]
+    fn set_event_filter_stores_and_clears() {
+        let mut session = stopped_session();
+        let filter = SubscribeFilter {
+            events: Some(vec![
+                rocket_surgeon_protocol::messages::EventType::TickStopped,
+            ]),
+            layers: Some(vec![10, 11, 12]),
+            components: None,
+        };
+        session.set_event_filter(Some(filter.clone()));
+        assert_eq!(session.event_filter(), Some(&filter));
+
+        session.set_event_filter(None);
+        assert!(session.event_filter().is_none());
     }
 }

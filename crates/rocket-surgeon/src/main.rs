@@ -20,7 +20,7 @@ use crate::dispatch::{
     dispatch, handle_attach, handle_inspect, handle_probe, handle_step, handle_subscribe,
     handle_unsubscribe, handle_view,
 };
-use crate::notifications::send_notification;
+use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
 use crate::server::{read_message, write_message};
 use crate::session::Session;
@@ -142,14 +142,16 @@ fn try_orchestrator_step(
     let step_req: rocket_surgeon_protocol::messages::StepRequest = request
         .params
         .as_ref()
-        .map_or(
-            Ok(rocket_surgeon_protocol::messages::StepRequest {
-                direction: rocket_surgeon_protocol::types::StepDirection::Forward,
-                count: 1,
-                granularity: None,
-                envelope: Default::default(),
-                run_to: None,
-            }),
+        .map_or_else(
+            || {
+                Ok(rocket_surgeon_protocol::messages::StepRequest {
+                    direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+                    count: 1,
+                    granularity: None,
+                    envelope: rocket_surgeon_protocol::types::EnvelopeMode::default(),
+                    run_to: None,
+                })
+            },
             |p| serde_json::from_value(p.clone()),
         )
         .ok()?;
@@ -433,11 +435,12 @@ fn main() {
                     per_rank_status: vec![],
                 };
                 let params = serde_json::to_value(&hb).expect("serialize heartbeat");
-                if let Err(e) = send_notification(
+                if let Err(e) = send_notification_filtered(
                     &mut writer,
                     &mut notification_seq,
                     event::TICK_HEARTBEAT,
                     params,
+                    session.event_filter(),
                 ) {
                     error!("failed to send heartbeat: {e}");
                     break;
@@ -592,7 +595,7 @@ fn main() {
             }
             resp
         } else if request.method == method::SUBSCRIBE {
-            let resp = handle_subscribe(&session, &request);
+            let resp = handle_subscribe(&mut session, &request);
             if resp.error.is_none() {
                 events_enabled = true;
             }
@@ -693,11 +696,12 @@ fn main() {
                 state: session.state().status,
             };
             let params = serde_json::to_value(&stopped).expect("serialize tick.stopped");
-            if let Err(e) = send_notification(
+            if let Err(e) = send_notification_filtered(
                 &mut writer,
                 &mut notification_seq,
                 event::TICK_STOPPED,
                 params,
+                session.event_filter(),
             ) {
                 error!("failed to send tick.stopped: {e}");
                 break;
@@ -714,11 +718,12 @@ fn main() {
             if let Some(ref hr) = step_host_response {
                 for pe in &hr.events {
                     let params = serde_json::to_value(pe).expect("serialize probe.fired");
-                    if let Err(e) = send_notification(
+                    if let Err(e) = send_notification_filtered(
                         &mut writer,
                         &mut notification_seq,
                         event::PROBE_FIRED,
                         params,
+                        session.event_filter(),
                     ) {
                         error!("failed to send probe.fired: {e}");
                         break;

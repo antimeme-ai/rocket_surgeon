@@ -540,6 +540,10 @@ pub struct DiscoverResponse {
 // rocket/view.focus
 // ---------------------------------------------------------------------------
 
+// The `By` prefix is intentional and part of the frozen v0.3.0 wire schema
+// (serde renames to snake_case `by_id` / `by_position` / ...). Renaming the
+// variants to satisfy the lint would change the protocol.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FocusSelector {
@@ -585,7 +589,7 @@ pub struct SweepTrial {
     pub collect: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SweepMetric {
     #[serde(rename = "type")]
     pub metric_type: String,
@@ -695,14 +699,14 @@ pub struct ErrorEvent {
     pub fatal: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvUpdateEvent {
     pub layer: u32,
     pub new_positions: Vec<u64>,
     pub total_positions: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvEvictedEvent {
     pub layer: u32,
     pub evicted_positions: Vec<u64>,
@@ -1178,7 +1182,7 @@ mod tests {
 
     #[test]
     fn subscribe_request_backward_compat_no_filter() {
-        let json = r#"{}"#;
+        let json = r"{}";
         let parsed: SubscribeRequest = serde_json::from_str(json).unwrap();
         assert!(parsed.filter.is_none());
     }

@@ -44,7 +44,7 @@ def run_test() -> None:  # noqa: PLR0915
                 "initialize",
                 {
                     "client_name": "e2e-shm-test",
-                    "protocol_version": "0.1.0",
+                    "protocol_version": "0.3.0",
                 },
                 req_id,
             ),
