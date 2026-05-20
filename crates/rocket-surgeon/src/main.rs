@@ -142,14 +142,16 @@ fn try_orchestrator_step(
     let step_req: rocket_surgeon_protocol::messages::StepRequest = request
         .params
         .as_ref()
-        .map_or(
-            Ok(rocket_surgeon_protocol::messages::StepRequest {
-                direction: rocket_surgeon_protocol::types::StepDirection::Forward,
-                count: 1,
-                granularity: None,
-                envelope: Default::default(),
-                run_to: None,
-            }),
+        .map_or_else(
+            || {
+                Ok(rocket_surgeon_protocol::messages::StepRequest {
+                    direction: rocket_surgeon_protocol::types::StepDirection::Forward,
+                    count: 1,
+                    granularity: None,
+                    envelope: rocket_surgeon_protocol::types::EnvelopeMode::default(),
+                    run_to: None,
+                })
+            },
             |p| serde_json::from_value(p.clone()),
         )
         .ok()?;

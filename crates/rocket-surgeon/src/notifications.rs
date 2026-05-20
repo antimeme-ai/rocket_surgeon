@@ -102,7 +102,7 @@ fn component_glob_matches(pattern: &str, component: &str) -> bool {
 
 /// Decide whether an event should be delivered to a subscriber.
 ///
-/// Per `subscribe-filter.feature` the three filter dimensions are ANDed: an
+/// Per `subscribe-filter.feature` the three filter dimensions are `ANDed`: an
 /// event must satisfy every dimension the subscriber specified. A dimension
 /// left unset (`None`) is unconstrained. A `None` filter delivers everything.
 ///

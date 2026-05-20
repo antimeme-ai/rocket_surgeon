@@ -275,8 +275,9 @@ impl Session {
         data: T,
     ) -> serde_json::Value {
         match mode {
-            EnvelopeMode::Full => serde_json::to_value(self.envelope(data))
-                .unwrap_or_else(|_| serde_json::Value::Null),
+            EnvelopeMode::Full => {
+                serde_json::to_value(self.envelope(data)).unwrap_or(serde_json::Value::Null)
+            }
             EnvelopeMode::Position => {
                 let position = PositionEnvelope {
                     status: self.state.status,
@@ -287,9 +288,7 @@ impl Session {
                     "data": data,
                 })
             }
-            EnvelopeMode::None => {
-                serde_json::to_value(data).unwrap_or_else(|_| serde_json::Value::Null)
-            }
+            EnvelopeMode::None => serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
         }
     }
 
@@ -1107,7 +1106,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let host_position = TickPosition {
@@ -1138,7 +1137,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: None,
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -1164,7 +1163,7 @@ mod tests {
             direction: StepDirection::Backward,
             count: 1,
             granularity: None,
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -1193,7 +1192,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos1 = TickPosition {
@@ -1234,7 +1233,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -1264,7 +1263,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
@@ -1354,7 +1353,7 @@ mod tests {
             direction: StepDirection::Forward,
             count: 1,
             granularity: Some(TickGranularity::Component),
-            envelope: Default::default(),
+            envelope: EnvelopeMode::default(),
             run_to: None,
         };
         let pos = TickPosition {
