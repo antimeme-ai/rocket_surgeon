@@ -38,24 +38,30 @@ def compute_view(
     raise ValueError(msg)
 
 
+def _decoder_layer_paths(model: Any) -> list[tuple[int, str]]:
+    """Discover decoder-block module paths, architecture-agnostically.
+
+    The decoder blocks live in the one ``nn.ModuleList`` whose length equals
+    ``config.num_hidden_layers`` — ``model.layers`` for Llama, ``transformer.h``
+    for GPT-2. Returns ``(layer_index, module_path)`` pairs in layer order;
+    the paths match the keys the worker's hooks write into ``last_outputs``.
+    """
+    num_layers: int = getattr(model.config, "num_hidden_layers", 0)
+    if num_layers <= 0:
+        return []
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.ModuleList) and len(module) == num_layers:
+            return [(i, f"{name}.{i}") for i in range(num_layers)]
+    return []
+
+
 def _residual_stream_norm(
     model_handle: int,
     last_outputs: dict[tuple[str, int], Any],
 ) -> dict[str, Any]:
     model = bridge._models[model_handle]  # noqa: SLF001
 
-    layer_paths: list[tuple[int, str]] = []
-    layer_path_depth = 3
-    for name, _ in model.named_modules():
-        parts = name.split(".")
-        if len(parts) == layer_path_depth and parts[0] == "model" and parts[1] == "layers":
-            try:
-                layer_idx = int(parts[2])
-                layer_paths.append((layer_idx, name))
-            except ValueError:
-                continue
-
-    layer_paths.sort(key=lambda x: x[0])
+    layer_paths = _decoder_layer_paths(model)
 
     norms: list[float] = []
     layers: list[int] = []

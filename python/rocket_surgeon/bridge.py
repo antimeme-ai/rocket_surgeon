@@ -35,6 +35,10 @@ def load_model(source: str, device: str, dtype: str) -> int:
     module: torch.nn.Module = model
     if device == "cpu":
         module = model.to(device)  # type: ignore[arg-type]
+    # A debugger must observe deterministic forward passes — eval mode disables
+    # dropout and other train-time stochasticity. from_pretrained already
+    # returns eval mode; this makes the invariant explicit and load-bearing.
+    module.eval()
     handle = _next_handle
     _next_handle += 1
     _models[handle] = module
