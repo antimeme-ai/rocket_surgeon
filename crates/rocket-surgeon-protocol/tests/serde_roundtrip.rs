@@ -396,7 +396,7 @@ fn capabilities_phase1_defaults_roundtrip() {
     roundtrip(&caps);
 
     let json = serde_json::to_value(&caps).unwrap();
-    assert_eq!(json["protocol_version"], "0.2.0");
+    assert_eq!(json["protocol_version"], "0.3.0");
     assert_eq!(json["supports_moe"], false);
     assert_eq!(json["execution_mode"], "eager");
     assert_eq!(json["parallelism"], "single_gpu");

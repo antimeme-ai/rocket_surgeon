@@ -432,7 +432,7 @@ impl Capabilities {
     #[must_use]
     pub fn phase1_defaults() -> Self {
         Self {
-            protocol_version: "0.2.0".to_owned(),
+            protocol_version: "0.3.0".to_owned(),
             supports_reverse_step: false,
             supports_checkpointing: false,
             supports_moe: false,
@@ -454,9 +454,14 @@ impl Capabilities {
             built_in_views: vec![
                 BuiltInView::ResidualStreamNorm,
                 BuiltInView::AttentionPattern,
+                BuiltInView::LogitLens,
+                BuiltInView::TunedLens,
+                BuiltInView::KvCacheRibbon,
+                BuiltInView::KvCacheDetail,
+                BuiltInView::WorldlineDag,
             ],
             head_granularity: HeadGranularity::Unavailable,
-            transports: vec![Transport::Stdio, Transport::UnixSocket],
+            transports: vec![Transport::Stdio, Transport::UnixSocket, Transport::Websocket],
             wire_formats: vec![WireFormat::Json],
             max_response_bytes: 65536,
             model_family: None,

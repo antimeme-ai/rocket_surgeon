@@ -42,7 +42,7 @@ impl SessionError {
 }
 
 const SUPPORTED_FAMILIES: &[&str] = &["llama", "mixtral", "gpt-neox", "gpt2"];
-const PROTOCOL_VERSION: &str = "0.2.0";
+const PROTOCOL_VERSION: &str = "0.3.0";
 
 #[derive(Debug)]
 pub struct Session {
@@ -429,7 +429,7 @@ mod tests {
     fn init_request() -> InitializeRequest {
         InitializeRequest {
             client_name: "test-client".to_owned(),
-            protocol_version: "0.2.0".to_owned(),
+            protocol_version: "0.3.0".to_owned(),
             client_version: None,
             client_capabilities: None,
         }
@@ -499,7 +499,7 @@ mod tests {
         let mut session = Session::new();
         let resp = session.initialize(&init_request()).unwrap();
         let caps = &resp.data.as_ref().unwrap().capabilities;
-        assert_eq!(caps.protocol_version, "0.2.0");
+        assert_eq!(caps.protocol_version, "0.3.0");
         assert_eq!(caps.execution_mode, ExecutionMode::Eager);
     }
 
