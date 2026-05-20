@@ -1,3 +1,5 @@
+use ratatui::layout::Rect;
+
 use crate::state::{UiState, ViewId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,14 +15,6 @@ pub enum Layout {
         bottom: Box<Layout>,
         ratio: f32,
     },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Rect {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
 }
 
 impl Layout {
@@ -58,44 +52,18 @@ impl Layout {
             Layout::HSplit { left, right, ratio } => {
                 let left_width = (area.width as f32 * ratio) as u16;
                 let right_width = area.width.saturating_sub(left_width);
-                left.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y,
-                        width: left_width,
-                        height: area.height,
-                    },
-                    out,
-                );
+                left.resolve_into(Rect::new(area.x, area.y, left_width, area.height), out);
                 right.resolve_into(
-                    Rect {
-                        x: area.x + left_width,
-                        y: area.y,
-                        width: right_width,
-                        height: area.height,
-                    },
+                    Rect::new(area.x + left_width, area.y, right_width, area.height),
                     out,
                 );
             }
             Layout::VSplit { top, bottom, ratio } => {
                 let top_height = (area.height as f32 * ratio) as u16;
                 let bottom_height = area.height.saturating_sub(top_height);
-                top.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y,
-                        width: area.width,
-                        height: top_height,
-                    },
-                    out,
-                );
+                top.resolve_into(Rect::new(area.x, area.y, area.width, top_height), out);
                 bottom.resolve_into(
-                    Rect {
-                        x: area.x,
-                        y: area.y + top_height,
-                        width: area.width,
-                        height: bottom_height,
-                    },
+                    Rect::new(area.x, area.y + top_height, area.width, bottom_height),
                     out,
                 );
             }
@@ -150,12 +118,7 @@ mod tests {
     use crate::state::initial_ui_state;
 
     fn full_screen() -> Rect {
-        Rect {
-            x: 0,
-            y: 0,
-            width: 200,
-            height: 60,
-        }
+        Rect::new(0, 0, 200, 60)
     }
 
     #[test]

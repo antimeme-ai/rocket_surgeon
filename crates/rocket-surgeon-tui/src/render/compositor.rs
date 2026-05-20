@@ -8,21 +8,14 @@ use crate::state::{UiState, ViewId, ViewKind};
 use crate::tiling::Layout;
 
 pub fn render_frame(frame: &mut Frame<'_>, layout: &Layout, state: &UiState) {
-    let area = frame.area();
-    let allocations = layout.resolve(crate::tiling::Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height,
-    });
+    let allocations = layout.resolve(frame.area());
 
-    for (view_id, tile_rect) in &allocations {
-        let rect = Rect::new(tile_rect.x, tile_rect.y, tile_rect.width, tile_rect.height);
+    for (view_id, rect) in &allocations {
         let view = state.views.iter().find(|v| &v.id == view_id);
         match view.map(|v| &v.kind) {
-            Some(ViewKind::StatusBar) => render_status_bar(frame, rect, state),
-            Some(ViewKind::CommandLine) => render_command_line(frame, rect, state),
-            _ => render_placeholder(frame, rect, view_id),
+            Some(ViewKind::StatusBar) => render_status_bar(frame, *rect, state),
+            Some(ViewKind::CommandLine) => render_command_line(frame, *rect, state),
+            _ => render_placeholder(frame, *rect, view_id),
         }
     }
 }

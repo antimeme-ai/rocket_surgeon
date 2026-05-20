@@ -89,7 +89,8 @@ impl Connection {
         method: impl Into<String>,
         params: serde_json::Value,
     ) -> Result<Response, ClientError> {
-        let id = RequestId::Number(self.next_id.fetch_add(1, Ordering::Relaxed) as i64);
+        let raw = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = RequestId::Number((raw % (i64::MAX as u64)) as i64);
         let req = Request::new(id.clone(), method, params);
 
         let body = serde_json::to_string(&req)?;
