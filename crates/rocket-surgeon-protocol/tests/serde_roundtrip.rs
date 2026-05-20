@@ -3,29 +3,29 @@ use rocket_surgeon_protocol::jsonrpc::{
     JSONRPC_VERSION, Notification, RawMessage, Request, RequestId, Response, RpcError,
 };
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, AttachResponse, BranchCompareRequest, BranchCompareResponse,
-    BranchCreatedEvent, BranchDropRequest, BranchDropResponse, BranchForkRequest,
-    BranchForkResponse, BranchTier, BranchTierChangedEvent, CheckpointRequest,
-    CheckpointResponse, CreateCheckpointTier, DetachRequest, DetachResponse, DiscoverMatch,
-    DiscoverRequest, DiscoverResponse, Divergence, ErrorEvent, EventType, FocusAnchor,
-    FocusSelector, HostViewRequest, HostViewResponse, InitializeRequest, InitializeResponse,
-    InspectDetail, InspectRequest, InspectResponse, InterveneRequest, KvCacheEntry,
-    KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest, KvReadResponse, KvSlot, KvUpdateEvent,
-    MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse, ReplayDivergenceEvent,
-    ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest, StatusResponse, StepRequest,
-    StepResponse, SubscribeFilter, SubscribeRequest, SubscribeResponse, SweepMetric,
-    SweepRequest, SweepResponse, SweepTrial, SweepTrialResult, TickHeartbeatEvent,
-    TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest,
-    ViewDefineResponse, ViewFocusRequest, ViewFocusResponse, ViewRequest, ViewResponse,
+    AttachRequest, AttachResponse, BranchCompareRequest, BranchCompareResponse, BranchCreatedEvent,
+    BranchDropRequest, BranchDropResponse, BranchForkRequest, BranchForkResponse, BranchTier,
+    BranchTierChangedEvent, CheckpointRequest, CheckpointResponse, CreateCheckpointTier,
+    DetachRequest, DetachResponse, DiscoverMatch, DiscoverRequest, DiscoverResponse, Divergence,
+    ErrorEvent, EventType, FocusAnchor, FocusSelector, HostViewRequest, HostViewResponse,
+    InitializeRequest, InitializeResponse, InspectDetail, InspectRequest, InspectResponse,
+    InterveneRequest, KvCacheEntry, KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest,
+    KvReadResponse, KvSlot, KvUpdateEvent, MemoryUsage, ProbeFiredEvent, ProbeRequest,
+    ProbeResponse, ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt,
+    StatusRequest, StatusResponse, StepRequest, StepResponse, SubscribeFilter, SubscribeRequest,
+    SubscribeResponse, SweepMetric, SweepRequest, SweepResponse, SweepTrial, SweepTrialResult,
+    TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse,
+    ViewDefineRequest, ViewDefineResponse, ViewFocusRequest, ViewFocusResponse, ViewRequest,
+    ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
     AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
-    CompositionMode, ComponentEntry, DType, EnvelopeMode, ExecutionMode, GranularityScope,
+    ComponentEntry, CompositionMode, DType, EnvelopeMode, ExecutionMode, GranularityScope,
     HeadGranularity, Histogram, InterventionParams, InterventionRecipe, InterventionType,
     Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
     ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status, StepDirection,
-    TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity,
-    TickLayerInfo, TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat,
+    TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity, TickLayerInfo,
+    TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat,
 };
 use serde_json::json;
 
@@ -260,10 +260,10 @@ fn intervention_recipe_roundtrip() {
 #[test]
 fn intervention_params_variants() {
     roundtrip(&InterventionParams::Ablate {
-            mode: AblateMode::default(),
-            reference_run: None,
-            reference_tensor_id: None,
-        });
+        mode: AblateMode::default(),
+        reference_run: None,
+        reference_tensor_id: None,
+    });
     roundtrip(&InterventionParams::Scale { factor: 2.0 });
     roundtrip(&InterventionParams::Clamp {
         min: -1.0,
@@ -329,7 +329,9 @@ fn ablate_empty_json_defaults_to_zero() {
     let params: InterventionParams = serde_json::from_value(json).unwrap();
     match params {
         InterventionParams::Ablate {
-            mode, reference_run, ..
+            mode,
+            reference_run,
+            ..
         } => {
             assert_eq!(mode, AblateMode::Zero);
             assert!(reference_run.is_none());
@@ -470,9 +472,18 @@ fn session_state_roundtrip() {
 
 #[test]
 fn envelope_mode_serde() {
-    assert_eq!(serde_json::to_string(&EnvelopeMode::Full).unwrap(), r#""full""#);
-    assert_eq!(serde_json::to_string(&EnvelopeMode::Position).unwrap(), r#""position""#);
-    assert_eq!(serde_json::to_string(&EnvelopeMode::None).unwrap(), r#""none""#);
+    assert_eq!(
+        serde_json::to_string(&EnvelopeMode::Full).unwrap(),
+        r#""full""#
+    );
+    assert_eq!(
+        serde_json::to_string(&EnvelopeMode::Position).unwrap(),
+        r#""position""#
+    );
+    assert_eq!(
+        serde_json::to_string(&EnvelopeMode::None).unwrap(),
+        r#""none""#
+    );
 }
 
 #[test]
@@ -516,7 +527,7 @@ fn step_request_run_to_roundtrip() {
         direction: StepDirection::Forward,
         count: 0,
         granularity: None,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
         run_to: Some("llama:*:12:attn.o_proj:output".to_owned()),
     };
     roundtrip(&req);
@@ -530,7 +541,7 @@ fn step_request_run_to_completion() {
         direction: StepDirection::Forward,
         count: 0,
         granularity: None,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
         run_to: Some("completion".to_owned()),
     };
     let json = serde_json::to_value(&req).unwrap();
@@ -553,7 +564,7 @@ fn step_request_run_to_omitted_from_json_when_none() {
         direction: StepDirection::Forward,
         count: 1,
         granularity: None,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
         run_to: None,
     };
     let json = serde_json::to_value(&req).unwrap();
@@ -570,7 +581,7 @@ fn tick_clock_roundtrip() {
         wall_ns: 1_500_000_000,
     };
     roundtrip(&clock);
-    let json = serde_json::to_value(&clock).unwrap();
+    let json = serde_json::to_value(clock).unwrap();
     assert_eq!(json["token"], 73);
     assert_eq!(json["operator"], 42);
     assert_eq!(json["wall_ns"], 1_500_000_000u64);
@@ -627,7 +638,7 @@ fn tick_position_with_clock_from_json() {
         "clock": {
             "token": 73,
             "operator": 42,
-            "wall_ns": 1500000000
+            "wall_ns": 1_500_000_000
         }
     });
     let pos: TickPosition = serde_json::from_value(json).unwrap();
@@ -921,10 +932,7 @@ fn attach_response_with_discovery_fields() {
         ],
         alias_table: vec![AliasEntry {
             canonical: "llama:*:0:attn.q:output".to_owned(),
-            aliases: vec![
-                "blocks.0.attn.hook_q".to_owned(),
-                "L0.attn.q".to_owned(),
-            ],
+            aliases: vec!["blocks.0.attn.hook_q".to_owned(), "L0.attn.q".to_owned()],
         }],
         tick_map: vec![TickMapEntry {
             granularity: TickGranularity::Component,
@@ -938,7 +946,10 @@ fn attach_response_with_discovery_fields() {
     roundtrip(&resp);
 
     let json = serde_json::to_value(&resp).unwrap();
-    assert_eq!(json["component_vocabulary"][0]["canonical"], "llama:*:0:attn.q:output");
+    assert_eq!(
+        json["component_vocabulary"][0]["canonical"],
+        "llama:*:0:attn.q:output"
+    );
     assert_eq!(json["alias_table"][0]["aliases"][0], "blocks.0.attn.hook_q");
     assert_eq!(json["tick_map"][0]["granularity"], "component");
 }
@@ -1008,7 +1019,7 @@ fn step_request_roundtrip() {
         direction: StepDirection::Forward,
         count: 5,
         granularity: Some(TickGranularity::Component),
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
         run_to: None,
     };
     roundtrip(&req);
@@ -1044,7 +1055,7 @@ fn inspect_request_roundtrip() {
         slices: Some(vec![[0, 10], [20, 30]]),
         format: Some(DType::Float32),
         view: None,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
     };
     roundtrip(&req);
 }
@@ -1067,10 +1078,10 @@ fn intervene_request_set_tagged() {
             intervention_type: InterventionType::Ablate,
             target: "llama:0:12:mlp:output".to_owned(),
             params: InterventionParams::Ablate {
-            mode: AblateMode::default(),
-            reference_run: None,
-            reference_tensor_id: None,
-        },
+                mode: AblateMode::default(),
+                reference_run: None,
+                reference_tensor_id: None,
+            },
             condition: None,
             priority: 0,
             mode: CompositionMode::Additive,
@@ -1191,7 +1202,7 @@ fn replay_request_roundtrip() {
             component: "attn.o_proj".to_owned(),
         }),
         verify: true,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
     };
     roundtrip(&req);
 }
@@ -1352,7 +1363,7 @@ fn view_request_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::ResidualStreamNorm,
         params: None,
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
     };
     roundtrip(&req);
 }
@@ -1362,7 +1373,7 @@ fn view_request_with_params_roundtrip() {
     let req = ViewRequest {
         view: BuiltInView::AttentionPattern,
         params: Some(json!({"layer": 3, "head": 7})),
-        envelope: Default::default(),
+        envelope: EnvelopeMode::default(),
     };
     roundtrip(&req);
 }
@@ -2002,11 +2013,14 @@ fn inspect_request_detail_default() {
 #[test]
 fn intervention_params_ablate_from_empty_object() {
     let val: InterventionParams = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(val, InterventionParams::Ablate {
+    assert_eq!(
+        val,
+        InterventionParams::Ablate {
             mode: AblateMode::default(),
             reference_run: None,
             reference_tensor_id: None,
-        });
+        }
+    );
 }
 
 #[test]
@@ -2139,14 +2153,14 @@ fn tick_position_has_phase_field() {
 #[test]
 fn phase_decode_roundtrip() {
     roundtrip(&Phase::Decode);
-    let json = serde_json::to_value(&Phase::Decode).unwrap();
+    let json = serde_json::to_value(Phase::Decode).unwrap();
     assert_eq!(json["type"], "decode");
 }
 
 #[test]
 fn phase_prefill_roundtrip() {
     roundtrip(&Phase::Prefill);
-    let json = serde_json::to_value(&Phase::Prefill).unwrap();
+    let json = serde_json::to_value(Phase::Prefill).unwrap();
     assert_eq!(json["type"], "prefill");
 }
 
@@ -2158,7 +2172,7 @@ fn phase_prefill_chunked_roundtrip() {
         total_chunks: 4,
     };
     roundtrip(&phase);
-    let json = serde_json::to_value(&phase).unwrap();
+    let json = serde_json::to_value(phase).unwrap();
     assert_eq!(json["type"], "prefill_chunked");
     assert_eq!(json["chunk_size"], 512);
     assert_eq!(json["chunk_index"], 2);
