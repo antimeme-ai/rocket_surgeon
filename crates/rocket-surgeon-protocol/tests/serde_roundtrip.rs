@@ -6,15 +6,17 @@ use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, BranchCompareRequest, BranchCompareResponse,
     BranchCreatedEvent, BranchDropRequest, BranchDropResponse, BranchForkRequest,
     BranchForkResponse, BranchTier, BranchTierChangedEvent, CheckpointRequest,
-    CheckpointResponse, CreateCheckpointTier, DetachRequest, DetachResponse, Divergence,
-    ErrorEvent, EventType, HostViewRequest, HostViewResponse, InitializeRequest,
-    InitializeResponse, InspectDetail, InspectRequest, InspectResponse, InterveneRequest,
-    KvCacheEntry, KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest, KvReadResponse, KvSlot,
-    KvUpdateEvent, MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse,
-    ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest,
-    StatusResponse, StepRequest, StepResponse, SubscribeFilter, SubscribeRequest,
-    SubscribeResponse, TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest,
-    UnsubscribeResponse, ViewRequest, ViewResponse,
+    CheckpointResponse, CreateCheckpointTier, DetachRequest, DetachResponse, DiscoverMatch,
+    DiscoverRequest, DiscoverResponse, Divergence, ErrorEvent, EventType, FocusAnchor,
+    FocusSelector, HostViewRequest, HostViewResponse, InitializeRequest, InitializeResponse,
+    InspectDetail, InspectRequest, InspectResponse, InterveneRequest, KvCacheEntry,
+    KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest, KvReadResponse, KvSlot, KvUpdateEvent,
+    MemoryUsage, ProbeFiredEvent, ProbeRequest, ProbeResponse, ReplayDivergenceEvent,
+    ReplayRequest, ReplayResponse, ReplayStopAt, StatusRequest, StatusResponse, StepRequest,
+    StepResponse, SubscribeFilter, SubscribeRequest, SubscribeResponse, SweepMetric,
+    SweepRequest, SweepResponse, SweepTrial, SweepTrialResult, TickHeartbeatEvent,
+    TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest,
+    ViewDefineResponse, ViewFocusRequest, ViewFocusResponse, ViewRequest, ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
     AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
@@ -240,7 +242,7 @@ fn probe_action_serde() {
 #[test]
 fn intervention_recipe_roundtrip() {
     let recipe = InterventionRecipe {
-        id: "int-1".to_owned(),
+        id: Some("int-1".to_owned()),
         intervention_type: InterventionType::Scale,
         target: "llama:0:12:attn.o_proj:output".to_owned(),
         params: InterventionParams::Scale { factor: 0.5 },
@@ -1061,7 +1063,7 @@ fn inspect_response_roundtrip() {
 fn intervene_request_set_tagged() {
     let req = InterveneRequest::Set {
         recipe: InterventionRecipe {
-            id: "int-1".to_owned(),
+            id: Some("int-1".to_owned()),
             intervention_type: InterventionType::Ablate,
             target: "llama:0:12:mlp:output".to_owned(),
             params: InterventionParams::Ablate {
@@ -1626,6 +1628,212 @@ fn built_in_view_new_variants_serde() {
         serde_json::to_string(&BuiltInView::WorldlineDag).unwrap(),
         r#""worldline_dag""#
     );
+}
+
+// ===== Discover =====
+
+#[test]
+fn discover_request_roundtrip() {
+    let req = DiscoverRequest {
+        pattern: "llama:*:12:*:output".to_owned(),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn discover_response_with_matches() {
+    let resp = DiscoverResponse {
+        matches: vec![DiscoverMatch {
+            canonical: "attn.o_proj".to_owned(),
+            tensor_shape: vec![1, 32, 4096],
+            aliases: vec!["o_proj".to_owned()],
+        }],
+        suggestions: vec![],
+    };
+    roundtrip(&resp);
+    let json = serde_json::to_value(&resp).unwrap();
+    assert!(json.get("suggestions").is_none());
+}
+
+#[test]
+fn discover_response_with_suggestions() {
+    let resp = DiscoverResponse {
+        matches: vec![],
+        suggestions: vec!["attn.o_proj".to_owned()],
+    };
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["suggestions"][0], "attn.o_proj");
+    roundtrip(&resp);
+}
+
+// ===== View Focus =====
+
+#[test]
+fn focus_selector_by_position_roundtrip() {
+    let sel = FocusSelector::ByPosition { position: 5 };
+    roundtrip(&sel);
+    let json = serde_json::to_value(&sel).unwrap();
+    assert_eq!(json["kind"], "by_position");
+    assert_eq!(json["position"], 5);
+}
+
+#[test]
+fn focus_selector_by_regex_roundtrip() {
+    let sel = FocusSelector::ByRegex {
+        pattern: "defendant".to_owned(),
+    };
+    roundtrip(&sel);
+}
+
+#[test]
+fn focus_selector_by_anchor_roundtrip() {
+    let sel = FocusSelector::ByAnchor {
+        anchor: FocusAnchor::MaxAttention,
+    };
+    roundtrip(&sel);
+    let json = serde_json::to_value(&sel).unwrap();
+    assert_eq!(json["anchor"], "max_attention");
+}
+
+#[test]
+fn focus_selector_by_range_roundtrip() {
+    let sel = FocusSelector::ByRange { start: 0, end: 10 };
+    roundtrip(&sel);
+}
+
+#[test]
+fn focus_anchor_serde() {
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::Bos).unwrap(),
+        r#""bos""#
+    );
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::Sink).unwrap(),
+        r#""sink""#
+    );
+    assert_eq!(
+        serde_json::to_string(&FocusAnchor::MaxAttention).unwrap(),
+        r#""max_attention""#
+    );
+}
+
+#[test]
+fn view_focus_request_roundtrip() {
+    let req = ViewFocusRequest {
+        selector: FocusSelector::ByPosition { position: 5 },
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_focus_response_roundtrip() {
+    let resp = ViewFocusResponse {
+        position: 5,
+        token: serde_json::json!({"id": 1234, "text": "the"}),
+        per_layer_summaries: vec![],
+    };
+    roundtrip(&resp);
+}
+
+// ===== Sweep =====
+
+#[test]
+fn sweep_request_roundtrip() {
+    let req = SweepRequest {
+        baseline_checkpoint: "ckpt-clean".to_owned(),
+        trials: vec![SweepTrial {
+            interventions: vec![InterventionRecipe {
+                id: None,
+                intervention_type: InterventionType::Scale,
+                target: "llama:0:12:attn.o_proj:output".to_owned(),
+                params: InterventionParams::Scale { factor: 0.5 },
+                condition: None,
+                priority: 0,
+                mode: CompositionMode::Additive,
+            }],
+            run_to: Some("completion".to_owned()),
+            collect: Some(vec!["llama:*:*:logits:output".to_owned()]),
+        }],
+        metric: Some(SweepMetric {
+            metric_type: "kl_divergence".to_owned(),
+            tokens: None,
+            position: Some(-1),
+        }),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn sweep_trial_minimal() {
+    let trial = SweepTrial {
+        interventions: vec![],
+        run_to: None,
+        collect: None,
+    };
+    let json = serde_json::to_value(&trial).unwrap();
+    assert!(json.get("run_to").is_none());
+    assert!(json.get("collect").is_none());
+    roundtrip(&trial);
+}
+
+#[test]
+fn sweep_response_roundtrip() {
+    let resp = SweepResponse {
+        results: vec![SweepTrialResult {
+            trial_index: 0,
+            stopped_at: sample_tick_position(),
+            collected: vec![],
+            metric_value: Some(0.03),
+        }],
+    };
+    roundtrip(&resp);
+}
+
+// ===== View Define =====
+
+#[test]
+fn view_define_request_roundtrip() {
+    let req = ViewDefineRequest {
+        name: "my_custom_view".to_owned(),
+        spec: serde_json::json!({"type": "composite", "panels": []}),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn view_define_response_roundtrip() {
+    let resp = ViewDefineResponse {
+        name: "my_custom_view".to_owned(),
+        registered: true,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn method_constants_llm_verbs() {
+    use rocket_surgeon_protocol::messages::method;
+    assert_eq!(method::DISCOVER, "rocket/discover");
+    assert_eq!(method::SWEEP, "rocket/sweep");
+    assert_eq!(method::VIEW_FOCUS, "rocket/view.focus");
+    assert_eq!(method::VIEW_DEFINE, "rocket/view.define");
+}
+
+#[test]
+fn event_constants_sweep() {
+    use rocket_surgeon_protocol::messages::event;
+    assert_eq!(event::SPEC_STEP, "spec.step");
+    assert_eq!(event::SWEEP_TRIAL_COMPLETE, "sweep.trial_complete");
+}
+
+#[test]
+fn intervention_recipe_id_optional() {
+    let json = serde_json::json!({
+        "type": "scale",
+        "target": "llama:0:12:attn.o_proj:output",
+        "params": {"factor": 0.5}
+    });
+    let recipe: InterventionRecipe = serde_json::from_value(json).unwrap();
+    assert!(recipe.id.is_none());
 }
 
 // ===== Event notifications =====

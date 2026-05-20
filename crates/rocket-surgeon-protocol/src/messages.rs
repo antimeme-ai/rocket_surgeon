@@ -514,6 +514,125 @@ pub struct BranchCompareResponse {
 }
 
 // ---------------------------------------------------------------------------
+// rocket/discover
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverRequest {
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverMatch {
+    pub canonical: String,
+    pub tensor_shape: Vec<u64>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoverResponse {
+    pub matches: Vec<DiscoverMatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/view.focus
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FocusSelector {
+    ById { token_id: u64 },
+    ByPosition { position: u64 },
+    ByRegex { pattern: String },
+    ByAnchor { anchor: FocusAnchor },
+    ByRange { start: u64, end: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusAnchor {
+    Bos,
+    Eos,
+    PadBoundary,
+    Sink,
+    MaxAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewFocusRequest {
+    pub selector: FocusSelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewFocusResponse {
+    pub position: u64,
+    pub token: serde_json::Value,
+    pub per_layer_summaries: Vec<TensorSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/sweep
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepTrial {
+    pub interventions: Vec<InterventionRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepMetric {
+    #[serde(rename = "type")]
+    pub metric_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepRequest {
+    pub baseline_checkpoint: String,
+    pub trials: Vec<SweepTrial>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<SweepMetric>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepTrialResult {
+    pub trial_index: u32,
+    pub stopped_at: TickPosition,
+    pub collected: Vec<TensorSummary>,
+    pub metric_value: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SweepResponse {
+    pub results: Vec<SweepTrialResult>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/view.define
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewDefineRequest {
+    pub name: String,
+    pub spec: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewDefineResponse {
+    pub name: String,
+    pub registered: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Event notifications
 // ---------------------------------------------------------------------------
 

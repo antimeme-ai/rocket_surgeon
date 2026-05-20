@@ -299,7 +299,8 @@ pub(crate) fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterventionRecipe {
-    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub intervention_type: InterventionType,
     pub target: String,
