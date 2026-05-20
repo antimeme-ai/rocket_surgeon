@@ -37,9 +37,19 @@ pre-commit:
       run: .venv/bin/mypy python/rocket_surgeon
 
 pre-push:
-  parallel: true
+  # piped, not parallel: cargo-test and e2e both build the workspace and
+  # share target/. Run concurrently they serialize on Cargo's build lock and
+  # thrash the PyO3 feature-set rebuild (the worker/python crates resolve
+  # pyo3 features differently). Sequential definition order is correct and
+  # fails fast — no point running the slow e2e suite if unit tests are red.
+  piped: true
   commands:
     cargo-test:
       run: PATH="$PWD/.venv/bin:$PATH" cargo xtask test
     pytest:
       run: .venv/bin/pytest python/tests/
+    e2e:
+      # Spawns the real daemon + orchestrator + worker and drives the
+      # JSON-RPC protocol. PATH override so the scripts' `python3` is the
+      # venv interpreter, matching cargo-test above.
+      run: PATH="$PWD/.venv/bin:$PATH" cargo xtask e2e

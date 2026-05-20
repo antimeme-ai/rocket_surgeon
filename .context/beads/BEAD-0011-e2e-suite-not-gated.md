@@ -1,10 +1,25 @@
 ---
 id: BEAD-0011
 title: E2E test suite is not run by any gate
-status: open
+status: closed
 priority: high
 created: 2026-05-19
+resolved: 2026-05-20
 ---
+
+## Resolution
+
+Option 1. Added a `cargo xtask e2e` recipe (discovers and runs every
+`tests/test_e2e_*.py`, runs all scripts, reports every failure), wired it into
+`cargo xtask ci`, and added an `e2e` command to `lefthook` pre-push. The
+pre-push hook was switched from `parallel: true` to `piped: true` so the
+e2e build does not race `cargo-test` on the shared `target/` directory.
+
+The no-CI gap (no `.github/workflows/`) is intentionally left open — adding
+GitHub Actions is separate infra and out of scope here. File a follow-up bead
+if CI is wanted.
+
+Plan: `.context/plans/wu-bead-0011-e2e-gate.md`.
 
 ## Description
 
