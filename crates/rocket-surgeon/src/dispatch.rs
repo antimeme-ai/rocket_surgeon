@@ -6,9 +6,9 @@ use rocket_surgeon_protocol::messages::{
     AttachRequest, CheckpointRequest, DiscoverRequest, EventType, HostAttachResponse,
     HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
     InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
-    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest,
-    ViewResponse, method,
+    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest, StepRequest,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
     DType, InterventionRecipe, Phase, StepDirection, TickEvent, TickPosition,
@@ -271,7 +271,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::KV_READ => handle_kv_read(session, request, None),
         method::KV_INTERVENE => handle_kv_intervene(session, request, None),
         method::INTERVENE => handle_intervene(session, request),
-        method::REPLAY => handle_stub_requires_stopped(session, request),
+        method::REPLAY => handle_replay(session, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -446,21 +446,6 @@ pub fn handle_step(
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
-}
-
-fn handle_stub_requires_stopped(session: &Session, request: &Request) -> Response {
-    if let Err(e) = session.require_stopped(&request.method) {
-        return session_error_to_response(request.id.clone(), &e);
-    }
-
-    serialize_envelope(
-        request.id.clone(),
-        session.envelope(serde_json::json!({
-            "stub": true,
-            "method": request.method,
-            "message": format!("{} is not yet implemented", request.method),
-        })),
-    )
 }
 
 fn handle_inspect_no_store(session: &Session, request: &Request) -> Response {
@@ -1030,6 +1015,25 @@ pub fn handle_view_define(session: &mut Session, request: &Request) -> Response 
     }
 }
 
+/// `rocket/replay` — re-execute the forward pass from a checkpoint
+/// (BEAD-0018, TCK `replay.feature`).
+///
+/// Daemon orchestration tier: delegates to [`Session::replay`], which
+/// validates the checkpoint and synthesizes the replay result (honouring
+/// `stop_at` and the response `envelope`). Worker re-execution, intervention
+/// application, and divergence detection are a later tier.
+pub fn handle_replay(session: &mut Session, request: &Request) -> Response {
+    let req: ReplayRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    match session.replay(&req) {
+        Ok(value) => serialize_envelope(request.id.clone(), value),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
+    }
+}
+
 /// Whether a recipe's declared `type` agrees with its deserialized `params`.
 ///
 /// `InterventionParams` is `#[serde(untagged)]`, so a type/params mismatch
@@ -1325,32 +1329,6 @@ mod tests {
         let req = make_request("rocket/status", serde_json::Value::Null);
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_none());
-    }
-
-    #[test]
-    fn dispatch_stub_method_from_stopped() {
-        let mut session = Session::new();
-        dispatch(&mut session, &make_request("initialize", init_params()));
-        test_attach_dispatch(&mut session);
-
-        let req = make_request("rocket/replay", serde_json::json!({}));
-        let resp = dispatch(&mut session, &req);
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        assert!(result.get("state").is_some());
-        let data = &result["data"];
-        assert_eq!(data["stub"], true);
-        assert_eq!(data["method"], "rocket/replay");
-    }
-
-    #[test]
-    fn dispatch_stub_method_when_not_stopped_returns_error() {
-        let mut session = Session::new();
-        dispatch(&mut session, &make_request("initialize", init_params()));
-
-        let req = make_request("rocket/replay", serde_json::json!({}));
-        let resp = dispatch(&mut session, &req);
-        assert!(resp.error.is_some());
     }
 
     #[test]
@@ -3127,5 +3105,103 @@ mod tests {
         );
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_some());
+    }
+
+    // --- replay tests (TCK replay.feature) ---
+
+    fn replay_session_with_checkpoint() -> (Session, String) {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        dispatch(
+            &mut session,
+            &make_request(
+                "rocket/step",
+                serde_json::json!({"direction": "forward", "count": 3}),
+            ),
+        );
+        let cp = dispatch(
+            &mut session,
+            &make_request("rocket/checkpoint", serde_json::json!({"action": "create"})),
+        );
+        let id = cp.result.unwrap()["data"]["checkpoint_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        dispatch(
+            &mut session,
+            &make_request(
+                "rocket/step",
+                serde_json::json!({"direction": "forward", "count": 5}),
+            ),
+        );
+        (session, id)
+    }
+
+    #[test]
+    fn dispatch_replay_from_checkpoint_succeeds() {
+        let (mut session, id) = replay_session_with_checkpoint();
+        let req = make_request("rocket/replay", serde_json::json!({"from_checkpoint": id}));
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        assert!(data["ticks_replayed"].as_u64().unwrap() > 0);
+        assert!(data["stopped_at"]["tick_id"].is_number());
+    }
+
+    #[test]
+    fn dispatch_replay_missing_checkpoint_returns_error() {
+        let (mut session, _id) = replay_session_with_checkpoint();
+        let req = make_request(
+            "rocket/replay",
+            serde_json::json!({"from_checkpoint": "nonexistent"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(data.error_code, ErrorCode::CheckpointNotFound);
+    }
+
+    #[test]
+    fn dispatch_replay_honors_stop_at() {
+        let (mut session, id) = replay_session_with_checkpoint();
+        let req = make_request(
+            "rocket/replay",
+            serde_json::json!({
+                "from_checkpoint": id,
+                "stop_at": {"layer": 5, "component": "attn.o_proj"}
+            }),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let stopped = &resp.result.unwrap()["data"]["stopped_at"];
+        assert_eq!(stopped["layer"], 5);
+        assert_eq!(stopped["component"], "attn.o_proj");
+    }
+
+    #[test]
+    fn dispatch_replay_none_envelope_is_data_only() {
+        let (mut session, id) = replay_session_with_checkpoint();
+        let req = make_request(
+            "rocket/replay",
+            serde_json::json!({"from_checkpoint": id, "envelope": "none"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        // `none` envelope: bare ReplayResponse, no SessionState wrapper.
+        assert!(result.get("state").is_none());
+        assert!(result["ticks_replayed"].is_number());
     }
 }
