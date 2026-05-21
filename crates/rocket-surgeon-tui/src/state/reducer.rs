@@ -55,12 +55,11 @@ fn reduce_navigation(state: &mut UiState, nav: &NavigationEvent) {
 }
 
 fn clamp_cursor(state: &mut UiState) {
-    if let Some(caps) = &state.session.capabilities {
-        if let Some(num_layers) = caps.num_layers {
-            if num_layers > 0 {
-                state.cursor.layer = state.cursor.layer.min(num_layers - 1);
-            }
-        }
+    if let Some(caps) = &state.session.capabilities
+        && let Some(num_layers) = caps.num_layers
+        && num_layers > 0
+    {
+        state.cursor.layer = state.cursor.layer.min(num_layers - 1);
     }
 }
 

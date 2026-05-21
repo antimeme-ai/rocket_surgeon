@@ -218,15 +218,15 @@ pub async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
             return Err(ClientError::TooManyHeaders);
         }
 
-        if let Some((key, value)) = trimmed.split_once(':') {
-            if key.eq_ignore_ascii_case("content-length") {
-                content_length = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|_| ClientError::InvalidContentLength)?,
-                );
-            }
+        if let Some((key, value)) = trimmed.split_once(':')
+            && key.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|_| ClientError::InvalidContentLength)?,
+            );
         }
     }
 
@@ -281,11 +281,11 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
             continue;
         }
 
-        if let Ok(raw) = serde_json::from_str::<RawMessage>(&msg) {
-            if let Some(notif) = raw.into_notification() {
-                let _ = notification_tx.send(notif);
-                continue;
-            }
+        if let Ok(raw) = serde_json::from_str::<RawMessage>(&msg)
+            && let Some(notif) = raw.into_notification()
+        {
+            let _ = notification_tx.send(notif);
+            continue;
         }
 
         tracing::warn!(msg_len = msg.len(), "dropping unparseable message");

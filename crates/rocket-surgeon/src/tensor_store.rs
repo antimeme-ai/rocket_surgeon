@@ -266,10 +266,10 @@ impl TensorStore {
             .iter()
             .min_by_key(|(_, entry)| entry.last_access_gen)
             .map(|(id, _)| id.clone());
-        if let Some(id) = oldest_id {
-            if let Some(removed) = self.entries.remove(&id) {
-                self.current_bytes -= removed.data.len();
-            }
+        if let Some(id) = oldest_id
+            && let Some(removed) = self.entries.remove(&id)
+        {
+            self.current_bytes -= removed.data.len();
         }
     }
 }

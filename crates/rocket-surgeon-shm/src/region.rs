@@ -262,7 +262,7 @@ impl ShmRegion {
     }
 
     fn alignment_check(offset: usize, alignment: usize) -> Result<(), ShmError> {
-        if offset % alignment != 0 {
+        if !offset.is_multiple_of(alignment) {
             return Err(ShmError::Unaligned { offset, alignment });
         }
         Ok(())

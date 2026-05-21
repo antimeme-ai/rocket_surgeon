@@ -55,6 +55,7 @@ impl SessionError {
 /// Checkpoints carry a human/LLM-readable `created_at`; the daemon has no
 /// date-formatting dependency, so the civil date is derived from the Unix
 /// epoch directly (Howard Hinnant's `civil_from_days` algorithm).
+#[allow(clippy::similar_names)]
 fn now_rfc3339() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -443,24 +444,23 @@ impl Session {
             return Err(self.invalid_state_error("attach", vec![Status::Initialized]));
         }
 
-        if let Some(config) = &req.config {
-            if let Some(mode) = config.get("execution_mode") {
-                if mode.as_str() == Some("compiled") {
-                    return Err(SessionError::CompiledModel(ErrorData {
-                        error_code: ErrorCode::CompiledModel,
-                        numeric_code: Some(ErrorCode::CompiledModel.numeric_code()),
-                        severity: Severity::Recoverable,
-                        suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
-                        current_state: Some(self.state.status),
-                        valid_states: None,
-                        recovery_hint: Some(
-                            crate::dispatch::recovery_hint_for(ErrorCode::CompiledModel)
-                                .to_owned(),
-                        ),
-                        context: None,
-                    }));
-                }
-            }
+        if let Some(config) = &req.config
+            && let Some(mode) = config.get("execution_mode")
+            && mode.as_str() == Some("compiled")
+        {
+            return Err(SessionError::CompiledModel(ErrorData {
+                error_code: ErrorCode::CompiledModel,
+                numeric_code: Some(ErrorCode::CompiledModel.numeric_code()),
+                severity: Severity::Recoverable,
+                suggestion: "rocket_surgeon requires eager-mode models. Remove torch.compile() wrapper before attaching".to_owned(),
+                current_state: Some(self.state.status),
+                valid_states: None,
+                recovery_hint: Some(
+                    crate::dispatch::recovery_hint_for(ErrorCode::CompiledModel)
+                        .to_owned(),
+                ),
+                context: None,
+            }));
         }
 
         if !SUPPORTED_FAMILIES.contains(&req.model_family.as_str()) {

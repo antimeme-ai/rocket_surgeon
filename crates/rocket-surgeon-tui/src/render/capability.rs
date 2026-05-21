@@ -39,16 +39,16 @@ pub fn detect() -> TerminalCapabilities {
 }
 
 fn detect_color_depth() -> ColorDepth {
-    if let Ok(ct) = env::var("COLORTERM") {
-        if ct == "truecolor" || ct == "24bit" {
-            return ColorDepth::TrueColor;
-        }
+    if let Ok(ct) = env::var("COLORTERM")
+        && (ct == "truecolor" || ct == "24bit")
+    {
+        return ColorDepth::TrueColor;
     }
 
-    if let Ok(term) = env::var("TERM") {
-        if term.contains("256color") {
-            return ColorDepth::Color256;
-        }
+    if let Ok(term) = env::var("TERM")
+        && term.contains("256color")
+    {
+        return ColorDepth::Color256;
     }
 
     ColorDepth::Basic

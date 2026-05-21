@@ -459,12 +459,11 @@ fn detach_orchestrator(
     orchestrator: &mut Option<OrchestratorHandle>,
     model_handle: &mut Option<u64>,
 ) {
-    if let Some(handle) = model_handle.take() {
-        if let Some(orch) = orchestrator {
-            if let Err(e) = orch.detach(handle) {
-                warn!("orchestrator detach failed: {e}");
-            }
-        }
+    if let Some(handle) = model_handle.take()
+        && let Some(orch) = orchestrator
+        && let Err(e) = orch.detach(handle)
+    {
+        warn!("orchestrator detach failed: {e}");
     }
     // Drop orchestrator — kills child processes
     *orchestrator = None;
@@ -739,13 +738,12 @@ fn main() {
                 Err(err_response) => *err_response,
             }
         } else if request.method == method::PROBE {
-            if let Some(params) = &request.params {
-                if let Ok(ProbeRequest::SetGranularity { scopes }) =
+            if let Some(params) = &request.params
+                && let Ok(ProbeRequest::SetGranularity { scopes }) =
                     serde_json::from_value::<ProbeRequest>(params.clone())
-                {
-                    info!(num_scopes = scopes.len(), "granularity scopes updated");
-                    granularity_scopes = scopes;
-                }
+            {
+                info!(num_scopes = scopes.len(), "granularity scopes updated");
+                granularity_scopes = scopes;
             }
             let resp = handle_probe(&session, &request, &mut probe_registry);
             if resp.error.is_none() {
@@ -865,12 +863,11 @@ fn main() {
                 break;
             }
 
-            if let Some(ref mut ps) = perfetto {
-                if let Some(ref pos) = session.state().position {
-                    if let Err(e) = ps.on_tick_stopped(pos) {
-                        warn!("perfetto: tick event write failed: {e}");
-                    }
-                }
+            if let Some(ref mut ps) = perfetto
+                && let Some(ref pos) = session.state().position
+                && let Err(e) = ps.on_tick_stopped(pos)
+            {
+                warn!("perfetto: tick event write failed: {e}");
             }
 
             if let Some(ref hr) = step_host_response {

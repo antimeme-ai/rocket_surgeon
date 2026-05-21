@@ -132,23 +132,20 @@ pub fn event_matches_filter(
 
     let (layer, component) = event_coordinates(method, params);
 
-    if let Some(allowed_layers) = &filter.layers {
-        if let Some(layer) = layer {
-            if !allowed_layers.contains(&layer) {
-                return false;
-            }
-        }
+    if let Some(allowed_layers) = &filter.layers
+        && let Some(layer) = layer
+        && !allowed_layers.contains(&layer)
+    {
+        return false;
     }
 
-    if let Some(patterns) = &filter.components {
-        if let Some(component) = &component {
-            if !patterns
-                .iter()
-                .any(|p| component_glob_matches(p, component))
-            {
-                return false;
-            }
-        }
+    if let Some(patterns) = &filter.components
+        && let Some(component) = &component
+        && !patterns
+            .iter()
+            .any(|p| component_glob_matches(p, component))
+    {
+        return false;
     }
 
     true
