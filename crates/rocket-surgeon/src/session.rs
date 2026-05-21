@@ -8,8 +8,9 @@ use rocket_surgeon_protocol::messages::{
 };
 use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
-    ActionName, Capabilities, CheckpointRef, CheckpointTier, EnvelopeMode, Phase, PositionEnvelope,
-    ResponseEnvelope, SessionState, Status, StepDirection, TensorSummary, TickEvent,
+    ActionName, Capabilities, CheckpointRef, CheckpointTier, EnvelopeMode, InterventionRecipe,
+    Phase, PositionEnvelope, ResponseEnvelope, SessionState, Status, StepDirection, TensorSummary,
+    TickEvent,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -233,6 +234,11 @@ pub struct Session {
     /// (only `tick_id`/`layer_idx`) cannot express. Cleared on detach;
     /// bookmark-only markers have no entry here.
     checkpoint_positions: HashMap<String, TickPosition>,
+    /// Declarative intervention recipes registered via `rocket/intervene`,
+    /// in insertion order, keyed by recipe `id` for upsert/clear. The daemon
+    /// retains them across `rocket/step`; a later worker tier consults this
+    /// to apply interventions during the forward pass. Cleared on detach.
+    interventions: Vec<InterventionRecipe>,
 }
 
 impl Session {
@@ -254,6 +260,7 @@ impl Session {
             defined_views: HashMap::new(),
             event_filter: None,
             checkpoint_positions: HashMap::new(),
+            interventions: Vec::new(),
         }
     }
 
@@ -569,6 +576,7 @@ impl Session {
         // model; drop them so a stale catalog cannot leak across attaches.
         self.catalog.clear();
         self.defined_views.clear();
+        self.interventions.clear();
         self.update_available_actions();
 
         Ok(self.envelope(DetachResponse {
@@ -1020,6 +1028,35 @@ impl Session {
     #[allow(dead_code)]
     pub fn defined_view(&self, name: &str) -> Option<&serde_json::Value> {
         self.defined_views.get(name)
+    }
+
+    /// Register an intervention recipe (`rocket/intervene` action `set`).
+    ///
+    /// Upsert by `id`: a recipe whose `id` matches an existing entry replaces
+    /// it in place, preserving insertion position; otherwise it is appended.
+    /// The caller (`handle_intervene`) validates the recipe — including that
+    /// `id` is present — before calling.
+    pub fn set_intervention(&mut self, recipe: InterventionRecipe) {
+        if let Some(slot) = self.interventions.iter_mut().find(|r| r.id == recipe.id) {
+            *slot = recipe;
+        } else {
+            self.interventions.push(recipe);
+        }
+    }
+
+    /// Remove an intervention recipe by `id` (`rocket/intervene` action
+    /// `clear`). Returns `true` if a recipe was removed.
+    pub fn clear_intervention(&mut self, id: &str) -> bool {
+        let before = self.interventions.len();
+        self.interventions.retain(|r| r.id.as_deref() != Some(id));
+        self.interventions.len() != before
+    }
+
+    /// The registered intervention recipes, in insertion order. Consulted to
+    /// build the `rocket/intervene` response and, by a later worker tier, to
+    /// apply interventions during the forward pass.
+    pub fn interventions(&self) -> &[InterventionRecipe] {
+        &self.interventions
     }
 }
 
@@ -2087,5 +2124,72 @@ mod tests {
 
         session.set_event_filter(None);
         assert!(session.event_filter().is_none());
+    }
+
+    // --- intervention registry tests (TCK intervention.feature) ---
+
+    fn intervene_recipe(id: &str, kind: &str) -> InterventionRecipe {
+        let params = match kind {
+            "scale" => serde_json::json!({"factor": 0.5}),
+            "clamp" => serde_json::json!({"min": -1.0, "max": 1.0}),
+            _ => serde_json::json!({}),
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "type": kind,
+            "target": "llama:0:12:attn.o_proj:output",
+            "params": params,
+        }))
+        .expect("recipe deserializes")
+    }
+
+    #[test]
+    fn set_intervention_stores_and_lists() {
+        let mut session = stopped_session();
+        session.set_intervention(intervene_recipe("iv-1", "ablate"));
+        assert_eq!(session.interventions().len(), 1);
+        assert_eq!(session.interventions()[0].id.as_deref(), Some("iv-1"));
+    }
+
+    #[test]
+    fn set_intervention_upsert_replaces_by_id() {
+        let mut session = stopped_session();
+        session.set_intervention(intervene_recipe("iv-1", "ablate"));
+        session.set_intervention(intervene_recipe("iv-1", "scale"));
+        assert_eq!(
+            session.interventions().len(),
+            1,
+            "same id replaces, does not append"
+        );
+        assert_eq!(
+            session.interventions()[0].intervention_type,
+            rocket_surgeon_protocol::types::InterventionType::Scale
+        );
+    }
+
+    #[test]
+    fn clear_intervention_removes_by_id() {
+        let mut session = stopped_session();
+        session.set_intervention(intervene_recipe("iv-1", "ablate"));
+        session.set_intervention(intervene_recipe("iv-2", "clamp"));
+        assert!(session.clear_intervention("iv-1"));
+        assert_eq!(session.interventions().len(), 1);
+        assert_eq!(session.interventions()[0].id.as_deref(), Some("iv-2"));
+        assert!(
+            !session.clear_intervention("iv-1"),
+            "clearing an absent id is a no-op"
+        );
+    }
+
+    #[test]
+    fn interventions_cleared_after_detach() {
+        let mut session = stopped_session();
+        session.set_intervention(intervene_recipe("iv-1", "ablate"));
+        assert!(!session.interventions().is_empty());
+        session.detach().unwrap();
+        assert!(
+            session.interventions().is_empty(),
+            "detach drops the intervention registry"
+        );
     }
 }

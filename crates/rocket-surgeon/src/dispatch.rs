@@ -5,11 +5,14 @@ use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Res
 use rocket_surgeon_protocol::messages::{
     AttachRequest, CheckpointRequest, DiscoverRequest, EventType, HostAttachResponse,
     HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
-    InspectRequest, KvInterveneRequest, KvInterveneResponse, KvReadRequest, KvReadResponse,
-    ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest, ViewResponse, method,
+    InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
+    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest,
+    ViewResponse, method,
 };
-use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, TickPosition};
+use rocket_surgeon_protocol::types::{
+    DType, InterventionRecipe, Phase, StepDirection, TickEvent, TickPosition,
+};
 
 use crate::session::{Session, SessionError};
 use crate::tensor_store::TensorStore;
@@ -267,7 +270,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::CHECKPOINT => handle_checkpoint(session, request),
         method::KV_READ => handle_kv_read(session, request, None),
         method::KV_INTERVENE => handle_kv_intervene(session, request, None),
-        method::INTERVENE | method::REPLAY => handle_stub_requires_stopped(session, request),
+        method::INTERVENE => handle_intervene(session, request),
+        method::REPLAY => handle_stub_requires_stopped(session, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -1026,6 +1030,95 @@ pub fn handle_view_define(session: &mut Session, request: &Request) -> Response 
     }
 }
 
+/// Whether a recipe's declared `type` agrees with its deserialized `params`.
+///
+/// `InterventionParams` is `#[serde(untagged)]`, so a type/params mismatch
+/// deserializes silently — e.g. `type: scale` with `params: {}` lands as
+/// `InterventionParams::Ablate`. The daemon must reject the disagreement.
+fn recipe_type_matches_params(recipe: &InterventionRecipe) -> bool {
+    use rocket_surgeon_protocol::types::{InterventionParams as P, InterventionType as T};
+    matches!(
+        (recipe.intervention_type, &recipe.params),
+        (T::Ablate, P::Ablate { .. })
+            | (T::Scale, P::Scale { .. })
+            | (T::Add, P::Add { .. })
+            | (T::Patch, P::Patch { .. })
+            | (T::Clamp, P::Clamp { .. })
+            | (T::RouteOverride, P::RouteOverride { .. })
+            | (T::AttentionMask, P::AttentionMask { .. })
+            | (T::EmbedSwap, P::EmbedSwap { .. })
+            | (T::EmbedNoise, P::EmbedNoise { .. })
+    )
+}
+
+/// Validate an intervention recipe for `rocket/intervene` action `set`.
+///
+/// On rejection returns the `ErrorData` to wrap in the response:
+/// - `INVALID_RECIPE` — missing/empty `id`, or a type/params mismatch.
+/// - `INVALID_TARGET` — the `target`'s component leaf is not canonical.
+fn validate_recipe(recipe: &InterventionRecipe) -> Result<(), ErrorData> {
+    if recipe.id.as_deref().is_none_or(str::is_empty) {
+        return Err(error_with_hint(
+            ErrorCode::InvalidRecipe,
+            "Intervention recipe must carry a non-empty 'id'",
+        ));
+    }
+
+    if let Some(component) = target_component(&recipe.target) {
+        if component != "*" && !CANONICAL_COMPONENTS.contains(&component_leaf(component)) {
+            return Err(invalid_target_error(&recipe.target));
+        }
+    }
+
+    if !recipe_type_matches_params(recipe) {
+        return Err(error_with_hint(
+            ErrorCode::InvalidRecipe,
+            "Recipe params do not match the declared intervention 'type'",
+        ));
+    }
+
+    Ok(())
+}
+
+/// `rocket/intervene` — register, clear, or list declarative intervention
+/// recipes (BEAD-0017, TCK `intervention.feature`).
+///
+/// Daemon registry tier: the verb is fully functional per protocol — recipes
+/// are validated and retained in session state, surviving `rocket/step`.
+/// Actually applying interventions during the forward pass is a later worker
+/// tier; `applied` reports registry acceptance, not execution.
+pub fn handle_intervene(session: &mut Session, request: &Request) -> Response {
+    let req: InterveneRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/intervene") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let applied = match req {
+        InterveneRequest::Set { recipe } => {
+            if let Err(data) = validate_recipe(&recipe) {
+                return Response::error(request.id.clone(), RpcError::from_error_data(data));
+            }
+            session.set_intervention(recipe);
+            Some(true)
+        }
+        InterveneRequest::Clear { intervention_id } => {
+            session.clear_intervention(&intervention_id);
+            None
+        }
+        InterveneRequest::List {} => None,
+    };
+
+    let resp = InterveneResponse {
+        active_interventions: session.interventions().to_vec(),
+        applied,
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1240,14 +1333,14 @@ mod tests {
         dispatch(&mut session, &make_request("initialize", init_params()));
         test_attach_dispatch(&mut session);
 
-        let req = make_request("rocket/intervene", serde_json::json!({}));
+        let req = make_request("rocket/replay", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert!(result.get("state").is_some());
         let data = &result["data"];
         assert_eq!(data["stub"], true);
-        assert_eq!(data["method"], "rocket/intervene");
+        assert_eq!(data["method"], "rocket/replay");
     }
 
     #[test]
@@ -1255,7 +1348,7 @@ mod tests {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
 
-        let req = make_request("rocket/intervene", serde_json::json!({}));
+        let req = make_request("rocket/replay", serde_json::json!({}));
         let resp = dispatch(&mut session, &req);
         assert!(resp.error.is_some());
     }
@@ -2763,5 +2856,276 @@ mod tests {
             resp.error.unwrap().data.unwrap().error_code,
             ErrorCode::ModelNotAttached
         );
+    }
+
+    // --- intervention tests (TCK intervention.feature) ---
+
+    fn intervene_attached() -> Session {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        session
+    }
+
+    fn set_recipe(
+        id: &str,
+        kind: &str,
+        target: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut recipe = serde_json::json!({"id": id, "type": kind, "target": target});
+        recipe["params"] = params;
+        serde_json::json!({"action": "set", "recipe": recipe})
+    }
+
+    #[test]
+    fn dispatch_intervene_set_ablate_returns_applied() {
+        let mut session = intervene_attached();
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-ablate-1",
+                "ablate",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["applied"], true);
+        let active = data["active_interventions"].as_array().unwrap();
+        assert!(active.iter().any(|r| r["id"] == "iv-ablate-1"));
+    }
+
+    #[test]
+    fn dispatch_intervene_set_scale_preserves_params() {
+        let mut session = intervene_attached();
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-scale-1",
+                "scale",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({"factor": 0.5}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let data = &resp.result.unwrap()["data"];
+        let entry = data["active_interventions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "iv-scale-1")
+            .unwrap();
+        assert_eq!(entry["type"], "scale");
+        assert_eq!(entry["params"]["factor"], 0.5);
+    }
+
+    #[test]
+    fn dispatch_intervene_set_add_returns_applied() {
+        let mut session = intervene_attached();
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-add-1",
+                "add",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({"vector": [1.0, 0.0, -1.0, 0.5]}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let active = resp.result.unwrap()["data"]["active_interventions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(active.iter().any(|r| r["id"] == "iv-add-1"));
+    }
+
+    #[test]
+    fn dispatch_intervene_set_patch_returns_applied() {
+        let mut session = intervene_attached();
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-patch-1",
+                "patch",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({"source_tensor_id": "a".repeat(64)}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let active = resp.result.unwrap()["data"]["active_interventions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(active.iter().any(|r| r["id"] == "iv-patch-1"));
+    }
+
+    #[test]
+    fn dispatch_intervene_clear_removes_entry() {
+        let mut session = intervene_attached();
+        dispatch(
+            &mut session,
+            &make_request(
+                "rocket/intervene",
+                set_recipe(
+                    "iv-1",
+                    "ablate",
+                    "llama:0:12:attn.o_proj:output",
+                    serde_json::json!({}),
+                ),
+            ),
+        );
+        let req = make_request(
+            "rocket/intervene",
+            serde_json::json!({"action": "clear", "intervention_id": "iv-1"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let active = resp.result.unwrap()["data"]["active_interventions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(active.iter().all(|r| r["id"] != "iv-1"));
+    }
+
+    #[test]
+    fn dispatch_intervene_list_returns_all() {
+        let mut session = intervene_attached();
+        for (id, kind) in [("iv-a", "ablate"), ("iv-b", "clamp")] {
+            let params = if kind == "clamp" {
+                serde_json::json!({"min": -1.0, "max": 1.0})
+            } else {
+                serde_json::json!({})
+            };
+            dispatch(
+                &mut session,
+                &make_request(
+                    "rocket/intervene",
+                    set_recipe(id, kind, "llama:0:8:mlp:output", params),
+                ),
+            );
+        }
+        let resp = dispatch(
+            &mut session,
+            &make_request("rocket/intervene", serde_json::json!({"action": "list"})),
+        );
+        let active = resp.result.unwrap()["data"]["active_interventions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(active.len(), 2);
+    }
+
+    #[test]
+    fn dispatch_intervene_persists_across_steps() {
+        let mut session = intervene_attached();
+        dispatch(
+            &mut session,
+            &make_request(
+                "rocket/intervene",
+                set_recipe(
+                    "iv-persist",
+                    "ablate",
+                    "llama:0:12:attn.o_proj:output",
+                    serde_json::json!({}),
+                ),
+            ),
+        );
+        for _ in 0..2 {
+            dispatch(
+                &mut session,
+                &make_request(
+                    "rocket/step",
+                    serde_json::json!({"direction": "forward", "count": 1}),
+                ),
+            );
+        }
+        let resp = dispatch(
+            &mut session,
+            &make_request("rocket/intervene", serde_json::json!({"action": "list"})),
+        );
+        let active = resp.result.unwrap()["data"]["active_interventions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(active.iter().any(|r| r["id"] == "iv-persist"));
+    }
+
+    #[test]
+    fn dispatch_intervene_invalid_target_returns_error() {
+        let mut session = intervene_attached();
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-bad",
+                "ablate",
+                "llama:0:999:nonexistent.component:output",
+                serde_json::json!({}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(data.error_code, ErrorCode::InvalidTarget);
+    }
+
+    #[test]
+    fn dispatch_intervene_invalid_recipe_returns_error() {
+        let mut session = intervene_attached();
+        // `type: scale` but params lack `factor` — an untagged-deserialization
+        // type/params mismatch the daemon must reject.
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-bad",
+                "scale",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        let data = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(data.error_code, ErrorCode::InvalidRecipe);
+    }
+
+    #[test]
+    fn dispatch_intervene_when_not_attached_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        let req = make_request(
+            "rocket/intervene",
+            set_recipe(
+                "iv-1",
+                "ablate",
+                "llama:0:12:attn.o_proj:output",
+                serde_json::json!({}),
+            ),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(resp.error.is_some());
     }
 }
