@@ -2,12 +2,17 @@
 //! and renders. The single owner of [`UiState`] and [`Layout`].
 
 use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use rocket_surgeon_protocol::types::Status;
 
 use crate::action::DaemonEvent;
+use crate::components::Component;
+use crate::components::command_line::CommandLine;
+use crate::components::status_bar::StatusBar;
 use crate::input::events::InputEvent;
 use crate::input::terminal::decode;
-use crate::render::compositor;
 use crate::state::reducer::apply_input;
 use crate::state::{UiState, ViewId, ViewKind, ViewSlot, initial_ui_state};
 use crate::tiling::Layout;
@@ -23,6 +28,8 @@ pub enum Flow {
 pub struct App {
     state: UiState,
     layout: Layout,
+    status_bar: StatusBar,
+    command_line: CommandLine,
 }
 
 impl App {
@@ -33,6 +40,8 @@ impl App {
         Self {
             state,
             layout: default_layout(),
+            status_bar: StatusBar,
+            command_line: CommandLine,
         }
     }
 
@@ -67,8 +76,38 @@ impl App {
     }
 
     /// Render the current state into `frame` (immediate mode — every frame).
+    ///
+    /// Walks the [`Layout`] to allocate a rect per [`ViewId`], finds each
+    /// view's [`ViewSlot`], and dispatches to the owning [`Component`].
+    /// `ViewKind`s without a component yet fall through to the placeholder.
     pub fn draw(&self, frame: &mut Frame<'_>) {
-        compositor::render_frame(frame, &self.layout, &self.state);
+        let allocations = self.layout.resolve(frame.area());
+        for (view_id, rect) in &allocations {
+            let kind = self
+                .state
+                .views
+                .iter()
+                .find(|v| &v.id == view_id)
+                .map(|v| &v.kind);
+            match kind {
+                Some(ViewKind::StatusBar) => self.status_bar.draw(frame, *rect, &self.state),
+                Some(ViewKind::CommandLine) => self.command_line.draw(frame, *rect, &self.state),
+                _ => Self::draw_placeholder(frame, *rect, view_id),
+            }
+        }
+    }
+
+    /// Render a bordered placeholder for a [`ViewKind`] that has no component
+    /// yet (`LayerStack`, `TensorDetail`, …, built per-panel in slice 5).
+    fn draw_placeholder(frame: &mut Frame<'_>, rect: Rect, view_id: &ViewId) {
+        let block = Block::default()
+            .title(format!("View {}", view_id.0))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner_text = Paragraph::new("(awaiting data)")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(block);
+        frame.render_widget(inner_text, rect);
     }
 }
 
@@ -88,11 +127,21 @@ fn default_views() -> Vec<ViewSlot> {
             id: ViewId(1),
             kind: ViewKind::StatusBar,
         },
+        ViewSlot {
+            id: ViewId(2),
+            kind: ViewKind::CommandLine,
+        },
     ]
 }
 
+/// The main panel fills the screen; the status bar and command line share the
+/// bottom row, one above the other.
 fn default_layout() -> Layout {
-    Layout::vsplit(Layout::single(ViewId(0)), Layout::single(ViewId(1)), 0.95)
+    Layout::vsplit(
+        Layout::single(ViewId(0)),
+        Layout::vsplit(Layout::single(ViewId(1)), Layout::single(ViewId(2)), 0.5),
+        0.92,
+    )
 }
 
 #[cfg(test)]
@@ -100,6 +149,9 @@ mod tests {
     use super::*;
     use crate::input::mode::Mode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent {
@@ -113,7 +165,13 @@ mod tests {
     #[test]
     fn new_app_has_default_views() {
         let app = App::new();
-        assert_eq!(app.state.views.len(), 2);
+        assert_eq!(app.state.views.len(), 3);
+        assert!(
+            app.state
+                .views
+                .iter()
+                .any(|v| v.kind == ViewKind::CommandLine)
+        );
     }
 
     #[test]
@@ -178,5 +236,45 @@ mod tests {
         app.handle_daemon(&DaemonEvent::TickStopped(sample_position()));
         assert_eq!(app.state.session.status, Status::Stopped);
         assert_eq!(app.state.session.position.as_ref().unwrap().tick_id, 3);
+    }
+
+    #[test]
+    fn draw_renders_without_panic() {
+        let app = App::new();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+    }
+
+    #[test]
+    fn draw_dispatches_all_default_views() {
+        // The default layout resolves to three rects, one per default view;
+        // walking it must not panic and must cover the full screen.
+        let app = App::new();
+        let allocations = app.layout.resolve(Rect::new(0, 0, 80, 24));
+        assert_eq!(allocations.len(), 3);
+        for slot in &app.state.views {
+            assert!(
+                allocations.iter().any(|(id, _)| id == &slot.id),
+                "view {:?} has no rect",
+                slot.id
+            );
+        }
+    }
+
+    #[test]
+    fn draw_renders_placeholder_for_layerstack() {
+        // ViewId(0) is a LayerStack — an unmapped kind — so it routes to the
+        // placeholder, whose bordered block is titled "View 0".
+        let app = App::new();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let content: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("View 0"));
     }
 }
