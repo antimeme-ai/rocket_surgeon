@@ -6,6 +6,8 @@ use crate::input::mode::Mode;
 use super::{DataDep, SessionSnapshot, UiState};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 pub enum UiEvent {
     Input(InputEvent),
     Daemon(DaemonEvent),
@@ -13,6 +15,8 @@ pub enum UiEvent {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonEvent {
     Connected { protocol_version: String },
     Disconnected,
@@ -22,6 +26,7 @@ pub enum DaemonEvent {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum InternalEvent {
     RequestStarted,
     RequestFinished,
@@ -39,7 +44,7 @@ pub fn reduce(state: UiState, event: UiEvent) -> UiState {
 fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
     match event {
         InputEvent::Navigation(nav) => {
-            reduce_navigation(&mut state, nav);
+            reduce_navigation(&mut state, &nav);
             state
         }
         InputEvent::Mode(mode_event) => {
@@ -47,7 +52,7 @@ fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
             state
         }
         InputEvent::Command(cmd) => {
-            reduce_command(&mut state, cmd);
+            reduce_command(&mut state, &cmd);
             state
         }
         InputEvent::Quit => state,
@@ -58,7 +63,7 @@ fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
     }
 }
 
-fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
+fn reduce_navigation(state: &mut UiState, nav: &NavigationEvent) {
     match nav {
         NavigationEvent::Up => {
             state.cursor.layer = state.cursor.layer.saturating_sub(1);
@@ -95,13 +100,10 @@ fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
             state.cursor.token_position = u64::MAX;
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
-        NavigationEvent::ZoomIn | NavigationEvent::ZoomOut => {
-            mark_dep_dirty(state, &DataDep::CursorPosition);
-        }
-        NavigationEvent::JumpTo(_) => {
-            mark_dep_dirty(state, &DataDep::CursorPosition);
-        }
-        NavigationEvent::ContinuousAdjust { .. } => {
+        NavigationEvent::ZoomIn
+        | NavigationEvent::ZoomOut
+        | NavigationEvent::JumpTo(_)
+        | NavigationEvent::ContinuousAdjust { .. } => {
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
     }
@@ -135,10 +137,10 @@ fn reduce_mode(state: &mut UiState, event: ModeEvent) {
     }
 }
 
-fn reduce_command(state: &mut UiState, cmd: CommandEvent) {
+fn reduce_command(state: &mut UiState, cmd: &CommandEvent) {
     match cmd {
         CommandEvent::Char(c) => {
-            state.command_buffer.push(c);
+            state.command_buffer.push(*c);
         }
         CommandEvent::Backspace => {
             state.command_buffer.pop();

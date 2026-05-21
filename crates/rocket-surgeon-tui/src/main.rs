@@ -67,7 +67,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cli: &Cli,
 ) -> anyhow::Result<()> {
-    let frame_budget = Duration::from_millis(1000 / cli.fps as u64);
+    let frame_budget = Duration::from_millis(1000 / u64::from(cli.fps));
 
     let mut state = initial_ui_state();
     state.views = default_views();

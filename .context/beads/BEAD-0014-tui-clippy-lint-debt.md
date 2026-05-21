@@ -1,7 +1,7 @@
 ---
 id: BEAD-0014
 title: rocket-surgeon-tui carries ~88 clippy errors — blocks the local commit gate
-status: open
+status: closed
 priority: medium
 created: 2026-05-21
 ---
@@ -40,16 +40,9 @@ are clippy-clean; the debt is entirely in `rocket-surgeon-tui`.
 
 ## Resolution
 
-The dead code is unwired WIP scaffolding. Two viable directions:
-
-1. Delete the modules/items that are not on the near-term TUI path, and keep
-   only what the next TUI work unit will use; or
-2. Keep the scaffold but gate it with `#[allow(dead_code)]` (crate- or
-   module-scoped) and a tracking comment, so the gate passes while the TUI
-   work unit is in flight.
-
-Cosmetic lints (`use_self`, style nits) should just be fixed — they are
-mechanical and `cargo clippy --fix` handles most.
-
-Pick a direction as part of the TUI work unit. Until then, unrelated commits
-must use `git commit --no-verify` (the documented master-red workaround).
+Kept the TUI scaffold and added module- or item-scoped `dead_code` allowances
+to the unwired modules/items that the next daemon-connected TUI slice will use. Fixed the
+mechanical clippy findings in the reachable code and tests. Verified with
+`cargo clippy -p rocket-surgeon-tui --all-targets -- -D warnings`,
+`cargo test -p rocket-surgeon-tui`, workspace clippy/tests, and
+`cargo xtask ci`.

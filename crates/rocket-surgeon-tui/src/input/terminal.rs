@@ -3,6 +3,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use super::events::{CommandEvent, InputEvent, ModeEvent, NavigationEvent};
 use super::mode::Mode;
 
+#[allow(clippy::needless_pass_by_value)]
 pub fn decode(event: Event, mode: Mode) -> Option<InputEvent> {
     match event {
         Event::Key(key) => decode_key(key, mode),
@@ -29,7 +30,7 @@ fn decode_key(key: KeyEvent, mode: Mode) -> Option<InputEvent> {
 
 fn decode_ctrl(code: KeyCode, _mode: Mode) -> Option<InputEvent> {
     match code {
-        KeyCode::Char('c') | KeyCode::Char('q') => Some(InputEvent::Quit),
+        KeyCode::Char('c' | 'q') => Some(InputEvent::Quit),
         _ => None,
     }
 }
@@ -45,9 +46,7 @@ fn decode_normal(code: KeyCode) -> Option<InputEvent> {
         KeyCode::PageDown => Some(InputEvent::Navigation(NavigationEvent::PageDown)),
         KeyCode::Home => Some(InputEvent::Navigation(NavigationEvent::Home)),
         KeyCode::End => Some(InputEvent::Navigation(NavigationEvent::End)),
-        KeyCode::Char('+') | KeyCode::Char('=') => {
-            Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
-        }
+        KeyCode::Char('+' | '=') => Some(InputEvent::Navigation(NavigationEvent::ZoomIn)),
         KeyCode::Char('-') => Some(InputEvent::Navigation(NavigationEvent::ZoomOut)),
 
         // Mode transitions
@@ -81,9 +80,7 @@ fn decode_inspect(code: KeyCode) -> Option<InputEvent> {
         KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::Navigation(NavigationEvent::Down)),
         KeyCode::Left | KeyCode::Char('h') => Some(InputEvent::Navigation(NavigationEvent::Left)),
         KeyCode::Right | KeyCode::Char('l') => Some(InputEvent::Navigation(NavigationEvent::Right)),
-        KeyCode::Char('+') | KeyCode::Char('=') => {
-            Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
-        }
+        KeyCode::Char('+' | '=') => Some(InputEvent::Navigation(NavigationEvent::ZoomIn)),
         KeyCode::Char('-') => Some(InputEvent::Navigation(NavigationEvent::ZoomOut)),
         _ => None,
     }

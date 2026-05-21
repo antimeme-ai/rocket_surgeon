@@ -1,5 +1,6 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Mode {
+    #[default]
     Normal,
     Command,
     Inspect,
@@ -7,23 +8,17 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn transition(self, target: Mode) -> Option<Mode> {
+    pub fn transition(self, target: Self) -> Option<Self> {
         match (self, target) {
             (from, to) if from == to => None,
             // From Normal, can enter any mode
-            (Mode::Normal, _) => Some(target),
+            (Self::Normal, _) => Some(target),
             // From any mode, can return to Normal
-            (_, Mode::Normal) => Some(Mode::Normal),
+            (_, Self::Normal) => Some(Self::Normal),
             // Direct transitions between non-Normal modes not allowed —
             // must go through Normal first
             _ => None,
         }
-    }
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Normal
     }
 }
 

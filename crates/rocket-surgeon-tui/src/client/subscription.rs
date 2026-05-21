@@ -4,12 +4,15 @@ use rocket_surgeon_protocol::messages::{EventType, SubscribeFilter, SubscribeReq
 
 use super::connection::{ClientError, ReconnectingClient};
 
+// Built and unit-tested ahead of daemon wiring in the main TUI loop.
+#[allow(dead_code)]
 pub struct SubscriptionState {
     pub active_events: HashSet<EventType>,
     pub active_layers: Option<Vec<u32>>,
     pub active_components: Option<Vec<String>>,
 }
 
+#[allow(dead_code)]
 pub fn initial_subscription_state() -> SubscriptionState {
     SubscriptionState {
         active_events: HashSet::new(),
@@ -18,6 +21,7 @@ pub fn initial_subscription_state() -> SubscriptionState {
     }
 }
 
+#[allow(dead_code)]
 pub async fn update_filter(
     state: &mut SubscriptionState,
     client: &ReconnectingClient,
@@ -66,11 +70,12 @@ pub async fn update_filter(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn unsubscribe(
     state: &mut SubscriptionState,
     client: &ReconnectingClient,
 ) -> Result<(), ClientError> {
-    let params = serde_json::to_value(&serde_json::json!({})).unwrap();
+    let params = serde_json::json!({});
     let resp = client.request(method::UNSUBSCRIBE, params).await?;
 
     if let Some(err) = resp.error {

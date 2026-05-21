@@ -2,18 +2,23 @@ use std::collections::{HashMap, VecDeque};
 
 use rocket_surgeon_protocol::types::TensorSummary;
 
+// Built and unit-tested ahead of daemon-backed inspect data.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub tick_id: u64,
     pub probe_point: String,
 }
 
+// Built and unit-tested ahead of daemon-backed inspect data.
+#[allow(dead_code)]
 pub struct TensorCache {
     entries: HashMap<CacheKey, TensorSummary>,
     order: VecDeque<CacheKey>,
     max_entries: usize,
 }
 
+#[allow(dead_code)]
 impl TensorCache {
     pub fn new(max_entries: usize) -> Self {
         Self {

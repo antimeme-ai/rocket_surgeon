@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use super::{DataDep, UiState, ViewId};
 
+// Built and unit-tested ahead of reducer-driven layout updates.
+#[allow(dead_code)]
 pub fn compute_dirty(old: &UiState, new: &UiState) -> HashSet<ViewId> {
     let mut dirty = HashSet::new();
 
@@ -22,6 +24,7 @@ pub fn compute_dirty(old: &UiState, new: &UiState) -> HashSet<ViewId> {
     dirty
 }
 
+#[allow(dead_code)]
 fn changed_data_deps(old: &UiState, new: &UiState) -> Vec<DataDep> {
     let mut changed = Vec::new();
 

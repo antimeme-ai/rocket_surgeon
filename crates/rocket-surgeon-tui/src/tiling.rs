@@ -5,33 +5,35 @@ use crate::state::{UiState, ViewId};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Layout {
     Single(ViewId),
+    #[allow(dead_code)]
     HSplit {
-        left: Box<Layout>,
-        right: Box<Layout>,
+        left: Box<Self>,
+        right: Box<Self>,
         ratio: f32,
     },
     VSplit {
-        top: Box<Layout>,
-        bottom: Box<Layout>,
+        top: Box<Self>,
+        bottom: Box<Self>,
         ratio: f32,
     },
 }
 
 impl Layout {
     pub fn single(view: ViewId) -> Self {
-        Layout::Single(view)
+        Self::Single(view)
     }
 
-    pub fn hsplit(left: Layout, right: Layout, ratio: f32) -> Self {
-        Layout::HSplit {
+    #[allow(dead_code)]
+    pub fn hsplit(left: Self, right: Self, ratio: f32) -> Self {
+        Self::HSplit {
             left: Box::new(left),
             right: Box::new(right),
             ratio: ratio.clamp(0.1, 0.9),
         }
     }
 
-    pub fn vsplit(top: Layout, bottom: Layout, ratio: f32) -> Self {
-        Layout::VSplit {
+    pub fn vsplit(top: Self, bottom: Self, ratio: f32) -> Self {
+        Self::VSplit {
             top: Box::new(top),
             bottom: Box::new(bottom),
             ratio: ratio.clamp(0.1, 0.9),
@@ -46,11 +48,11 @@ impl Layout {
 
     fn resolve_into(&self, area: Rect, out: &mut Vec<(ViewId, Rect)>) {
         match self {
-            Layout::Single(id) => {
+            Self::Single(id) => {
                 out.push((id.clone(), area));
             }
-            Layout::HSplit { left, right, ratio } => {
-                let left_width = (area.width as f32 * ratio) as u16;
+            Self::HSplit { left, right, ratio } => {
+                let left_width = (f32::from(area.width) * ratio) as u16;
                 let right_width = area.width.saturating_sub(left_width);
                 left.resolve_into(Rect::new(area.x, area.y, left_width, area.height), out);
                 right.resolve_into(
@@ -58,8 +60,8 @@ impl Layout {
                     out,
                 );
             }
-            Layout::VSplit { top, bottom, ratio } => {
-                let top_height = (area.height as f32 * ratio) as u16;
+            Self::VSplit { top, bottom, ratio } => {
+                let top_height = (f32::from(area.height) * ratio) as u16;
                 let bottom_height = area.height.saturating_sub(top_height);
                 top.resolve_into(Rect::new(area.x, area.y, area.width, top_height), out);
                 bottom.resolve_into(
@@ -70,29 +72,32 @@ impl Layout {
         }
     }
 
+    #[allow(dead_code)]
     pub fn adjust_ratio(&mut self, delta: f32) {
         match self {
-            Layout::HSplit { ratio, .. } | Layout::VSplit { ratio, .. } => {
+            Self::HSplit { ratio, .. } | Self::VSplit { ratio, .. } => {
                 *ratio = (*ratio + delta).clamp(0.1, 0.9);
             }
-            Layout::Single(_) => {}
+            Self::Single(_) => {}
         }
     }
 
+    #[allow(dead_code)]
     pub fn view_ids(&self) -> Vec<ViewId> {
         let mut ids = Vec::new();
         self.collect_ids(&mut ids);
         ids
     }
 
+    #[allow(dead_code)]
     fn collect_ids(&self, ids: &mut Vec<ViewId>) {
         match self {
-            Layout::Single(id) => ids.push(id.clone()),
-            Layout::HSplit { left, right, .. } => {
+            Self::Single(id) => ids.push(id.clone()),
+            Self::HSplit { left, right, .. } => {
                 left.collect_ids(ids);
                 right.collect_ids(ids);
             }
-            Layout::VSplit { top, bottom, .. } => {
+            Self::VSplit { top, bottom, .. } => {
                 top.collect_ids(ids);
                 bottom.collect_ids(ids);
             }
@@ -100,6 +105,7 @@ impl Layout {
     }
 }
 
+#[allow(dead_code)]
 pub fn propose_layout(old: &UiState, new: &UiState) -> Option<Layout> {
     if old.cursor.component != new.cursor.component && !new.cursor.component.is_empty() {
         return Some(Layout::hsplit(

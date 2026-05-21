@@ -28,6 +28,8 @@ pub struct SessionSnapshot {
     pub status: Status,
     pub position: Option<TickPosition>,
     pub capabilities: Option<Capabilities>,
+    // Populated once intervention views are wired into the TUI.
+    #[allow(dead_code)]
     pub active_interventions: Vec<InterventionRecipe>,
     pub protocol_version: String,
 }
@@ -37,6 +39,8 @@ pub struct CursorState {
     pub layer: u32,
     pub component: String,
     pub token_position: u64,
+    // Used once multi-pane focus handling is wired into input reduction.
+    #[allow(dead_code)]
     pub focused_view: ViewId,
 }
 
@@ -50,20 +54,30 @@ pub struct ViewSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewKind {
     LayerStack,
+    #[allow(dead_code)]
     TensorDetail,
+    #[allow(dead_code)]
     ProbeWatch,
+    #[allow(dead_code)]
     Timeline,
+    #[allow(dead_code)]
     KvCache,
+    #[allow(dead_code)]
     Worldline,
+    #[allow(dead_code)]
     CommandLine,
     StatusBar,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataDep {
     SessionStatus,
     CursorPosition,
-    TensorAt { layer: u32, component: String },
+    #[allow(dead_code)]
+    TensorAt {
+        layer: u32,
+        component: String,
+    },
     Interventions,
     Mode,
 }

@@ -7,7 +7,9 @@ pub enum InputEvent {
     Resize { width: u16, height: u16 },
 }
 
+// Some navigation intents are reserved for the daemon-connected view layer.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum NavigationEvent {
     Up,
     Down,
@@ -23,7 +25,9 @@ pub enum NavigationEvent {
     ContinuousAdjust { axis: Axis, value: f32 },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// Command cancellation is reserved for the command executor slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CommandEvent {
     Char(char),
     Execute,
@@ -42,7 +46,9 @@ pub enum ModeEvent {
     ExitToNormal,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// Continuous adjustment axes are reserved for richer tensor/detail views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Axis {
     Layer,
     TokenPosition,
@@ -50,7 +56,9 @@ pub enum Axis {
     Custom(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// Jump targets are reserved for command-mode navigation commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum JumpTarget {
     Layer(u32),
     Token(u64),
