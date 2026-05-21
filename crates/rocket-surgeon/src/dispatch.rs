@@ -3,10 +3,10 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, DiscoverRequest, EventType, HostAttachResponse, HostViewResponse,
-    InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest,
-    ViewResponse, method,
+    AttachRequest, CheckpointRequest, DiscoverRequest, EventType, HostAttachResponse,
+    HostViewResponse, InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, TickPosition};
 
@@ -263,9 +263,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::VIEW => handle_view(session, request, None),
         method::DISCOVER => handle_discover(session, request),
         method::VIEW_DEFINE => handle_view_define(session, request),
-        method::INTERVENE | method::CHECKPOINT | method::REPLAY => {
-            handle_stub_requires_stopped(session, request)
-        }
+        method::CHECKPOINT => handle_checkpoint(session, request),
+        method::INTERVENE | method::REPLAY => handle_stub_requires_stopped(session, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -274,6 +273,37 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
                 data: None,
             },
         ),
+    }
+}
+
+/// `rocket/checkpoint` — create / list / restore / delete / bookmark.
+///
+/// Pure daemon-side bookkeeping: the `CheckpointRef` registry lives in
+/// session state. `create`/`restore` move the logical tick position;
+/// worker-side tensor capture is a separate tier over `_host/checkpoint`.
+fn handle_checkpoint(session: &mut Session, request: &Request) -> Response {
+    let req: CheckpointRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/checkpoint") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let result = match req {
+        CheckpointRequest::Create { tier } => Ok(session.checkpoint_create(tier)),
+        CheckpointRequest::List {} => Ok(session.checkpoint_list()),
+        CheckpointRequest::Restore { checkpoint_id } => session.checkpoint_restore(&checkpoint_id),
+        CheckpointRequest::Delete { checkpoint_id } => session.checkpoint_delete(&checkpoint_id),
+        CheckpointRequest::Bookmark { tick_id, name } => {
+            Ok(session.checkpoint_bookmark(tick_id, &name))
+        }
+    };
+
+    match result {
+        Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
+        Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
 }
 
@@ -2024,5 +2054,73 @@ mod tests {
     fn nearest_components_is_always_non_empty() {
         assert!(!nearest_components("totally_bogus_xyz").is_empty());
         assert!(!nearest_components("").is_empty());
+    }
+
+    // --- checkpoint tests ---
+
+    #[test]
+    fn dispatch_checkpoint_create_returns_id() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/checkpoint",
+            serde_json::json!({"action": "create", "tier": "activation"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert!(result["data"]["checkpoint_id"].is_string());
+        assert_eq!(result["data"]["checkpoints"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_checkpoint_when_not_attached_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+
+        let req = make_request("rocket/checkpoint", serde_json::json!({"action": "create"}));
+        let resp = dispatch(&mut session, &req);
+        let err = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err.error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn dispatch_checkpoint_invalid_params_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request("rocket/checkpoint", serde_json::json!({"action": "bogus"}));
+        let resp = dispatch(&mut session, &req);
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            rocket_surgeon_protocol::jsonrpc::INVALID_PARAMS,
+        );
+    }
+
+    #[test]
+    fn dispatch_checkpoint_restore_missing_returns_not_found() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = make_request(
+            "rocket/checkpoint",
+            serde_json::json!({"action": "restore", "checkpoint_id": "nope"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        let err = resp.error.as_ref().unwrap().data.as_ref().unwrap();
+        assert_eq!(err.error_code, ErrorCode::CheckpointNotFound);
+        assert_eq!(
+            err.severity,
+            rocket_surgeon_protocol::errors::Severity::Recoverable
+        );
+        assert!(!err.suggestion.is_empty());
     }
 }
