@@ -66,7 +66,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::state::{DataDep, ViewSlot, initial_ui_state};
+    use crate::state::{ViewSlot, initial_ui_state};
 
     fn test_state() -> UiState {
         let mut state = initial_ui_state();
@@ -74,12 +74,10 @@ mod tests {
             ViewSlot {
                 id: ViewId(0),
                 kind: ViewKind::LayerStack,
-                data_deps: vec![DataDep::CursorPosition],
             },
             ViewSlot {
                 id: ViewId(1),
                 kind: ViewKind::StatusBar,
-                data_deps: vec![DataDep::SessionStatus, DataDep::Mode],
             },
         ];
         state
