@@ -65,7 +65,16 @@ def serialize_probe_frame_header(
     """Serialize a ProbeFrame header to 128 bytes (little-endian packed)."""
     if _HAS_NATIVE:
         return _native_serialize(  # type: ignore[no-any-return]
-            rank, layer, comp_id, dtype, ndim, shape, tick_id, offset, size, flags,
+            rank,
+            layer,
+            comp_id,
+            dtype,
+            ndim,
+            shape,
+            tick_id,
+            offset,
+            size,
+            flags,
             generation,
         )
     return _py_serialize_probe_frame_header(
