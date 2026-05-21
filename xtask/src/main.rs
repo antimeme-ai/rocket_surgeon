@@ -102,11 +102,24 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
-    // The whole workspace links and tests in one pass: the shared `pyo3`
-    // workspace dependency is feature-neutral, so the rs-worker binary
-    // (`auto-initialize`) and the cdylib crate no longer collide under Cargo
-    // feature unification. See the comment on `pyo3` in the workspace Cargo.toml.
-    run("cargo", &["test", "--workspace", "--all-targets"]).context("cargo test failed")
+    // Exclude PyO3 crates: rocket-surgeon-python is a cdylib whose test
+    // binary needs libpython on LD_LIBRARY_PATH (unavailable in CI), and
+    // rocket-surgeon-worker uses `auto-initialize` which conflicts with
+    // extension-module under feature unification. Both are exercised by
+    // pytest and e2e instead.
+    run(
+        "cargo",
+        &[
+            "test",
+            "--workspace",
+            "--all-targets",
+            "--exclude",
+            "rocket-surgeon-python",
+            "--exclude",
+            "rocket-surgeon-worker",
+        ],
+    )
+    .context("cargo test failed")
 }
 
 fn ruff(fix: bool) -> Result<()> {

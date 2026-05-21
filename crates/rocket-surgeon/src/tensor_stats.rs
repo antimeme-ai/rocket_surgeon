@@ -179,11 +179,11 @@ fn compute_pass2(values: &[f64], range_min: f64, range_max: f64, k: usize) -> Pa
         let entry = TopKHeapEntry::new(ax, x, i as u64);
         if heap.len() < k {
             heap.push(std::cmp::Reverse(entry));
-        } else if let Some(std::cmp::Reverse(min_entry)) = heap.peek() {
-            if ax > min_entry.abs_value {
-                heap.pop();
-                heap.push(std::cmp::Reverse(entry));
-            }
+        } else if let Some(std::cmp::Reverse(min_entry)) = heap.peek()
+            && ax > min_entry.abs_value
+        {
+            heap.pop();
+            heap.push(std::cmp::Reverse(entry));
         }
     }
 

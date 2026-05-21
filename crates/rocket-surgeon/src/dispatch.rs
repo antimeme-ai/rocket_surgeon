@@ -643,15 +643,14 @@ fn ingest_and_respond(
         summaries.push(summary);
     }
 
-    if shm_slots_consumed > 0 {
-        if let Some(consumer) = shm_consumer {
-            if let Err(e) = consumer.advance_by(shm_slots_consumed) {
-                tracing::warn!(
-                    count = shm_slots_consumed,
-                    "failed to advance shm consumer: {e}"
-                );
-            }
-        }
+    if shm_slots_consumed > 0
+        && let Some(consumer) = shm_consumer
+        && let Err(e) = consumer.advance_by(shm_slots_consumed)
+    {
+        tracing::warn!(
+            count = shm_slots_consumed,
+            "failed to advance shm consumer: {e}"
+        );
     }
 
     let slice_data = if req.detail == rocket_surgeon_protocol::messages::InspectDetail::Slice {
@@ -1068,10 +1067,11 @@ fn validate_recipe(recipe: &InterventionRecipe) -> Result<(), ErrorData> {
         ));
     }
 
-    if let Some(component) = target_component(&recipe.target) {
-        if component != "*" && !CANONICAL_COMPONENTS.contains(&component_leaf(component)) {
-            return Err(invalid_target_error(&recipe.target));
-        }
+    if let Some(component) = target_component(&recipe.target)
+        && component != "*"
+        && !CANONICAL_COMPONENTS.contains(&component_leaf(component))
+    {
+        return Err(invalid_target_error(&recipe.target));
     }
 
     if !recipe_type_matches_params(recipe) {

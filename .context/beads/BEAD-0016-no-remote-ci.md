@@ -1,9 +1,10 @@
 ---
 id: BEAD-0016
 title: No remote CI — branch protection requires a check nothing produces
-status: open
+status: closed
 priority: high
 created: 2026-05-21
+closed: 2026-05-21
 ---
 
 ## Description
@@ -41,3 +42,26 @@ the heavy stages behind a separate job.
 - A PR against `master` triggers `cargo xtask ci` automatically.
 - A green run satisfies branch protection; PRs merge without `--admin`.
 - A red run blocks the merge.
+
+## Resolution (2026-05-21)
+
+Added `.github/workflows/ci.yml` (branch `ci/remote-github-actions`, PR to
+`master`). One job, id and `name:` both `ci` — that string is the status
+check `master` branch protection must require.
+
+The job provisions the toolchain (`actions/checkout@v6`,
+`dtolnay/rust-toolchain@1.88.0` with rustfmt+clippy, `astral-sh/setup-uv@v8`
+for `uv` + Python 3.11, `lefthook` via `uv tool install`), caches the cargo
+registry/target (`Swatinem/rust-cache@v2`) and the uv environment, then runs
+`cargo xtask setup` followed by `cargo xtask ci` verbatim — fmt + clippy +
+ruff + mypy + cargo test + pytest + e2e. No divergence from the local
+`cargo xtask ci` gate, so remote and local gates are byte-identical.
+Triggers: `pull_request` → `master` and `push` → `master`. Permissions are
+least-privilege (`contents: read`).
+
+Sub-plan: `.context/plans/2026-05-21-remote-ci.md`.
+
+Remaining one-time admin action (not code, cannot be done by the workflow):
+once this workflow's first run is green, set the required status check on
+`master` branch protection to `ci`. PRs then merge on a real gate without
+`--admin`.

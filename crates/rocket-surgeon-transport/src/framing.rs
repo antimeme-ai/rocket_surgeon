@@ -33,15 +33,15 @@ pub fn read_message(reader: &mut impl BufRead) -> Result<String, FramingError> {
             break;
         }
 
-        if let Some((key, value)) = trimmed.split_once(':') {
-            if key.eq_ignore_ascii_case("content-length") {
-                content_length = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|_| FramingError::InvalidContentLength)?,
-                );
-            }
+        if let Some((key, value)) = trimmed.split_once(':')
+            && key.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|_| FramingError::InvalidContentLength)?,
+            );
         }
     }
 
