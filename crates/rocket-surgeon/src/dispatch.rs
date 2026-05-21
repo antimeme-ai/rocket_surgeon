@@ -3,10 +3,11 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, DiscoverRequest, EventType, HostAttachResponse, HostViewResponse,
-    InitializeRequest, InspectRequest, ProbeRequest, ProbeResponse, StepRequest, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest,
-    ViewResponse, method,
+    AttachRequest, DiscoverRequest, EventType, HostAttachResponse, HostKvInterveneResponse,
+    HostKvReadResponse, HostViewResponse, InitializeRequest, InspectRequest, KvInterveneRequest,
+    KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, StepRequest,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{DType, Phase, StepDirection, TickEvent, TickPosition};
 
@@ -263,6 +264,8 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::VIEW => handle_view(session, request, None),
         method::DISCOVER => handle_discover(session, request),
         method::VIEW_DEFINE => handle_view_define(session, request),
+        method::KV_READ => handle_kv_read(session, request, None),
+        method::KV_INTERVENE => handle_kv_intervene(session, request, None),
         method::INTERVENE | method::CHECKPOINT | method::REPLAY => {
             handle_stub_requires_stopped(session, request)
         }
@@ -824,6 +827,135 @@ pub fn handle_view(
     let resp = ViewResponse {
         view: hr.view,
         data: hr.data.clone(),
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+/// `rocket/kv.read` — read per-(layer, position, head) KV-cache norms.
+///
+/// Mirrors the `rocket/inspect` pipeline: the daemon validates session state
+/// and request shape, then a worker round-trip (via `host_response`) supplies
+/// the actual cache norms. When no orchestrator is wired, `host_response` is
+/// `None` and the daemon answers `HOST_ERROR`.
+///
+/// If the worker reports any requested position as evicted, the daemon raises
+/// a `KV_EVICTED` error whose `context` carries `evicted_at_tick` and the
+/// `nearest_checkpoint` (the highest-tick checkpoint at or before the eviction
+/// tick), so a client can re-run the prefill or restore a checkpoint.
+pub fn handle_kv_read(
+    session: &Session,
+    request: &Request,
+    host_response: Option<&HostKvReadResponse>,
+) -> Response {
+    let req: KvReadRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/kv.read") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let Some(hr) = host_response else {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(error_with_hint(
+                ErrorCode::HostError,
+                "No orchestrator available to read the KV cache",
+            )),
+        );
+    };
+
+    // An evicted requested position is a recoverable error, not an empty
+    // read. Surface the first one with structured recovery context.
+    if let Some(eviction) = hr.evicted.first() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(kv_evicted_error(session, &req, eviction)),
+        );
+    }
+
+    let resp = KvReadResponse {
+        entries: hr.entries.clone(),
+    };
+    serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+/// Build the `KV_EVICTED` error for a `kv.read` of an evicted position.
+///
+/// `context` carries `evicted_at_tick` (from the worker) and
+/// `nearest_checkpoint` — the checkpoint with the highest `tick_id` at or
+/// before the eviction tick, or `null` when no such checkpoint exists.
+fn kv_evicted_error(
+    session: &Session,
+    req: &KvReadRequest,
+    eviction: &rocket_surgeon_protocol::messages::KvEvictionInfo,
+) -> ErrorData {
+    let nearest = session
+        .state()
+        .checkpoints
+        .iter()
+        .filter(|c| c.tick_id <= eviction.evicted_at_tick)
+        .max_by_key(|c| c.tick_id);
+    let nearest_id = nearest.map(|c| c.checkpoint_id.clone());
+
+    error_with_context(
+        ErrorCode::KvEvicted,
+        format!(
+            "KV-cache position {} was evicted at tick {}",
+            eviction.position, eviction.evicted_at_tick
+        ),
+        serde_json::json!({
+            "position": eviction.position,
+            "evicted_at_tick": eviction.evicted_at_tick,
+            "nearest_checkpoint": nearest_id,
+            "requested_positions": req.positions,
+        }),
+    )
+}
+
+/// `rocket/kv.intervene` — mutate the KV cache (zero / scale / evict / pin).
+///
+/// The cache-side analogue of `rocket/intervene`. Validates session state and
+/// request shape, then forwards to the worker via `host_response`. With no
+/// orchestrator wired, answers `HOST_ERROR`.
+pub fn handle_kv_intervene(
+    session: &Session,
+    request: &Request,
+    host_response: Option<&HostKvInterveneResponse>,
+) -> Response {
+    let req: KvInterveneRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/kv.intervene") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    if req.layers.is_empty() || req.positions.is_empty() {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(error_with_hint(
+                ErrorCode::InvalidParams,
+                "kv.intervene requires non-empty `layers` and `positions`",
+            )),
+        );
+    }
+
+    let Some(hr) = host_response else {
+        return Response::error(
+            request.id.clone(),
+            RpcError::from_error_data(error_with_hint(
+                ErrorCode::HostError,
+                "No orchestrator available to apply the KV-cache intervention",
+            )),
+        );
+    };
+
+    let resp = KvInterveneResponse {
+        slots_modified: hr.slots_modified,
+        applied_op: hr.applied_op.clone(),
     };
     serialize_envelope(request.id.clone(), session.envelope(resp))
 }
@@ -2024,5 +2156,176 @@ mod tests {
     fn nearest_components_is_always_non_empty() {
         assert!(!nearest_components("totally_bogus_xyz").is_empty());
         assert!(!nearest_components("").is_empty());
+    }
+
+    // --- WU-G: rocket/kv.read + rocket/kv.intervene --------------------
+
+    fn stopped_session() -> Session {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        session
+    }
+
+    fn kv_read_host_response() -> HostKvReadResponse {
+        HostKvReadResponse {
+            entries: vec![
+                rocket_surgeon_protocol::messages::KvCacheEntry {
+                    layer: 0,
+                    position: 0,
+                    head: 0,
+                    k_metric: Some(1.0),
+                    v_metric: Some(2.0),
+                    overlay: None,
+                },
+                rocket_surgeon_protocol::messages::KvCacheEntry {
+                    layer: 1,
+                    position: 1,
+                    head: 0,
+                    k_metric: Some(3.0),
+                    v_metric: Some(4.0),
+                    overlay: None,
+                },
+            ],
+            evicted: vec![],
+        }
+    }
+
+    #[test]
+    fn kv_read_routes_through_dispatch_not_method_not_found() {
+        let mut session = stopped_session();
+        let req = make_request(
+            "rocket/kv.read",
+            serde_json::json!({"layers": [0, 1], "positions": [0, 1, 2]}),
+        );
+        let resp = dispatch(&mut session, &req);
+        // Without an orchestrator the daemon answers HOST_ERROR, NOT
+        // METHOD_NOT_FOUND — proving the dispatch arm is wired.
+        let err = resp
+            .error
+            .expect("kv.read should error without orchestrator");
+        assert_ne!(err.code, METHOD_NOT_FOUND);
+        assert_eq!(err.data.unwrap().error_code, ErrorCode::HostError);
+    }
+
+    #[test]
+    fn kv_read_with_host_response_returns_entries() {
+        let session = stopped_session();
+        let req = make_request(
+            "rocket/kv.read",
+            serde_json::json!({"layers": [0, 1], "positions": [0, 1]}),
+        );
+        let host = kv_read_host_response();
+        let resp = handle_kv_read(&session, &req, Some(&host));
+        assert!(resp.error.is_none(), "got: {:?}", resp.error);
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["entries"].as_array().unwrap().len(), 2);
+        assert!(data["entries"][0]["k_metric"].is_number());
+    }
+
+    #[test]
+    fn kv_read_evicted_position_returns_kv_evicted_error() {
+        let session = stopped_session();
+        let req = make_request("rocket/kv.read", serde_json::json!({"positions": [5]}));
+        let host = HostKvReadResponse {
+            entries: vec![],
+            evicted: vec![rocket_surgeon_protocol::messages::KvEvictionInfo {
+                position: 5,
+                evicted_at_tick: 17,
+            }],
+        };
+        let resp = handle_kv_read(&session, &req, Some(&host));
+        let err = resp.error.expect("evicted read must error");
+        let data = err.data.unwrap();
+        assert_eq!(data.error_code, ErrorCode::KvEvicted);
+        let ctx = data.context.unwrap();
+        assert_eq!(ctx["evicted_at_tick"], 17);
+        assert!(ctx.get("nearest_checkpoint").is_some());
+        assert_eq!(ctx["position"], 5);
+        // Recovery hint is always populated for daemon errors.
+        assert!(data.recovery_hint.is_some());
+    }
+
+    #[test]
+    fn kv_read_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        let req = make_request("rocket/kv.read", serde_json::json!({"positions": [0]}));
+        let resp = handle_kv_read(&session, &req, None);
+        let err = resp.error.expect("kv.read before attach must error");
+        assert_eq!(err.data.unwrap().error_code, ErrorCode::ModelNotAttached);
+    }
+
+    #[test]
+    fn kv_read_invalid_params_returns_invalid_params() {
+        let session = stopped_session();
+        let req = make_request("rocket/kv.read", serde_json::json!({"layers": "bogus"}));
+        let resp = handle_kv_read(&session, &req, None);
+        assert_eq!(
+            resp.error.unwrap().data.unwrap().error_code,
+            ErrorCode::InvalidParams
+        );
+    }
+
+    #[test]
+    fn kv_intervene_routes_through_dispatch_not_method_not_found() {
+        let mut session = stopped_session();
+        let req = make_request(
+            "rocket/kv.intervene",
+            serde_json::json!({"layers": [0], "positions": [0], "op": "zero"}),
+        );
+        let resp = dispatch(&mut session, &req);
+        let err = resp
+            .error
+            .expect("kv.intervene should error without orchestrator");
+        assert_ne!(err.code, METHOD_NOT_FOUND);
+        assert_eq!(err.data.unwrap().error_code, ErrorCode::HostError);
+    }
+
+    #[test]
+    fn kv_intervene_with_host_response_returns_summary() {
+        let session = stopped_session();
+        let req = make_request(
+            "rocket/kv.intervene",
+            serde_json::json!({"layers": [0], "positions": [5], "op": "evict"}),
+        );
+        let host = HostKvInterveneResponse {
+            slots_modified: 8,
+            applied_op: "evict".to_owned(),
+        };
+        let resp = handle_kv_intervene(&session, &req, Some(&host));
+        assert!(resp.error.is_none(), "got: {:?}", resp.error);
+        let data = &resp.result.unwrap()["data"];
+        assert_eq!(data["slots_modified"], 8);
+        assert_eq!(data["applied_op"], "evict");
+    }
+
+    #[test]
+    fn kv_intervene_empty_layers_returns_invalid_params() {
+        let session = stopped_session();
+        let req = make_request(
+            "rocket/kv.intervene",
+            serde_json::json!({"layers": [], "positions": [0], "op": "zero"}),
+        );
+        let resp = handle_kv_intervene(&session, &req, None);
+        assert_eq!(
+            resp.error.unwrap().data.unwrap().error_code,
+            ErrorCode::InvalidParams
+        );
+    }
+
+    #[test]
+    fn kv_intervene_when_not_stopped_returns_error() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        let req = make_request(
+            "rocket/kv.intervene",
+            serde_json::json!({"layers": [0], "positions": [0], "op": "pin"}),
+        );
+        let resp = handle_kv_intervene(&session, &req, None);
+        assert_eq!(
+            resp.error.unwrap().data.unwrap().error_code,
+            ErrorCode::ModelNotAttached
+        );
     }
 }

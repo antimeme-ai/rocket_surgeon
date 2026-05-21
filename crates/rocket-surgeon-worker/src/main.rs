@@ -2,6 +2,7 @@ mod adapter;
 mod bridge;
 mod capture;
 mod dispatch;
+mod kv;
 mod step_driver;
 mod tick;
 

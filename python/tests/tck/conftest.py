@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from .steps.common import *  # noqa: F403 — register all step defs
+from .steps.kv import *  # noqa: F403 — register KV-cache step defs
 
 TCK_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "tck"
 
