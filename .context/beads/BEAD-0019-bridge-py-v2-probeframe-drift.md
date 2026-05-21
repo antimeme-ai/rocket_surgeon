@@ -1,10 +1,17 @@
 ---
 id: BEAD-0019
 title: rocket-surgeon-python — _bridge.py stale vs v2 ProbeFrame signature, master red
-status: open
+status: closed
 priority: high
 created: 2026-05-21
+closed: 2026-05-21
+branch: fix/restore-green-master
 ---
+
+> **Resolved** — `_bridge.py` (native wrapper + pure-Python fallback) and
+> `test_bridge.py` updated to the v2 layout (`_pad0`, `data_off`,
+> `generation`); `test_bridge.py` green. Same PR bumps the workspace
+> `rust-version` to `1.88.0` (see below).
 
 ## Description
 

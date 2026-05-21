@@ -27,9 +27,10 @@ def sample_header_kwargs() -> dict:
         "ndim": 3,
         "shape": [2, 4096, 4096],
         "tick_id": 42,
-        "offset": 0x1000,
+        "data_off": 0x1000,
         "size": 2 * 4096 * 4096 * 4,
         "flags": 0,
+        "generation": 7,
     }
 
 
@@ -65,7 +66,8 @@ class TestSerializeProbeFrameHeader:
         assert parsed["dtype"] == sample_header_kwargs["dtype"]
         assert parsed["ndim"] == sample_header_kwargs["ndim"]
         assert parsed["tick_id"] == sample_header_kwargs["tick_id"]
-        assert parsed["offset"] == sample_header_kwargs["offset"]
+        assert parsed["data_off"] == sample_header_kwargs["data_off"]
+        assert parsed["generation"] == sample_header_kwargs["generation"]
         assert parsed["size"] == sample_header_kwargs["size"]
         assert parsed["flags"] == sample_header_kwargs["flags"]
         n_pad = 8 - len(sample_header_kwargs["shape"])
@@ -81,7 +83,8 @@ class TestSerializeProbeFrameHeader:
             ndim=2,
             shape=[1024, 768],
             tick_id=0,
-            offset=0,
+            data_off=0,
+            generation=0,
             size=0,
             flags=0,
         )
@@ -93,7 +96,7 @@ class TestSerializeProbeFrameHeader:
 
     def test_reserved_bytes_are_zero(self, sample_header_kwargs: dict) -> None:
         result = serialize_probe_frame_header(**sample_header_kwargs)
-        assert all(b == 0 for b in result[72:128])
+        assert all(b == 0 for b in result[80:128])
 
     def test_little_endian(self) -> None:
         result = serialize_probe_frame_header(
@@ -104,7 +107,8 @@ class TestSerializeProbeFrameHeader:
             ndim=0,
             shape=[],
             tick_id=0,
-            offset=0,
+            data_off=0,
+            generation=0,
             size=0,
             flags=0,
         )
@@ -135,7 +139,8 @@ class TestPurePythonFallback:
         assert native["ndim"] == pure_py["ndim"]
         assert list(native["shape"]) == list(pure_py["shape"])
         assert native["tick_id"] == pure_py["tick_id"]
-        assert native["offset"] == pure_py["offset"]
+        assert native["data_off"] == pure_py["data_off"]
+        assert native["generation"] == pure_py["generation"]
         assert native["size"] == pure_py["size"]
         assert native["flags"] == pure_py["flags"]
 
@@ -157,7 +162,8 @@ class TestPurePythonFallback:
                 ndim=9,
                 shape=[1] * 9,
                 tick_id=0,
-                offset=0,
+                data_off=0,
+                generation=0,
                 size=0,
                 flags=0,
             )
@@ -176,7 +182,8 @@ class TestPurePythonFallback:
                 ndim=5,
                 shape=[42],
                 tick_id=0,
-                offset=0,
+                data_off=0,
+                generation=0,
                 size=0,
                 flags=0,
             )
@@ -212,7 +219,8 @@ class TestNativeExtension:
                 ndim=0,
                 shape=[1024, 768],
                 tick_id=0,
-                offset=0,
+                data_off=0,
+                generation=0,
                 size=0,
                 flags=0,
             )
@@ -226,7 +234,8 @@ class TestNativeExtension:
             ndim=0,
             shape=[],
             tick_id=0,
-            offset=0,
+            data_off=0,
+            generation=0,
             size=0,
             flags=0,
         )
@@ -244,7 +253,8 @@ class TestNativeExtension:
             ndim=8,
             shape=[1] * 8,
             tick_id=0,
-            offset=0,
+            data_off=0,
+            generation=0,
             size=0,
             flags=0,
         )

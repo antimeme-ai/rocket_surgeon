@@ -12,8 +12,16 @@ import struct
 from typing import Any
 
 PROBE_FRAME_HEADER_SIZE = 128
-_RESERVED_SIZE = 56
 _SHAPE_SLOTS = 8
+
+# v2 ProbeFrame header layout — mirrors
+# crates/rocket-surgeon-python/src/probe_frame.rs: rank u32, layer u32,
+# comp_id u16, dtype u8, ndim u8, shape[8] u32, then 4 pad bytes (`4x`) that
+# 8-align the u64 block, then tick_id u64, data_off u64, size u64, flags u32,
+# generation u32. The packed prefix is 80 bytes; the bytes from there to
+# PROBE_FRAME_HEADER_SIZE are reserved and zeroed.
+_HEADER_STRUCT = "<IIHBB8I4xQQQII"
+_RESERVED_SIZE = PROBE_FRAME_HEADER_SIZE - struct.calcsize(_HEADER_STRUCT)
 
 _HAS_NATIVE: bool
 
@@ -57,14 +65,25 @@ def serialize_probe_frame_header(
     ndim: int,
     shape: list[int],
     tick_id: int,
-    offset: int,
+    data_off: int,
     size: int,
     flags: int,
+    generation: int,
 ) -> bytes:
     """Serialize a ProbeFrame header to 128 bytes (little-endian packed)."""
     if _HAS_NATIVE:
         return _native_serialize(  # type: ignore[no-any-return]
-            rank, layer, comp_id, dtype, ndim, shape, tick_id, offset, size, flags
+            rank,
+            layer,
+            comp_id,
+            dtype,
+            ndim,
+            shape,
+            tick_id,
+            data_off,
+            size,
+            flags,
+            generation,
         )
     return _py_serialize_probe_frame_header(
         rank=rank,
@@ -74,9 +93,10 @@ def serialize_probe_frame_header(
         ndim=ndim,
         shape=shape,
         tick_id=tick_id,
-        offset=offset,
+        data_off=data_off,
         size=size,
         flags=flags,
+        generation=generation,
     )
 
 
@@ -96,9 +116,10 @@ def _py_serialize_probe_frame_header(
     ndim: int,
     shape: list[int],
     tick_id: int,
-    offset: int,
+    data_off: int,
     size: int,
     flags: int,
+    generation: int,
 ) -> bytes:
     """Pure-Python ProbeFrame header serialization."""
     if len(shape) > _SHAPE_SLOTS:
@@ -111,7 +132,7 @@ def _py_serialize_probe_frame_header(
     padded_shape = list(shape) + [0] * (_SHAPE_SLOTS - len(shape))
 
     buf = struct.pack(
-        "<IIHBB8IQQQI",
+        _HEADER_STRUCT,
         rank,
         layer,
         comp_id,
@@ -119,9 +140,10 @@ def _py_serialize_probe_frame_header(
         ndim,
         *padded_shape,
         tick_id,
-        offset,
+        data_off,
         size,
         flags,
+        generation,
     )
     buf += b"\x00" * _RESERVED_SIZE
     return buf
@@ -133,27 +155,18 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
         msg = f"buffer too small: expected {PROBE_FRAME_HEADER_SIZE} bytes, got {len(data)}"
         raise ValueError(msg)
 
-    fields = struct.unpack_from("<IIHBB8IQQQI", data, 0)
-    rank = fields[0]
-    layer = fields[1]
-    comp_id = fields[2]
-    dtype = fields[3]
-    ndim = fields[4]
-    shape = list(fields[5:13])
-    tick_id = fields[13]
-    offset = fields[14]
-    size = fields[15]
-    flags = fields[16]
+    fields = struct.unpack_from(_HEADER_STRUCT, data, 0)
 
     return {
-        "rank": rank,
-        "layer": layer,
-        "comp_id": comp_id,
-        "dtype": dtype,
-        "ndim": ndim,
-        "shape": shape,
-        "tick_id": tick_id,
-        "offset": offset,
-        "size": size,
-        "flags": flags,
+        "rank": fields[0],
+        "layer": fields[1],
+        "comp_id": fields[2],
+        "dtype": fields[3],
+        "ndim": fields[4],
+        "shape": list(fields[5:13]),
+        "tick_id": fields[13],
+        "data_off": fields[14],
+        "size": fields[15],
+        "flags": fields[16],
+        "generation": fields[17],
     }
