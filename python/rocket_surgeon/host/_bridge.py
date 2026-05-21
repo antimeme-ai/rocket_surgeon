@@ -12,7 +12,7 @@ import struct
 from typing import Any
 
 PROBE_FRAME_HEADER_SIZE = 128
-_RESERVED_SIZE = 52
+_RESERVED_SIZE = 48
 _SHAPE_SLOTS = 8
 
 _HAS_NATIVE: bool
@@ -57,7 +57,7 @@ def serialize_probe_frame_header(
     ndim: int,
     shape: list[int],
     tick_id: int,
-    offset: int,
+    data_off: int,
     size: int,
     flags: int,
     generation: int,
@@ -72,7 +72,7 @@ def serialize_probe_frame_header(
             ndim,
             shape,
             tick_id,
-            offset,
+            data_off,
             size,
             flags,
             generation,
@@ -85,7 +85,7 @@ def serialize_probe_frame_header(
         ndim=ndim,
         shape=shape,
         tick_id=tick_id,
-        offset=offset,
+        data_off=data_off,
         size=size,
         flags=flags,
         generation=generation,
@@ -108,7 +108,7 @@ def _py_serialize_probe_frame_header(
     ndim: int,
     shape: list[int],
     tick_id: int,
-    offset: int,
+    data_off: int,
     size: int,
     flags: int,
     generation: int,
@@ -124,7 +124,7 @@ def _py_serialize_probe_frame_header(
     padded_shape = list(shape) + [0] * (_SHAPE_SLOTS - len(shape))
 
     buf = struct.pack(
-        "<IIHBB8IQQQII",
+        "<IIHBB8IxxxxQQQII",
         rank,
         layer,
         comp_id,
@@ -132,7 +132,7 @@ def _py_serialize_probe_frame_header(
         ndim,
         *padded_shape,
         tick_id,
-        offset,
+        data_off,
         size,
         flags,
         generation,
@@ -147,7 +147,7 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
         msg = f"buffer too small: expected {PROBE_FRAME_HEADER_SIZE} bytes, got {len(data)}"
         raise ValueError(msg)
 
-    fields = struct.unpack_from("<IIHBB8IQQQII", data, 0)
+    fields = struct.unpack_from("<IIHBB8IxxxxQQQII", data, 0)
     rank = fields[0]
     layer = fields[1]
     comp_id = fields[2]
@@ -155,7 +155,7 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
     ndim = fields[4]
     shape = list(fields[5:13])
     tick_id = fields[13]
-    offset = fields[14]
+    data_off = fields[14]
     size = fields[15]
     flags = fields[16]
     generation = fields[17]
@@ -168,7 +168,7 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
         "ndim": ndim,
         "shape": shape,
         "tick_id": tick_id,
-        "offset": offset,
+        "data_off": data_off,
         "size": size,
         "flags": flags,
         "generation": generation,
