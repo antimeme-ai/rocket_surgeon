@@ -642,19 +642,28 @@ impl Session {
         Ok(self.envelope_with_mode(req.envelope, data))
     }
 
+    /// Build the `inspect` response honouring the client-requested
+    /// [`EnvelopeMode`] (TCK `envelope-compactness.feature`).
+    ///
+    /// Mirrors [`Self::step`]: the three envelope modes have genuinely
+    /// different wire shapes, so the response flows through
+    /// [`Self::envelope_with_mode`] and the return type is
+    /// [`serde_json::Value`].
     #[allow(dead_code)]
     pub fn inspect(
         &self,
         tensors: &[TensorSummary],
         slice_data: Option<String>,
-    ) -> Result<ResponseEnvelope<InspectResponse>, SessionError> {
+        mode: EnvelopeMode,
+    ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/inspect")?;
 
-        Ok(self.envelope(InspectResponse {
+        let data = InspectResponse {
             tensors: tensors.to_vec(),
             view_result: None,
             slice_data,
-        }))
+        };
+        Ok(self.envelope_with_mode(mode, data))
     }
 
     /// Discover probe-points matching a wildcard `pattern`.
@@ -1321,20 +1330,20 @@ mod tests {
     fn inspect_from_stopped_succeeds() {
         let session = stopped_session();
         let tensors = vec![sample_tensor_summary()];
-        let result = session.inspect(&tensors, None);
+        let result = session.inspect(&tensors, None, EnvelopeMode::Full);
         assert!(result.is_ok());
-        let envelope = result.unwrap();
-        assert_eq!(envelope.state.status, Status::Stopped);
-        let data = envelope.data.as_ref().unwrap();
-        assert_eq!(data.tensors.len(), 1);
-        assert!(data.slice_data.is_none());
-        assert!(data.view_result.is_none());
+        let value = result.unwrap();
+        assert_eq!(value["state"]["status"], "stopped");
+        let data = &value["data"];
+        assert_eq!(data["tensors"].as_array().unwrap().len(), 1);
+        assert!(data["slice_data"].is_null());
+        assert!(data["view_result"].is_null());
     }
 
     #[test]
     fn inspect_from_initialized_returns_error() {
         let session = initialized_session();
-        let result = session.inspect(&[], None);
+        let result = session.inspect(&[], None, EnvelopeMode::Full);
         let err = result.unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
     }
@@ -1343,10 +1352,10 @@ mod tests {
     fn inspect_with_slice_data() {
         let session = stopped_session();
         let tensors = vec![sample_tensor_summary()];
-        let result = session.inspect(&tensors, Some("AQIDBA==".to_owned()));
+        let result = session.inspect(&tensors, Some("AQIDBA==".to_owned()), EnvelopeMode::Full);
         assert!(result.is_ok());
-        let data = result.unwrap().data.unwrap();
-        assert_eq!(data.slice_data.as_deref(), Some("AQIDBA=="));
+        let value = result.unwrap();
+        assert_eq!(value["data"]["slice_data"], "AQIDBA==");
     }
 
     #[test]
@@ -1375,7 +1384,9 @@ mod tests {
         let tick_before = session.state().tick_id;
         let pos_before = session.state().position.clone();
 
-        session.inspect(&[sample_tensor_summary()], None).unwrap();
+        session
+            .inspect(&[sample_tensor_summary()], None, EnvelopeMode::Full)
+            .unwrap();
 
         assert_eq!(session.state().tick_id, tick_before);
         assert_eq!(session.state().position, pos_before);
