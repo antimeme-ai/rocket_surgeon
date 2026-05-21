@@ -3,12 +3,12 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use super::events::{CommandEvent, InputEvent, ModeEvent, NavigationEvent};
 use super::mode::Mode;
 
-pub fn decode(event: Event, mode: Mode) -> Option<InputEvent> {
+pub fn decode(event: &Event, mode: Mode) -> Option<InputEvent> {
     match event {
-        Event::Key(key) => decode_key(key, mode),
+        Event::Key(key) => decode_key(*key, mode),
         Event::Resize(w, h) => Some(InputEvent::Resize {
-            width: w,
-            height: h,
+            width: *w,
+            height: *h,
         }),
         _ => None,
     }
@@ -29,7 +29,7 @@ fn decode_key(key: KeyEvent, mode: Mode) -> Option<InputEvent> {
 
 fn decode_ctrl(code: KeyCode, _mode: Mode) -> Option<InputEvent> {
     match code {
-        KeyCode::Char('c') | KeyCode::Char('q') => Some(InputEvent::Quit),
+        KeyCode::Char('c' | 'q') => Some(InputEvent::Quit),
         _ => None,
     }
 }
@@ -45,9 +45,7 @@ fn decode_normal(code: KeyCode) -> Option<InputEvent> {
         KeyCode::PageDown => Some(InputEvent::Navigation(NavigationEvent::PageDown)),
         KeyCode::Home => Some(InputEvent::Navigation(NavigationEvent::Home)),
         KeyCode::End => Some(InputEvent::Navigation(NavigationEvent::End)),
-        KeyCode::Char('+') | KeyCode::Char('=') => {
-            Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
-        }
+        KeyCode::Char('+' | '=') => Some(InputEvent::Navigation(NavigationEvent::ZoomIn)),
         KeyCode::Char('-') => Some(InputEvent::Navigation(NavigationEvent::ZoomOut)),
 
         // Mode transitions
@@ -81,9 +79,7 @@ fn decode_inspect(code: KeyCode) -> Option<InputEvent> {
         KeyCode::Down | KeyCode::Char('j') => Some(InputEvent::Navigation(NavigationEvent::Down)),
         KeyCode::Left | KeyCode::Char('h') => Some(InputEvent::Navigation(NavigationEvent::Left)),
         KeyCode::Right | KeyCode::Char('l') => Some(InputEvent::Navigation(NavigationEvent::Right)),
-        KeyCode::Char('+') | KeyCode::Char('=') => {
-            Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
-        }
+        KeyCode::Char('+' | '=') => Some(InputEvent::Navigation(NavigationEvent::ZoomIn)),
         KeyCode::Char('-') => Some(InputEvent::Navigation(NavigationEvent::ZoomOut)),
         _ => None,
     }
@@ -127,19 +123,19 @@ mod tests {
     #[test]
     fn normal_vim_keys() {
         assert_eq!(
-            decode(key(KeyCode::Char('j')), Mode::Normal),
+            decode(&key(KeyCode::Char('j')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Down))
         );
         assert_eq!(
-            decode(key(KeyCode::Char('k')), Mode::Normal),
+            decode(&key(KeyCode::Char('k')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Up))
         );
         assert_eq!(
-            decode(key(KeyCode::Char('h')), Mode::Normal),
+            decode(&key(KeyCode::Char('h')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Left))
         );
         assert_eq!(
-            decode(key(KeyCode::Char('l')), Mode::Normal),
+            decode(&key(KeyCode::Char('l')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Right))
         );
     }
@@ -147,11 +143,11 @@ mod tests {
     #[test]
     fn normal_arrow_keys() {
         assert_eq!(
-            decode(key(KeyCode::Up), Mode::Normal),
+            decode(&key(KeyCode::Up), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Up))
         );
         assert_eq!(
-            decode(key(KeyCode::Down), Mode::Normal),
+            decode(&key(KeyCode::Down), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::Down))
         );
     }
@@ -159,11 +155,11 @@ mod tests {
     #[test]
     fn normal_zoom() {
         assert_eq!(
-            decode(key(KeyCode::Char('+')), Mode::Normal),
+            decode(&key(KeyCode::Char('+')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::ZoomIn))
         );
         assert_eq!(
-            decode(key(KeyCode::Char('-')), Mode::Normal),
+            decode(&key(KeyCode::Char('-')), Mode::Normal),
             Some(InputEvent::Navigation(NavigationEvent::ZoomOut))
         );
     }
@@ -172,7 +168,7 @@ mod tests {
     #[test]
     fn colon_enters_command() {
         assert_eq!(
-            decode(key(KeyCode::Char(':')), Mode::Normal),
+            decode(&key(KeyCode::Char(':')), Mode::Normal),
             Some(InputEvent::Mode(ModeEvent::EnterCommand))
         );
     }
@@ -180,7 +176,7 @@ mod tests {
     #[test]
     fn i_enters_inspect() {
         assert_eq!(
-            decode(key(KeyCode::Char('i')), Mode::Normal),
+            decode(&key(KeyCode::Char('i')), Mode::Normal),
             Some(InputEvent::Mode(ModeEvent::EnterInspect))
         );
     }
@@ -188,7 +184,7 @@ mod tests {
     #[test]
     fn shift_i_enters_intervene() {
         assert_eq!(
-            decode(key(KeyCode::Char('I')), Mode::Normal),
+            decode(&key(KeyCode::Char('I')), Mode::Normal),
             Some(InputEvent::Mode(ModeEvent::EnterIntervene))
         );
     }
@@ -196,7 +192,7 @@ mod tests {
     #[test]
     fn esc_exits_command() {
         assert_eq!(
-            decode(key(KeyCode::Esc), Mode::Command),
+            decode(&key(KeyCode::Esc), Mode::Command),
             Some(InputEvent::Mode(ModeEvent::ExitToNormal))
         );
     }
@@ -204,7 +200,7 @@ mod tests {
     #[test]
     fn esc_exits_inspect() {
         assert_eq!(
-            decode(key(KeyCode::Esc), Mode::Inspect),
+            decode(&key(KeyCode::Esc), Mode::Inspect),
             Some(InputEvent::Mode(ModeEvent::ExitToNormal))
         );
     }
@@ -213,7 +209,7 @@ mod tests {
     #[test]
     fn command_chars() {
         assert_eq!(
-            decode(key(KeyCode::Char('a')), Mode::Command),
+            decode(&key(KeyCode::Char('a')), Mode::Command),
             Some(InputEvent::Command(CommandEvent::Char('a')))
         );
     }
@@ -221,7 +217,7 @@ mod tests {
     #[test]
     fn command_enter_executes() {
         assert_eq!(
-            decode(key(KeyCode::Enter), Mode::Command),
+            decode(&key(KeyCode::Enter), Mode::Command),
             Some(InputEvent::Command(CommandEvent::Execute))
         );
     }
@@ -229,11 +225,11 @@ mod tests {
     #[test]
     fn command_history() {
         assert_eq!(
-            decode(key(KeyCode::Up), Mode::Command),
+            decode(&key(KeyCode::Up), Mode::Command),
             Some(InputEvent::Command(CommandEvent::HistoryPrev))
         );
         assert_eq!(
-            decode(key(KeyCode::Down), Mode::Command),
+            decode(&key(KeyCode::Down), Mode::Command),
             Some(InputEvent::Command(CommandEvent::HistoryNext))
         );
     }
@@ -242,7 +238,7 @@ mod tests {
     #[test]
     fn ctrl_c_quits() {
         assert_eq!(
-            decode(ctrl(KeyCode::Char('c')), Mode::Normal),
+            decode(&ctrl(KeyCode::Char('c')), Mode::Normal),
             Some(InputEvent::Quit)
         );
     }
@@ -250,11 +246,11 @@ mod tests {
     #[test]
     fn ctrl_c_quits_from_any_mode() {
         assert_eq!(
-            decode(ctrl(KeyCode::Char('c')), Mode::Command),
+            decode(&ctrl(KeyCode::Char('c')), Mode::Command),
             Some(InputEvent::Quit)
         );
         assert_eq!(
-            decode(ctrl(KeyCode::Char('c')), Mode::Inspect),
+            decode(&ctrl(KeyCode::Char('c')), Mode::Inspect),
             Some(InputEvent::Quit)
         );
     }
@@ -263,7 +259,7 @@ mod tests {
     #[test]
     fn inspect_navigation() {
         assert_eq!(
-            decode(key(KeyCode::Char('j')), Mode::Inspect),
+            decode(&key(KeyCode::Char('j')), Mode::Inspect),
             Some(InputEvent::Navigation(NavigationEvent::Down))
         );
     }
@@ -272,7 +268,7 @@ mod tests {
     #[test]
     fn resize_event() {
         assert_eq!(
-            decode(Event::Resize(120, 40), Mode::Normal),
+            decode(&Event::Resize(120, 40), Mode::Normal),
             Some(InputEvent::Resize {
                 width: 120,
                 height: 40

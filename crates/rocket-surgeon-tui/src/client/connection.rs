@@ -186,7 +186,7 @@ impl ReconnectingClient {
     }
 }
 
-pub(crate) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
+pub async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<String, ClientError> {
     let mut content_length: Option<usize> = None;
@@ -258,19 +258,20 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
     let mut reader = BufReader::new(reader);
 
     loop {
-        let msg = match read_content_length_message(&mut reader).await {
-            Ok(m) => m,
-            Err(_) => {
+        let Ok(msg) = read_content_length_message(&mut reader).await else {
+            let drained: Vec<_> = {
                 let mut map = lock_pending(&pending);
-                for (_, tx) in map.drain() {
-                    let _ = tx.send(Err(ClientError::Closed));
-                }
-                return;
+                map.drain().collect()
+            };
+            for (_, tx) in drained {
+                let _ = tx.send(Err(ClientError::Closed));
             }
+            return;
         };
 
         if let Ok(resp) = serde_json::from_str::<Response>(&msg) {
-            if let Some(tx) = lock_pending(&pending).remove(&resp.id) {
+            let pending_tx = lock_pending(&pending).remove(&resp.id);
+            if let Some(tx) = pending_tx {
                 let _ = tx.send(Ok(resp));
             }
             continue;
@@ -313,7 +314,6 @@ mod tests {
             let body = serde_json::to_string(&resp).unwrap();
             let frame = frame_message(&body);
 
-            use tokio::io::AsyncWriteExt;
             server_stream.write_all(&frame).await.unwrap();
             server_stream.flush().await.unwrap();
         });
@@ -349,7 +349,6 @@ mod tests {
         let body = serde_json::to_string(&notif).unwrap();
         let frame = frame_message(&body);
 
-        use tokio::io::AsyncWriteExt;
         server_stream.write_all(&frame).await.unwrap();
         server_stream.flush().await.unwrap();
 
@@ -409,7 +408,6 @@ mod tests {
             let body = serde_json::to_string(&resp).unwrap();
             let frame = frame_message(&body);
 
-            use tokio::io::AsyncWriteExt;
             server_stream.write_all(&frame).await.unwrap();
             server_stream.flush().await.unwrap();
         });
@@ -455,9 +453,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_too_many_headers() {
+        use std::fmt::Write;
+
         let mut msg = String::new();
         for i in 0..20 {
-            msg.push_str(&format!("X-Header-{i}: value\r\n"));
+            writeln!(msg, "X-Header-{i}: value\r").unwrap();
         }
         msg.push_str("\r\n");
         let mut reader = tokio::io::BufReader::new(msg.as_bytes());

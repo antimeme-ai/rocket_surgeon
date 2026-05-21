@@ -8,19 +8,29 @@ use super::{DataDep, SessionSnapshot, UiState};
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Input(InputEvent),
+    // In-flight scaffolding: daemon and internal events are reduced and
+    // unit-tested, but `main.rs` only emits `Input` events so far — feeding
+    // the client and request lifecycle into the loop is tracked separately.
+    #[allow(dead_code)]
     Daemon(DaemonEvent),
+    #[allow(dead_code)]
     Internal(InternalEvent),
 }
 
+// In-flight scaffolding: see the note on `UiEvent` above. These variants are
+// exercised by the `#[cfg(test)]` reducer suite but not yet constructed by the
+// bin, so the `dead_code` lint is a false positive against intentional API.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     Connected { protocol_version: String },
     Disconnected,
     StatusChanged(Status),
     PositionChanged(TickPosition),
-    SessionUpdated(SessionSnapshot),
+    SessionUpdated(Box<SessionSnapshot>),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum InternalEvent {
     RequestStarted,
@@ -39,7 +49,7 @@ pub fn reduce(state: UiState, event: UiEvent) -> UiState {
 fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
     match event {
         InputEvent::Navigation(nav) => {
-            reduce_navigation(&mut state, nav);
+            reduce_navigation(&mut state, &nav);
             state
         }
         InputEvent::Mode(mode_event) => {
@@ -47,7 +57,7 @@ fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
             state
         }
         InputEvent::Command(cmd) => {
-            reduce_command(&mut state, cmd);
+            reduce_command(&mut state, &cmd);
             state
         }
         InputEvent::Quit => state,
@@ -58,7 +68,7 @@ fn reduce_input(mut state: UiState, event: InputEvent) -> UiState {
     }
 }
 
-fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
+fn reduce_navigation(state: &mut UiState, nav: &NavigationEvent) {
     match nav {
         NavigationEvent::Up => {
             state.cursor.layer = state.cursor.layer.saturating_sub(1);
@@ -95,13 +105,10 @@ fn reduce_navigation(state: &mut UiState, nav: NavigationEvent) {
             state.cursor.token_position = u64::MAX;
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
-        NavigationEvent::ZoomIn | NavigationEvent::ZoomOut => {
-            mark_dep_dirty(state, &DataDep::CursorPosition);
-        }
-        NavigationEvent::JumpTo(_) => {
-            mark_dep_dirty(state, &DataDep::CursorPosition);
-        }
-        NavigationEvent::ContinuousAdjust { .. } => {
+        NavigationEvent::ZoomIn
+        | NavigationEvent::ZoomOut
+        | NavigationEvent::JumpTo(_)
+        | NavigationEvent::ContinuousAdjust { .. } => {
             mark_dep_dirty(state, &DataDep::CursorPosition);
         }
     }
@@ -135,10 +142,10 @@ fn reduce_mode(state: &mut UiState, event: ModeEvent) {
     }
 }
 
-fn reduce_command(state: &mut UiState, cmd: CommandEvent) {
+fn reduce_command(state: &mut UiState, cmd: &CommandEvent) {
     match cmd {
         CommandEvent::Char(c) => {
-            state.command_buffer.push(c);
+            state.command_buffer.push(*c);
         }
         CommandEvent::Backspace => {
             state.command_buffer.pop();
@@ -175,7 +182,7 @@ fn reduce_daemon(mut state: UiState, event: DaemonEvent) -> UiState {
             mark_dep_dirty(&mut state, &DataDep::CursorPosition);
         }
         DaemonEvent::SessionUpdated(snapshot) => {
-            state.session = snapshot;
+            state.session = *snapshot;
             mark_all_dirty(&mut state);
         }
     }
@@ -333,7 +340,7 @@ mod tests {
         let snapshot = state.session.clone();
         let new = reduce(
             state,
-            UiEvent::Daemon(DaemonEvent::SessionUpdated(snapshot)),
+            UiEvent::Daemon(DaemonEvent::SessionUpdated(Box::new(snapshot))),
         );
         assert_eq!(new.dirty.len(), 3);
     }
