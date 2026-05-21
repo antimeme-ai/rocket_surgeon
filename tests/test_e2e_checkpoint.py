@@ -115,7 +115,8 @@ def run_test() -> None:  # noqa: PLR0915
         assert resp.get("error") is None, f"create error: {resp.get('error')}"
         data = resp["result"]["data"]
         activation_id = data["checkpoint_id"]
-        assert isinstance(activation_id, str) and activation_id, "expected non-empty checkpoint_id"
+        assert isinstance(activation_id, str), "checkpoint_id should be a string"
+        assert activation_id, "expected non-empty checkpoint_id"
         entry = next(c for c in data["checkpoints"] if c["checkpoint_id"] == activation_id)
         assert entry["tier"] == "activation", f"expected tier=activation, got {entry['tier']}"
         assert entry["tick_id"] == stepped_tick, "checkpoint tick_id should match stepped position"
@@ -190,7 +191,7 @@ def run_test() -> None:  # noqa: PLR0915
         assert resp.get("error") is None, f"delete error: {resp.get('error')}"
         remaining = resp["result"]["data"]["checkpoints"]
         assert len(remaining) == 1, f"expected 1 checkpoint after delete, got {len(remaining)}"
-        assert all(c["checkpoint_id"] != snapshot_id for c in remaining), "deleted id still present"
+        assert all(c["checkpoint_id"] != snapshot_id for c in remaining), "deleted id present"
         print("  PASS")
 
         # ── Step 9: bookmark a tick_id ──────────────────────────────
@@ -228,7 +229,8 @@ def run_test() -> None:  # noqa: PLR0915
         assert err_data.get("error_code") == "CHECKPOINT_NOT_FOUND", (
             f"expected CHECKPOINT_NOT_FOUND, got {err_data.get('error_code')}"
         )
-        assert err_data.get("severity") == "recoverable", f"bad severity: {err_data.get('severity')}"
+        sev = err_data.get("severity")
+        assert sev == "recoverable", f"bad severity: {sev}"
         assert err_data.get("suggestion"), "expected non-empty suggestion"
         print(f"  Got expected error: {err_data.get('error_code')}")
         print("  PASS")
