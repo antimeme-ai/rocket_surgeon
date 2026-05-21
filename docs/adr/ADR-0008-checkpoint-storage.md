@@ -81,6 +81,15 @@ state tier.**
 - **Trade-off**: `full_snapshot` state is N × model size resident in worker
   memory with no eviction policy. The `VramExhausted` error code exists for
   this; an eviction/spill policy is explicitly deferred to the `branch` WU.
+- **Trade-off**: a `bookmark` for a tick with no existing checkpoint mints a
+  `ProbeLog`-tier `CheckpointRef`. Its id is a valid `restore` target —
+  `restore` moves the logical position to the bookmarked tick — but it
+  captures no tensor state and no full `TickPosition`. Downstream WUs
+  (`replay`, `branch`) MUST inspect `tier` before treating a checkpoint id
+  as state-bearing: a `ProbeLog` id has nothing to replay. The daemon
+  captures the full `TickPosition` (not just `tick_id`/`layer_idx`) for
+  `activation`/`full_snapshot` checkpoints so `restore` preserves
+  `direction`/`component`/`phase` — the wire `CheckpointRef` cannot.
 - **Limitation**: WU-C implements and tests single-rank. A checkpoint is
   inherently distributed — one shard per worker process — and a correct
   multi-rank `restore` for FSDP/TP requires a collective barrier (a

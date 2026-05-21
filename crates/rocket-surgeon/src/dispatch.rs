@@ -37,7 +37,7 @@ pub fn recovery_hint_for(code: ErrorCode) -> &'static str {
             "Run `rocket/step` to advance the forward pass so the tensor is captured, then retry."
         }
         ErrorCode::CheckpointNotFound => {
-            "List checkpoints via `rocket/status` and restore an id that exists."
+            "List checkpoints with `rocket/checkpoint action=list` and use an id that exists."
         }
         ErrorCode::ProbeNotFound => {
             "List probes with `rocket/probe action=list` and use a known id."
@@ -2122,5 +2122,117 @@ mod tests {
             rocket_surgeon_protocol::errors::Severity::Recoverable
         );
         assert!(!err.suggestion.is_empty());
+    }
+
+    /// Mint a checkpoint through the dispatch path and return its id.
+    fn dispatch_create_checkpoint(session: &mut Session) -> String {
+        let created = dispatch(
+            session,
+            &make_request("rocket/checkpoint", serde_json::json!({"action": "create"})),
+        );
+        created.result.unwrap()["data"]["checkpoint_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn dispatch_checkpoint_list_returns_registry() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        dispatch_create_checkpoint(&mut session);
+
+        let resp = dispatch(
+            &mut session,
+            &make_request("rocket/checkpoint", serde_json::json!({"action": "list"})),
+        );
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["data"]["checkpoints"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_checkpoint_delete_removes() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        let id = dispatch_create_checkpoint(&mut session);
+
+        let resp = dispatch(
+            &mut session,
+            &make_request(
+                "rocket/checkpoint",
+                serde_json::json!({"action": "delete", "checkpoint_id": id}),
+            ),
+        );
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        assert!(
+            resp.result.unwrap()["data"]["checkpoints"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dispatch_checkpoint_bookmark_annotates() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let resp = dispatch(
+            &mut session,
+            &make_request(
+                "rocket/checkpoint",
+                serde_json::json!({"action": "bookmark", "tick_id": 7, "name": "mark"}),
+            ),
+        );
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let checkpoints = resp.result.unwrap()["data"]["checkpoints"].clone();
+        assert!(
+            checkpoints
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["tick_id"].as_u64() == Some(7) && c["bookmark"] == "mark"),
+            "expected a checkpoint entry carrying the bookmark"
+        );
+    }
+
+    #[test]
+    fn dispatch_checkpoint_restore_moves_position() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+        let id = dispatch_create_checkpoint(&mut session);
+
+        let resp = dispatch(
+            &mut session,
+            &make_request(
+                "rocket/checkpoint",
+                serde_json::json!({"action": "restore", "checkpoint_id": id}),
+            ),
+        );
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert!(result["data"]["restored_to"].is_object());
+        assert!(result["state"]["position"].is_object());
     }
 }

@@ -227,6 +227,12 @@ pub struct Session {
     /// event fan-out in `notifications.rs` consults this to decide which
     /// notifications a subscriber should receive.
     event_filter: Option<SubscribeFilter>,
+    /// Full [`TickPosition`] captured at `checkpoint_create`, keyed by
+    /// checkpoint id. `restore` re-seats this verbatim — preserving
+    /// `direction`/`component`/`phase`, which the wire `CheckpointRef`
+    /// (only `tick_id`/`layer_idx`) cannot express. Cleared on detach;
+    /// bookmark-only markers have no entry here.
+    checkpoint_positions: HashMap<String, TickPosition>,
 }
 
 impl Session {
@@ -247,6 +253,7 @@ impl Session {
             catalog: Vec::new(),
             defined_views: HashMap::new(),
             event_filter: None,
+            checkpoint_positions: HashMap::new(),
         }
     }
 
@@ -557,6 +564,7 @@ impl Session {
         self.state.tick_id = None;
         self.state.active_probes.clear();
         self.state.checkpoints.clear();
+        self.checkpoint_positions.clear();
         // Discovery metadata and view registrations belong to the attached
         // model; drop them so a stale catalog cannot leak across attaches.
         self.catalog.clear();
@@ -662,6 +670,10 @@ impl Session {
             bookmark: None,
             created_at: now_rfc3339(),
         });
+        if let Some(pos) = &self.state.position {
+            self.checkpoint_positions
+                .insert(checkpoint_id.clone(), pos.clone());
+        }
         self.envelope(CheckpointResponse {
             checkpoints: self.state.checkpoints.clone(),
             checkpoint_id: Some(checkpoint_id),
@@ -693,18 +705,25 @@ impl Session {
         else {
             return Err(self.checkpoint_not_found_error(checkpoint_id));
         };
-        let position = TickPosition {
-            tick_id: cref.tick_id,
-            direction: StepDirection::Forward,
-            rank: None,
-            layer: cref.layer_idx,
-            component: String::new(),
-            event: TickEvent::Output,
-            replay_of: None,
-            phase: Phase::default(),
-            token_position: None,
-            clock: None,
-        };
+        // Prefer the full position captured at create time — it preserves
+        // direction/component/phase. Bookmark markers capture no position,
+        // so fall back to a forward-only reconstruction from the ref.
+        let position = self
+            .checkpoint_positions
+            .get(checkpoint_id)
+            .cloned()
+            .unwrap_or_else(|| TickPosition {
+                tick_id: cref.tick_id,
+                direction: StepDirection::Forward,
+                rank: None,
+                layer: cref.layer_idx,
+                component: String::new(),
+                event: TickEvent::Output,
+                replay_of: None,
+                phase: Phase::default(),
+                token_position: None,
+                clock: None,
+            });
         self.state.tick_id = Some(position.tick_id);
         self.state.position = Some(position.clone());
         Ok(self.envelope(CheckpointResponse {
@@ -727,6 +746,7 @@ impl Session {
         if self.state.checkpoints.len() == before {
             return Err(self.checkpoint_not_found_error(checkpoint_id));
         }
+        self.checkpoint_positions.remove(checkpoint_id);
         Ok(self.envelope(CheckpointResponse {
             checkpoints: self.state.checkpoints.clone(),
             checkpoint_id: None,
@@ -778,7 +798,8 @@ impl Session {
             numeric_code: Some(ErrorCode::CheckpointNotFound.numeric_code()),
             severity: Severity::Recoverable,
             suggestion: format!(
-                "Checkpoint '{checkpoint_id}' does not exist; list checkpoints to see valid ids"
+                "Checkpoint '{checkpoint_id}' does not exist; \
+                 call `rocket/checkpoint action=list` to see valid ids"
             ),
             current_state: Some(self.state.status),
             valid_states: None,
@@ -1188,6 +1209,57 @@ mod tests {
         let cps = resp.data.unwrap().checkpoints;
         assert_eq!(cps.len(), 1);
         assert_eq!(cps[0].bookmark.as_deref(), Some("before-intervention"));
+    }
+
+    #[test]
+    fn checkpoint_bookmark_with_duplicate_tick_annotates_one_entry() {
+        let mut session = stepped_session();
+        // Two checkpoints share tick 5 (stepped_session sits at tick 5).
+        session.checkpoint_create(None);
+        session.checkpoint_create(None);
+        let resp = session.checkpoint_bookmark(5, "mark");
+        let cps = resp.data.unwrap().checkpoints;
+        assert_eq!(cps.len(), 2, "bookmark must not create a third entry");
+        let annotated: Vec<_> = cps.iter().filter(|c| c.bookmark.is_some()).collect();
+        assert_eq!(annotated.len(), 1, "exactly one entry is annotated");
+        assert_eq!(annotated[0].bookmark.as_deref(), Some("mark"));
+    }
+
+    #[test]
+    fn checkpoint_restore_preserves_full_position() {
+        let mut session = stepped_session();
+        // Position the session mid backward-pass at a named component.
+        session.state.position = Some(TickPosition {
+            tick_id: 5,
+            direction: StepDirection::Backward,
+            rank: Some(0),
+            layer: 3,
+            component: "mlp.down_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+            phase: Phase::default(),
+            token_position: Some(2),
+            clock: None,
+        });
+        let id = session
+            .checkpoint_create(None)
+            .data
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        // Move away, then restore — the full position must come back, not a
+        // forward-only reconstruction from the wire CheckpointRef.
+        session.state.position = None;
+        let restored = session
+            .checkpoint_restore(&id)
+            .unwrap()
+            .data
+            .unwrap()
+            .restored_to
+            .unwrap();
+        assert_eq!(restored.direction, StepDirection::Backward);
+        assert_eq!(restored.component, "mlp.down_proj");
+        assert_eq!(restored.token_position, Some(2));
     }
 
     #[test]

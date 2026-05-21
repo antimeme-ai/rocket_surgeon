@@ -267,7 +267,9 @@ pub enum CheckpointRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointResponse {
     pub checkpoints: Vec<CheckpointRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_to: Option<TickPosition>,
 }
 
