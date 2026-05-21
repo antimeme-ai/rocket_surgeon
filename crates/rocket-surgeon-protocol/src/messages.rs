@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorCode;
 use crate::types::{
-    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, EnvelopeMode,
-    GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection,
-    TensorSummary, TickGranularity, TickMapEntry, TickPosition,
+    AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, ComponentEntry, DType,
+    EnvelopeMode, GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status,
+    StepDirection, TensorSummary, TickGranularity, TickMapEntry, TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,7 @@ pub mod internal {
     pub const HOST_UPDATE_PROBES: &str = "_host/update_probes";
     pub const HOST_INSPECT: &str = "_host/inspect";
     pub const HOST_VIEW: &str = "_host/view";
+    pub const HOST_CHECKPOINT: &str = "_host/checkpoint";
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +885,43 @@ pub struct HostViewResponse {
     pub data: serde_json::Value,
 }
 
+// ---------------------------------------------------------------------------
+// _host/checkpoint (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+/// Only the two state-affecting checkpoint actions reach the worker.
+///
+/// `list`, `delete`, and `bookmark` are pure daemon bookkeeping and never
+/// round-trip. The daemon mints `checkpoint_id` so the worker can key its
+/// snapshot store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HostCheckpointRequest {
+    Create {
+        model_handle: u64,
+        checkpoint_id: String,
+        tier: CreateCheckpointTier,
+        tick_id: u64,
+        layer_idx: u32,
+    },
+    Restore {
+        model_handle: u64,
+        checkpoint_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCheckpointResponse {
+    pub checkpoint_id: String,
+    pub tier: CheckpointTier,
+    /// Populated on `Restore` with the worker's re-seated tick position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_to: Option<TickPosition>,
+    /// Resident snapshot size, for VRAM accounting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_captured: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,6 +1100,51 @@ mod tests {
     #[test]
     fn internal_update_probes_constant() {
         assert_eq!(internal::HOST_UPDATE_PROBES, "_host/update_probes");
+    }
+
+    #[test]
+    fn internal_checkpoint_constant() {
+        assert_eq!(internal::HOST_CHECKPOINT, "_host/checkpoint");
+    }
+
+    #[test]
+    fn host_checkpoint_request_create_round_trip() {
+        let req = HostCheckpointRequest::Create {
+            model_handle: 1,
+            checkpoint_id: "ckpt-1".to_owned(),
+            tier: CreateCheckpointTier::Activation,
+            tick_id: 5,
+            layer_idx: 3,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostCheckpointRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("\"action\":\"create\""));
+    }
+
+    #[test]
+    fn host_checkpoint_request_restore_round_trip() {
+        let req = HostCheckpointRequest::Restore {
+            model_handle: 1,
+            checkpoint_id: "ckpt-1".to_owned(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostCheckpointRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("\"action\":\"restore\""));
+    }
+
+    #[test]
+    fn host_checkpoint_response_round_trip() {
+        let resp = HostCheckpointResponse {
+            checkpoint_id: "ckpt-1".to_owned(),
+            tier: CheckpointTier::FullSnapshot,
+            restored_to: None,
+            bytes_captured: Some(4096),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostCheckpointResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
     }
 
     #[test]
