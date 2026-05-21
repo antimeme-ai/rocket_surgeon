@@ -1,10 +1,15 @@
 ---
 id: BEAD-0017
 title: rocket/intervene — daemon intervention registry (set/clear/list)
-status: open
+status: closed
 priority: high
 created: 2026-05-21
+closed: 2026-05-21
+branch: feat/intervene-registry
 ---
+
+> **Tier 1 delivered** in `fce8e61` (PR #23). Tier 2 (worker applies
+> interventions during the forward pass) is deferred to its own bead.
 
 ## Description
 
