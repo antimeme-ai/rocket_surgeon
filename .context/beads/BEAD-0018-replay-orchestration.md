@@ -1,10 +1,15 @@
 ---
 id: BEAD-0018
 title: rocket/replay — daemon orchestration tier (replay from checkpoint)
-status: open
+status: closed
 priority: high
 created: 2026-05-21
+closed: 2026-05-21
+branch: feat/replay-orchestration
 ---
+
+> **Tier 1 delivered** in `b820a73` (PR #24). Tier 2 (worker re-runs the
+> forward pass, real divergence detection) is deferred to its own bead.
 
 ## Description
 
