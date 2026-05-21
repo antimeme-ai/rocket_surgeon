@@ -56,11 +56,7 @@ def when_kv_intervene_on_position(op: str, pos: str) -> None:
     pass
 
 
-@when(
-    parsers.re(
-        r'the client sends kv\.intervene with op "(?P<op>[^"]+)" and empty layers'
-    )
-)
+@when(parsers.re(r'the client sends kv\.intervene with op "(?P<op>[^"]+)" and empty layers'))
 def when_kv_intervene_empty_layers(op: str) -> None:
     pass
 
