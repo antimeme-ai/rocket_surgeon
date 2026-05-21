@@ -1,9 +1,13 @@
+// In-flight scaffolding: the view-dirtying diff engine is fully unit-tested
+// but not yet wired into the `main.rs` render loop — that integration is
+// tracked as separate work. Every item is exercised by the `#[cfg(test)]`
+// suite below, so the bin-only `dead_code` lint is a false positive here.
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use super::{DataDep, UiState, ViewId};
 
-// Built and unit-tested ahead of reducer-driven layout updates.
-#[allow(dead_code)]
 pub fn compute_dirty(old: &UiState, new: &UiState) -> HashSet<ViewId> {
     let mut dirty = HashSet::new();
 
@@ -24,7 +28,6 @@ pub fn compute_dirty(old: &UiState, new: &UiState) -> HashSet<ViewId> {
     dirty
 }
 
-#[allow(dead_code)]
 fn changed_data_deps(old: &UiState, new: &UiState) -> Vec<DataDep> {
     let mut changed = Vec::new();
 

@@ -1,4 +1,4 @@
-# ADR-0008: TUI Application Architecture — Component Template on Ratatui
+# ADR-0009: TUI Application Architecture — Component Template on Ratatui
 
 ## Status
 Accepted

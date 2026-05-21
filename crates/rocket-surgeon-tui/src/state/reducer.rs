@@ -6,27 +6,32 @@ use crate::input::mode::Mode;
 use super::{DataDep, SessionSnapshot, UiState};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-#[allow(clippy::large_enum_variant)]
 pub enum UiEvent {
     Input(InputEvent),
+    // In-flight scaffolding: daemon and internal events are reduced and
+    // unit-tested, but `main.rs` only emits `Input` events so far — feeding
+    // the client and request lifecycle into the loop is tracked separately.
+    #[allow(dead_code)]
     Daemon(DaemonEvent),
+    #[allow(dead_code)]
     Internal(InternalEvent),
 }
 
-#[derive(Debug, Clone)]
+// In-flight scaffolding: see the note on `UiEvent` above. These variants are
+// exercised by the `#[cfg(test)]` reducer suite but not yet constructed by the
+// bin, so the `dead_code` lint is a false positive against intentional API.
 #[allow(dead_code)]
-#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
 pub enum DaemonEvent {
     Connected { protocol_version: String },
     Disconnected,
     StatusChanged(Status),
     PositionChanged(TickPosition),
-    SessionUpdated(SessionSnapshot),
+    SessionUpdated(Box<SessionSnapshot>),
 }
 
-#[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub enum InternalEvent {
     RequestStarted,
     RequestFinished,
@@ -177,7 +182,7 @@ fn reduce_daemon(mut state: UiState, event: DaemonEvent) -> UiState {
             mark_dep_dirty(&mut state, &DataDep::CursorPosition);
         }
         DaemonEvent::SessionUpdated(snapshot) => {
-            state.session = snapshot;
+            state.session = *snapshot;
             mark_all_dirty(&mut state);
         }
     }
@@ -335,7 +340,7 @@ mod tests {
         let snapshot = state.session.clone();
         let new = reduce(
             state,
-            UiEvent::Daemon(DaemonEvent::SessionUpdated(snapshot)),
+            UiEvent::Daemon(DaemonEvent::SessionUpdated(Box::new(snapshot))),
         );
         assert_eq!(new.dirty.len(), 3);
     }

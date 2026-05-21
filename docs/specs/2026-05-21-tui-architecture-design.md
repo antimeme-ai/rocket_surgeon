@@ -1,11 +1,11 @@
 # TUI Architecture Design — Component Template on Ratatui
 
 **Date:** 2026-05-21
-**ADR:** ADR-0008
+**ADR:** ADR-0009
 **Bead:** BEAD-0015
 **Crate:** `rocket-surgeon-tui`
 
-This is the target-architecture blueprint for `rocket-surgeon-tui`. ADR-0008
+This is the target-architecture blueprint for `rocket-surgeon-tui`. ADR-0009
 records *why* the Component template was chosen; this document records *what*
 to build.
 

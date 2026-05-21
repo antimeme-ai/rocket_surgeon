@@ -28,7 +28,8 @@ pub struct SessionSnapshot {
     pub status: Status,
     pub position: Option<TickPosition>,
     pub capabilities: Option<Capabilities>,
-    // Populated once intervention views are wired into the TUI.
+    // In-flight scaffolding: populated/read once the interventions panel is
+    // wired up; the diff engine already compares this field in its tests.
     #[allow(dead_code)]
     pub active_interventions: Vec<InterventionRecipe>,
     pub protocol_version: String,
@@ -39,7 +40,8 @@ pub struct CursorState {
     pub layer: u32,
     pub component: String,
     pub token_position: u64,
-    // Used once multi-pane focus handling is wired into input reduction.
+    // In-flight scaffolding: read once multi-view focus routing lands; the
+    // diff engine already compares this field in its tests.
     #[allow(dead_code)]
     pub focused_view: ViewId,
 }
@@ -54,6 +56,9 @@ pub struct ViewSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewKind {
     LayerStack,
+    // In-flight scaffolding: these view kinds are defined for the planned
+    // panel set; the compositor already dispatches on `CommandLine`. They are
+    // not yet constructed by the bin, so `dead_code` is a false positive.
     #[allow(dead_code)]
     TensorDetail,
     #[allow(dead_code)]
@@ -73,11 +78,14 @@ pub enum ViewKind {
 pub enum DataDep {
     SessionStatus,
     CursorPosition,
+    // In-flight scaffolding: data dependencies for the tensor and
+    // interventions panels; the diff engine already references them in tests.
     #[allow(dead_code)]
     TensorAt {
         layer: u32,
         component: String,
     },
+    #[allow(dead_code)]
     Interventions,
     Mode,
 }

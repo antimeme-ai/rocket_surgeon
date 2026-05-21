@@ -87,7 +87,7 @@ fn run_loop(
 
         if event::poll(frame_budget)? {
             if let Ok(ev) = event::read() {
-                if let Some(input_event) = input::terminal::decode(ev, state.mode) {
+                if let Some(input_event) = input::terminal::decode(&ev, state.mode) {
                     if matches!(input_event, input::events::InputEvent::Quit) {
                         return Ok(());
                     }

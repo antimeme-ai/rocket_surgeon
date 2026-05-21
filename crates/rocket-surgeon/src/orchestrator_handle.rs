@@ -3,8 +3,9 @@ use std::process::{Child, Command, Stdio};
 
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
-    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest, HostStepRequest,
-    HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, internal,
+    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest,
+    HostKvInterveneRequest, HostKvReadRequest, HostStepRequest, HostStepResponse,
+    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -137,6 +138,28 @@ impl OrchestratorHandle {
         let id = self.next_id();
         let params = serde_json::to_value(req)?;
         let request = Request::new(RequestId::Number(id), internal::HOST_VIEW, params);
+
+        self.send(&request)?;
+        self.recv()
+    }
+
+    /// Send `_host/kv.read` to the orchestrator and return the raw response.
+    /// The caller decides how to handle errors vs success.
+    pub fn kv_read_raw(&mut self, req: &HostKvReadRequest) -> anyhow::Result<Response> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_KV_READ, params);
+
+        self.send(&request)?;
+        self.recv()
+    }
+
+    /// Send `_host/kv.intervene` to the orchestrator and return the raw
+    /// response. The caller decides how to handle errors vs success.
+    pub fn kv_intervene_raw(&mut self, req: &HostKvInterveneRequest) -> anyhow::Result<Response> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_KV_INTERVENE, params);
 
         self.send(&request)?;
         self.recv()
@@ -277,6 +300,43 @@ mod tests {
             slices: None,
         };
         let result = handle.inspect_raw(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn kv_read_method_exists() {
+        use rocket_surgeon_protocol::messages::{HostKvReadRequest, KvMetric, KvSlot};
+
+        let mut handle =
+            OrchestratorHandle::spawn("cat", "/fake/worker", "info").expect("cat should exist");
+        let req = HostKvReadRequest {
+            model_handle: 1,
+            layers: Some(vec![0]),
+            positions: Some(vec![0]),
+            heads: None,
+            slot: KvSlot::Both,
+            metric: KvMetric::L2Norm,
+        };
+        // `cat` echoes the request rather than answering — recv must fail.
+        let result = handle.kv_read_raw(&req);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn kv_intervene_method_exists() {
+        use rocket_surgeon_protocol::messages::{HostKvInterveneRequest, KvInterveneOp, KvSlot};
+
+        let mut handle =
+            OrchestratorHandle::spawn("cat", "/fake/worker", "info").expect("cat should exist");
+        let req = HostKvInterveneRequest {
+            model_handle: 1,
+            layers: vec![0],
+            positions: vec![0],
+            heads: None,
+            slot: KvSlot::Both,
+            operation: KvInterveneOp::Zero,
+        };
+        let result = handle.kv_intervene_raw(&req);
         assert!(result.is_err());
     }
 }

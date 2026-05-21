@@ -5,6 +5,9 @@ use crate::state::{UiState, ViewId};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Layout {
     Single(ViewId),
+    // In-flight scaffolding: horizontal splits are produced by the
+    // context-reactive `propose_layout`, which is unit-tested but not yet
+    // wired into the `main.rs` render loop. `dead_code` is a false positive.
     #[allow(dead_code)]
     HSplit {
         left: Box<Self>,
@@ -23,6 +26,8 @@ impl Layout {
         Self::Single(view)
     }
 
+    /// In-flight scaffolding: used by `propose_layout`, which is unit-tested
+    /// but not yet wired into the render loop.
     #[allow(dead_code)]
     pub fn hsplit(left: Self, right: Self, ratio: f32) -> Self {
         Self::HSplit {
@@ -72,6 +77,8 @@ impl Layout {
         }
     }
 
+    /// In-flight scaffolding: split-ratio adjustment for the (not yet wired)
+    /// interactive resize controls; exercised by unit tests.
     #[allow(dead_code)]
     pub fn adjust_ratio(&mut self, delta: f32) {
         match self {
@@ -82,6 +89,8 @@ impl Layout {
         }
     }
 
+    /// In-flight scaffolding: enumerates the views a layout references, for
+    /// the (not yet wired) layout-proposal diffing; exercised by unit tests.
     #[allow(dead_code)]
     pub fn view_ids(&self) -> Vec<ViewId> {
         let mut ids = Vec::new();
@@ -105,6 +114,8 @@ impl Layout {
     }
 }
 
+/// In-flight scaffolding: context-reactive layout proposal. Unit-tested but
+/// not yet wired into the `main.rs` render loop, which uses a fixed layout.
 #[allow(dead_code)]
 pub fn propose_layout(old: &UiState, new: &UiState) -> Option<Layout> {
     if old.cursor.component != new.cursor.component && !new.cursor.component.is_empty() {

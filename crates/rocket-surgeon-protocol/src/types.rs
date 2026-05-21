@@ -446,7 +446,7 @@ impl Capabilities {
         Self {
             protocol_version: "0.3.0".to_owned(),
             supports_reverse_step: false,
-            supports_checkpointing: false,
+            supports_checkpointing: true,
             supports_moe: false,
             supports_backward: false,
             supports_sae: false,

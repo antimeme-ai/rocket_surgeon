@@ -9,15 +9,10 @@ use rocket_surgeon_protocol::jsonrpc::{Notification, RawMessage, Request, Reques
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-#[allow(dead_code)]
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
-#[allow(dead_code)]
 const MAX_HEADER_COUNT: usize = 16;
-#[allow(dead_code)]
 const MAX_HEADER_LINE_LEN: usize = 1024;
 
-// Built and unit-tested ahead of daemon wiring in the main TUI loop.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("transport closed")]
@@ -42,10 +37,8 @@ pub enum ClientError {
     HeaderLineTooLong,
 }
 
-#[allow(dead_code)]
 type PendingMap = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Response, ClientError>>>>>;
 
-#[allow(dead_code)]
 fn lock_pending(
     pending: &PendingMap,
 ) -> std::sync::MutexGuard<'_, HashMap<RequestId, oneshot::Sender<Result<Response, ClientError>>>> {
@@ -54,8 +47,6 @@ fn lock_pending(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// Built and unit-tested ahead of daemon wiring in the main TUI loop.
-#[allow(dead_code)]
 pub struct Connection {
     outgoing_tx: mpsc::Sender<OutgoingMessage>,
     notification_tx: broadcast::Sender<Notification>,
@@ -63,12 +54,10 @@ pub struct Connection {
     pending: PendingMap,
 }
 
-#[allow(dead_code)]
 enum OutgoingMessage {
     Raw(Vec<u8>),
 }
 
-#[allow(dead_code)]
 impl Connection {
     pub fn spawn<R, W>(
         reader: R,
@@ -123,7 +112,6 @@ impl Connection {
     }
 }
 
-#[allow(dead_code)]
 pub type ConnectFn = Box<
     dyn Fn(
             broadcast::Sender<Notification>,
@@ -132,8 +120,6 @@ pub type ConnectFn = Box<
         + Sync,
 >;
 
-// Built and unit-tested ahead of daemon wiring in the main TUI loop.
-#[allow(dead_code)]
 pub struct ReconnectingClient {
     conn: tokio::sync::RwLock<Arc<Connection>>,
     connect: ConnectFn,
@@ -142,7 +128,6 @@ pub struct ReconnectingClient {
     base_delay: Duration,
 }
 
-#[allow(dead_code)]
 impl ReconnectingClient {
     pub fn new(
         conn: Arc<Connection>,
@@ -201,8 +186,7 @@ impl ReconnectingClient {
     }
 }
 
-#[allow(dead_code)]
-pub(super) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
+pub async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<String, ClientError> {
     let mut content_length: Option<usize> = None;
@@ -252,7 +236,6 @@ pub(super) async fn read_content_length_message<R: AsyncBufReadExt + Unpin>(
         .map_err(|e| ClientError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
 }
 
-#[allow(dead_code)]
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
     mut writer: W,
@@ -267,7 +250,6 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     }
 }
 
-#[allow(dead_code)]
 async fn read_loop<R: AsyncRead + Unpin + Send>(
     reader: R,
     notification_tx: broadcast::Sender<Notification>,
@@ -277,19 +259,19 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
 
     loop {
         let Ok(msg) = read_content_length_message(&mut reader).await else {
-            let drained = {
+            let drained: Vec<_> = {
                 let mut map = lock_pending(&pending);
-                map.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
+                map.drain().collect()
             };
-            for tx in drained {
+            for (_, tx) in drained {
                 let _ = tx.send(Err(ClientError::Closed));
             }
             return;
         };
 
         if let Ok(resp) = serde_json::from_str::<Response>(&msg) {
-            let tx = lock_pending(&pending).remove(&resp.id);
-            if let Some(tx) = tx {
+            let pending_tx = lock_pending(&pending).remove(&resp.id);
+            if let Some(tx) = pending_tx {
                 let _ = tx.send(Ok(resp));
             }
             continue;
@@ -309,8 +291,7 @@ async fn read_loop<R: AsyncRead + Unpin + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt::Write as _;
-    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::io::duplex;
 
     fn frame_message(body: &str) -> Vec<u8> {
         format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
@@ -472,9 +453,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_too_many_headers() {
+        use std::fmt::Write;
+
         let mut msg = String::new();
         for i in 0..20 {
-            let _ = write!(msg, "X-Header-{i}: value\r\n");
+            writeln!(msg, "X-Header-{i}: value\r").unwrap();
         }
         msg.push_str("\r\n");
         let mut reader = tokio::io::BufReader::new(msg.as_bytes());

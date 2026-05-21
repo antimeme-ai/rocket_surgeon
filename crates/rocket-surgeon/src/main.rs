@@ -17,8 +17,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_inspect, handle_probe, handle_step, handle_subscribe,
-    handle_unsubscribe, handle_view,
+    dispatch, handle_attach, handle_inspect, handle_kv_intervene, handle_kv_read, handle_probe,
+    handle_step, handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -308,6 +308,152 @@ fn try_orchestrator_view(
     }
 }
 
+/// Try to read the KV cache via the orchestrator.
+///
+/// Returns the `HostKvReadResponse` on success, a forwarded error `Response`
+/// if the orchestrator returned an RPC error, or `None` if no orchestrator is
+/// available. Mirrors [`try_orchestrator_inspect`].
+fn try_orchestrator_kv_read(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Result<Option<rocket_surgeon_protocol::messages::HostKvReadResponse>, Box<Response>> {
+    let Some(orch) = orchestrator.as_mut() else {
+        return Ok(None);
+    };
+    let Some(mh) = model_handle else {
+        return Ok(None);
+    };
+    let kv_req: rocket_surgeon_protocol::messages::KvReadRequest = match request
+        .params
+        .as_ref()
+        .map(|p| serde_json::from_value(p.clone()))
+    {
+        Some(Ok(r)) => r,
+        _ => return Ok(None),
+    };
+
+    let host_req = rocket_surgeon_protocol::messages::HostKvReadRequest {
+        model_handle: mh,
+        layers: kv_req.layers,
+        positions: kv_req.positions,
+        heads: kv_req.heads,
+        slot: kv_req.slot,
+        metric: kv_req.metric,
+    };
+
+    let raw_response = match orch.kv_read_raw(&host_req) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("orchestrator kv.read transport error: {e}");
+            return Err(Box::new(Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("orchestrator transport error: {e}"),
+                    data: None,
+                },
+            )));
+        }
+    };
+
+    if let Some(err) = raw_response.error {
+        warn!("orchestrator kv.read failed: {}", err.message);
+        return Err(Box::new(Response::error(request.id.clone(), err)));
+    }
+
+    match raw_response.result {
+        Some(value) => {
+            let hr: rocket_surgeon_protocol::messages::HostKvReadResponse =
+                serde_json::from_value(value).map_err(|e| {
+                    Box::new(Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("failed to parse orchestrator response: {e}"),
+                            data: None,
+                        },
+                    ))
+                })?;
+            Ok(Some(hr))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Try to apply a KV-cache intervention via the orchestrator.
+///
+/// Returns the `HostKvInterveneResponse` on success, a forwarded error
+/// `Response` if the orchestrator returned an RPC error, or `None` if no
+/// orchestrator is available.
+fn try_orchestrator_kv_intervene(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Result<Option<rocket_surgeon_protocol::messages::HostKvInterveneResponse>, Box<Response>> {
+    let Some(orch) = orchestrator.as_mut() else {
+        return Ok(None);
+    };
+    let Some(mh) = model_handle else {
+        return Ok(None);
+    };
+    let kv_req: rocket_surgeon_protocol::messages::KvInterveneRequest = match request
+        .params
+        .as_ref()
+        .map(|p| serde_json::from_value(p.clone()))
+    {
+        Some(Ok(r)) => r,
+        _ => return Ok(None),
+    };
+
+    let host_req = rocket_surgeon_protocol::messages::HostKvInterveneRequest {
+        model_handle: mh,
+        layers: kv_req.layers,
+        positions: kv_req.positions,
+        heads: kv_req.heads,
+        slot: kv_req.slot,
+        operation: kv_req.operation,
+    };
+
+    let raw_response = match orch.kv_intervene_raw(&host_req) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("orchestrator kv.intervene transport error: {e}");
+            return Err(Box::new(Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("orchestrator transport error: {e}"),
+                    data: None,
+                },
+            )));
+        }
+    };
+
+    if let Some(err) = raw_response.error {
+        warn!("orchestrator kv.intervene failed: {}", err.message);
+        return Err(Box::new(Response::error(request.id.clone(), err)));
+    }
+
+    match raw_response.result {
+        Some(value) => {
+            let hr: rocket_surgeon_protocol::messages::HostKvInterveneResponse =
+                serde_json::from_value(value).map_err(|e| {
+                    Box::new(Response::error(
+                        request.id.clone(),
+                        RpcError {
+                            code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                            message: format!("failed to parse orchestrator response: {e}"),
+                            data: None,
+                        },
+                    ))
+                })?;
+            Ok(Some(hr))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Send `_host/detach` to the orchestrator and drop it.
 fn detach_orchestrator(
     orchestrator: &mut Option<OrchestratorHandle>,
@@ -578,6 +724,18 @@ fn main() {
         } else if request.method == method::VIEW {
             match try_orchestrator_view(&mut orchestrator, model_handle, &request) {
                 Ok(host_response) => handle_view(&session, &request, host_response.as_ref()),
+                Err(err_response) => *err_response,
+            }
+        } else if request.method == method::KV_READ {
+            match try_orchestrator_kv_read(&mut orchestrator, model_handle, &request) {
+                Ok(host_response) => handle_kv_read(&session, &request, host_response.as_ref()),
+                Err(err_response) => *err_response,
+            }
+        } else if request.method == method::KV_INTERVENE {
+            match try_orchestrator_kv_intervene(&mut orchestrator, model_handle, &request) {
+                Ok(host_response) => {
+                    handle_kv_intervene(&session, &request, host_response.as_ref())
+                }
                 Err(err_response) => *err_response,
             }
         } else if request.method == method::PROBE {

@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, AttachResponse, DetachResponse, DiscoverMatch, DiscoverResponse,
-    InitializeRequest, InitializeResponse, InspectResponse, MemoryUsage, StatusResponse,
-    StepRequest, StepResponse, SubscribeFilter, ViewDefineResponse,
+    AttachRequest, AttachResponse, CheckpointResponse, CreateCheckpointTier, DetachResponse,
+    DiscoverMatch, DiscoverResponse, InitializeRequest, InitializeResponse, InspectResponse,
+    MemoryUsage, StatusResponse, StepRequest, StepResponse, SubscribeFilter, ViewDefineResponse,
 };
 use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
-    ActionName, Capabilities, EnvelopeMode, PositionEnvelope, ResponseEnvelope, SessionState,
-    Status, TensorSummary,
+    ActionName, Capabilities, CheckpointRef, CheckpointTier, EnvelopeMode, Phase, PositionEnvelope,
+    ResponseEnvelope, SessionState, Status, StepDirection, TensorSummary, TickEvent,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +29,8 @@ pub enum SessionError {
     CapabilityNotSupported(ErrorData),
     #[error("invalid params")]
     InvalidParams(ErrorData),
+    #[error("checkpoint not found")]
+    CheckpointNotFound(ErrorData),
 }
 
 impl SessionError {
@@ -40,9 +42,34 @@ impl SessionError {
             | Self::UnsupportedModel(d)
             | Self::CompiledModel(d)
             | Self::CapabilityNotSupported(d)
-            | Self::InvalidParams(d) => d,
+            | Self::InvalidParams(d)
+            | Self::CheckpointNotFound(d) => d,
         }
     }
+}
+
+/// Format the current wall-clock time as an RFC-3339 UTC timestamp.
+///
+/// Checkpoints carry a human/LLM-readable `created_at`; the daemon has no
+/// date-formatting dependency, so the civil date is derived from the Unix
+/// epoch directly (Howard Hinnant's `civil_from_days` algorithm).
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 const SUPPORTED_FAMILIES: &[&str] = &["llama", "mixtral", "gpt-neox", "gpt2"];
@@ -200,6 +227,12 @@ pub struct Session {
     /// event fan-out in `notifications.rs` consults this to decide which
     /// notifications a subscriber should receive.
     event_filter: Option<SubscribeFilter>,
+    /// Full [`TickPosition`] captured at `checkpoint_create`, keyed by
+    /// checkpoint id. `restore` re-seats this verbatim — preserving
+    /// `direction`/`component`/`phase`, which the wire `CheckpointRef`
+    /// (only `tick_id`/`layer_idx`) cannot express. Cleared on detach;
+    /// bookmark-only markers have no entry here.
+    checkpoint_positions: HashMap<String, TickPosition>,
 }
 
 impl Session {
@@ -220,6 +253,7 @@ impl Session {
             catalog: Vec::new(),
             defined_views: HashMap::new(),
             event_filter: None,
+            checkpoint_positions: HashMap::new(),
         }
     }
 
@@ -530,6 +564,7 @@ impl Session {
         self.state.tick_id = None;
         self.state.active_probes.clear();
         self.state.checkpoints.clear();
+        self.checkpoint_positions.clear();
         // Discovery metadata and view registrations belong to the attached
         // model; drop them so a stale catalog cannot leak across attaches.
         self.catalog.clear();
@@ -585,11 +620,7 @@ impl Session {
     pub fn check_capability(&self, cap: &str) -> Result<(), SessionError> {
         if matches!(
             cap,
-            "supports_checkpointing"
-                | "supports_reverse_step"
-                | "supports_backward"
-                | "supports_moe"
-                | "supports_sae"
+            "supports_reverse_step" | "supports_backward" | "supports_moe" | "supports_sae"
         ) {
             return Err(self.capability_not_supported_error(cap));
         }
@@ -608,6 +639,177 @@ impl Session {
                 crate::dispatch::recovery_hint_for(ErrorCode::CapabilityNotSupported).to_owned(),
             ),
             context: Some(serde_json::json!({ "capability": cap })),
+        })
+    }
+
+    // ── Checkpoints ─────────────────────────────────────────────────────
+    //
+    // Checkpoint metadata (the `CheckpointRef` registry) lives directly in
+    // `state.checkpoints`, so the SessionState envelope is always consistent
+    // with no separate projection step. `list`/`delete`/`bookmark` are pure
+    // bookkeeping; `create`/`restore` additionally move the logical tick
+    // position. Worker-side tensor capture is a separate tier reached over
+    // `_host/checkpoint` — these methods are the daemon-side source of truth.
+
+    /// `rocket/checkpoint action=create` — register a checkpoint at the
+    /// current tick position. `tier` defaults to `activation`.
+    pub fn checkpoint_create(
+        &mut self,
+        tier: Option<CreateCheckpointTier>,
+    ) -> ResponseEnvelope<CheckpointResponse> {
+        let checkpoint_id = uuid::Uuid::new_v4().to_string();
+        let tier = match tier.unwrap_or(CreateCheckpointTier::Activation) {
+            CreateCheckpointTier::Activation => CheckpointTier::Activation,
+            CreateCheckpointTier::FullSnapshot => CheckpointTier::FullSnapshot,
+        };
+        self.state.checkpoints.push(CheckpointRef {
+            checkpoint_id: checkpoint_id.clone(),
+            tick_id: self.state.tick_id.unwrap_or(0),
+            layer_idx: self.state.position.as_ref().map_or(0, |p| p.layer),
+            tier,
+            bookmark: None,
+            created_at: now_rfc3339(),
+        });
+        if let Some(pos) = &self.state.position {
+            self.checkpoint_positions
+                .insert(checkpoint_id.clone(), pos.clone());
+        }
+        self.envelope(CheckpointResponse {
+            checkpoints: self.state.checkpoints.clone(),
+            checkpoint_id: Some(checkpoint_id),
+            restored_to: None,
+        })
+    }
+
+    /// `rocket/checkpoint action=list` — return every registered checkpoint.
+    pub fn checkpoint_list(&self) -> ResponseEnvelope<CheckpointResponse> {
+        self.envelope(CheckpointResponse {
+            checkpoints: self.state.checkpoints.clone(),
+            checkpoint_id: None,
+            restored_to: None,
+        })
+    }
+
+    /// `rocket/checkpoint action=restore` — move the logical tick position
+    /// back to a registered checkpoint. Errors `CHECKPOINT_NOT_FOUND` when
+    /// the id is unknown.
+    pub fn checkpoint_restore(
+        &mut self,
+        checkpoint_id: &str,
+    ) -> Result<ResponseEnvelope<CheckpointResponse>, SessionError> {
+        let Some(cref) = self
+            .state
+            .checkpoints
+            .iter()
+            .find(|c| c.checkpoint_id == checkpoint_id)
+        else {
+            return Err(self.checkpoint_not_found_error(checkpoint_id));
+        };
+        // Prefer the full position captured at create time — it preserves
+        // direction/component/phase. Bookmark markers capture no position,
+        // so fall back to a forward-only reconstruction from the ref.
+        let position = self
+            .checkpoint_positions
+            .get(checkpoint_id)
+            .cloned()
+            .unwrap_or_else(|| TickPosition {
+                tick_id: cref.tick_id,
+                direction: StepDirection::Forward,
+                rank: None,
+                layer: cref.layer_idx,
+                component: String::new(),
+                event: TickEvent::Output,
+                replay_of: None,
+                phase: Phase::default(),
+                token_position: None,
+                clock: None,
+            });
+        self.state.tick_id = Some(position.tick_id);
+        self.state.position = Some(position.clone());
+        Ok(self.envelope(CheckpointResponse {
+            checkpoints: self.state.checkpoints.clone(),
+            checkpoint_id: Some(checkpoint_id.to_owned()),
+            restored_to: Some(position),
+        }))
+    }
+
+    /// `rocket/checkpoint action=delete` — drop a checkpoint from the
+    /// registry. Errors `CHECKPOINT_NOT_FOUND` when the id is unknown.
+    pub fn checkpoint_delete(
+        &mut self,
+        checkpoint_id: &str,
+    ) -> Result<ResponseEnvelope<CheckpointResponse>, SessionError> {
+        let before = self.state.checkpoints.len();
+        self.state
+            .checkpoints
+            .retain(|c| c.checkpoint_id != checkpoint_id);
+        if self.state.checkpoints.len() == before {
+            return Err(self.checkpoint_not_found_error(checkpoint_id));
+        }
+        self.checkpoint_positions.remove(checkpoint_id);
+        Ok(self.envelope(CheckpointResponse {
+            checkpoints: self.state.checkpoints.clone(),
+            checkpoint_id: None,
+            restored_to: None,
+        }))
+    }
+
+    /// `rocket/checkpoint action=bookmark` — attach a human-readable name to
+    /// the checkpoint at `tick_id`. When no checkpoint exists there, a
+    /// lightweight `probe_log`-tier marker entry is created to carry it.
+    pub fn checkpoint_bookmark(
+        &mut self,
+        tick_id: u64,
+        name: &str,
+    ) -> ResponseEnvelope<CheckpointResponse> {
+        if let Some(existing) = self
+            .state
+            .checkpoints
+            .iter_mut()
+            .find(|c| c.tick_id == tick_id)
+        {
+            existing.bookmark = Some(name.to_owned());
+        } else {
+            self.state.checkpoints.push(CheckpointRef {
+                checkpoint_id: uuid::Uuid::new_v4().to_string(),
+                tick_id,
+                layer_idx: self.state.position.as_ref().map_or(0, |p| p.layer),
+                tier: CheckpointTier::ProbeLog,
+                bookmark: Some(name.to_owned()),
+                created_at: now_rfc3339(),
+            });
+        }
+        self.envelope(CheckpointResponse {
+            checkpoints: self.state.checkpoints.clone(),
+            checkpoint_id: None,
+            restored_to: None,
+        })
+    }
+
+    fn checkpoint_not_found_error(&self, checkpoint_id: &str) -> SessionError {
+        let available: Vec<&str> = self
+            .state
+            .checkpoints
+            .iter()
+            .map(|c| c.checkpoint_id.as_str())
+            .collect();
+        SessionError::CheckpointNotFound(ErrorData {
+            error_code: ErrorCode::CheckpointNotFound,
+            numeric_code: Some(ErrorCode::CheckpointNotFound.numeric_code()),
+            severity: Severity::Recoverable,
+            suggestion: format!(
+                "Checkpoint '{checkpoint_id}' does not exist; \
+                 call `rocket/checkpoint action=list` to see valid ids"
+            ),
+            current_state: Some(self.state.status),
+            valid_states: None,
+            recovery_hint: Some(
+                crate::dispatch::recovery_hint_for(ErrorCode::CheckpointNotFound).to_owned(),
+            ),
+            context: Some(serde_json::json!({
+                "checkpoint_id": checkpoint_id,
+                "available_ids": available,
+            })),
         })
     }
 
@@ -882,6 +1084,201 @@ mod tests {
         session
     }
 
+    /// A stopped session positioned as if stepped to tick 5 at layer 3 —
+    /// the `checkpoint.feature` Background precondition.
+    fn stepped_session() -> Session {
+        let mut session = stopped_session();
+        session.state.tick_id = Some(5);
+        session.state.position = Some(TickPosition {
+            tick_id: 5,
+            direction: StepDirection::Forward,
+            rank: Some(0),
+            layer: 3,
+            component: "attn.q_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+            phase: Phase::default(),
+            token_position: None,
+            clock: None,
+        });
+        session
+    }
+
+    #[test]
+    fn checkpoint_create_registers_at_current_position() {
+        let mut session = stepped_session();
+        let resp = session.checkpoint_create(Some(CreateCheckpointTier::Activation));
+        let data = resp.data.unwrap();
+        let id = data.checkpoint_id.unwrap();
+        assert!(!id.is_empty());
+        assert_eq!(data.checkpoints.len(), 1);
+        let cp = &data.checkpoints[0];
+        assert_eq!(cp.checkpoint_id, id);
+        assert_eq!(cp.tick_id, 5);
+        assert_eq!(cp.layer_idx, 3);
+        assert_eq!(cp.tier, CheckpointTier::Activation);
+        assert!(!cp.created_at.is_empty());
+        // The registry projects straight into the SessionState envelope.
+        assert_eq!(resp.state.checkpoints.len(), 1);
+    }
+
+    #[test]
+    fn checkpoint_create_full_snapshot_tier() {
+        let mut session = stepped_session();
+        let resp = session.checkpoint_create(Some(CreateCheckpointTier::FullSnapshot));
+        assert_eq!(
+            resp.data.unwrap().checkpoints[0].tier,
+            CheckpointTier::FullSnapshot
+        );
+    }
+
+    #[test]
+    fn checkpoint_create_defaults_to_activation() {
+        let mut session = stepped_session();
+        let resp = session.checkpoint_create(None);
+        assert_eq!(
+            resp.data.unwrap().checkpoints[0].tier,
+            CheckpointTier::Activation
+        );
+    }
+
+    #[test]
+    fn checkpoint_list_returns_all() {
+        let mut session = stepped_session();
+        session.checkpoint_create(None);
+        session.checkpoint_create(None);
+        let resp = session.checkpoint_list();
+        assert_eq!(resp.data.unwrap().checkpoints.len(), 2);
+    }
+
+    #[test]
+    fn checkpoint_restore_moves_position() {
+        let mut session = stepped_session();
+        let id = session
+            .checkpoint_create(None)
+            .data
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        // Advance past the checkpoint, then restore.
+        session.state.tick_id = Some(9);
+        let resp = session.checkpoint_restore(&id).unwrap();
+        let restored = resp.data.unwrap().restored_to.unwrap();
+        assert_eq!(restored.tick_id, 5);
+        assert_eq!(restored.layer, 3);
+        assert_eq!(session.state().tick_id, Some(5));
+        assert_eq!(session.state().position.as_ref().unwrap().tick_id, 5);
+    }
+
+    #[test]
+    fn checkpoint_restore_missing_returns_not_found() {
+        let mut session = stepped_session();
+        let err = session.checkpoint_restore("nonexistent").unwrap_err();
+        let data = err.error_data();
+        assert_eq!(data.error_code, ErrorCode::CheckpointNotFound);
+        assert_eq!(data.severity, Severity::Recoverable);
+        assert!(!data.suggestion.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_delete_removes_entry() {
+        let mut session = stepped_session();
+        let id = session
+            .checkpoint_create(None)
+            .data
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        let resp = session.checkpoint_delete(&id).unwrap();
+        assert!(resp.data.unwrap().checkpoints.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_delete_missing_returns_not_found() {
+        let mut session = stepped_session();
+        let err = session.checkpoint_delete("nonexistent").unwrap_err();
+        assert_eq!(err.error_data().error_code, ErrorCode::CheckpointNotFound);
+    }
+
+    #[test]
+    fn checkpoint_bookmark_creates_marker_entry() {
+        let mut session = stepped_session();
+        let resp = session.checkpoint_bookmark(5, "before-intervention");
+        let cps = resp.data.unwrap().checkpoints;
+        assert_eq!(cps.len(), 1);
+        assert_eq!(cps[0].tick_id, 5);
+        assert_eq!(cps[0].bookmark.as_deref(), Some("before-intervention"));
+    }
+
+    #[test]
+    fn checkpoint_bookmark_annotates_existing_checkpoint() {
+        let mut session = stepped_session();
+        session.checkpoint_create(None);
+        let resp = session.checkpoint_bookmark(5, "before-intervention");
+        let cps = resp.data.unwrap().checkpoints;
+        assert_eq!(cps.len(), 1);
+        assert_eq!(cps[0].bookmark.as_deref(), Some("before-intervention"));
+    }
+
+    #[test]
+    fn checkpoint_bookmark_with_duplicate_tick_annotates_one_entry() {
+        let mut session = stepped_session();
+        // Two checkpoints share tick 5 (stepped_session sits at tick 5).
+        session.checkpoint_create(None);
+        session.checkpoint_create(None);
+        let resp = session.checkpoint_bookmark(5, "mark");
+        let cps = resp.data.unwrap().checkpoints;
+        assert_eq!(cps.len(), 2, "bookmark must not create a third entry");
+        let annotated: Vec<_> = cps.iter().filter(|c| c.bookmark.is_some()).collect();
+        assert_eq!(annotated.len(), 1, "exactly one entry is annotated");
+        assert_eq!(annotated[0].bookmark.as_deref(), Some("mark"));
+    }
+
+    #[test]
+    fn checkpoint_restore_preserves_full_position() {
+        let mut session = stepped_session();
+        // Position the session mid backward-pass at a named component.
+        session.state.position = Some(TickPosition {
+            tick_id: 5,
+            direction: StepDirection::Backward,
+            rank: Some(0),
+            layer: 3,
+            component: "mlp.down_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: None,
+            phase: Phase::default(),
+            token_position: Some(2),
+            clock: None,
+        });
+        let id = session
+            .checkpoint_create(None)
+            .data
+            .unwrap()
+            .checkpoint_id
+            .unwrap();
+        // Move away, then restore — the full position must come back, not a
+        // forward-only reconstruction from the wire CheckpointRef.
+        session.state.position = None;
+        let restored = session
+            .checkpoint_restore(&id)
+            .unwrap()
+            .data
+            .unwrap()
+            .restored_to
+            .unwrap();
+        assert_eq!(restored.direction, StepDirection::Backward);
+        assert_eq!(restored.component, "mlp.down_proj");
+        assert_eq!(restored.token_position, Some(2));
+    }
+
+    #[test]
+    fn checkpoints_cleared_on_detach() {
+        let mut session = stepped_session();
+        session.checkpoint_create(None);
+        session.detach().unwrap();
+        assert!(session.state().checkpoints.is_empty());
+    }
+
     #[test]
     fn new_session_is_uninitialized() {
         let session = Session::new();
@@ -1067,9 +1464,7 @@ mod tests {
     #[test]
     fn check_capability_unsupported() {
         let session = stopped_session();
-        let err = session
-            .check_capability("supports_checkpointing")
-            .unwrap_err();
+        let err = session.check_capability("supports_sae").unwrap_err();
         let data = err.error_data();
         assert_eq!(data.error_code, ErrorCode::CapabilityNotSupported);
     }

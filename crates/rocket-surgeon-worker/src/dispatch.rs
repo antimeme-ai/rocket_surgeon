@@ -12,9 +12,9 @@ use rocket_surgeon_protocol::jsonrpc::{
 use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
     CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
-    HostDetachResponse, HostInspectRequest, HostInspectResponse, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, HostViewResponse,
-    ProbeFiredEvent,
+    HostDetachResponse, HostInspectRequest, HostInspectResponse, HostKvInterveneRequest,
+    HostKvReadRequest, HostStepRequest, HostStepResponse, HostUpdateProbesRequest,
+    HostUpdateProbesResponse, HostViewRequest, HostViewResponse, ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -50,6 +50,8 @@ pub struct WorkerState {
         rocket_surgeon_probes::grammar::ProbePoint,
     )>,
     pub shm_ring: Option<rocket_surgeon_shm::ring::DoomRingProducer>,
+    /// KV-cache eviction / pin bookkeeping (WU-G). See `crate::kv`.
+    pub kv_cache: crate::kv::KvCacheState,
 }
 
 impl WorkerState {
@@ -66,6 +68,7 @@ impl WorkerState {
             last_outputs: None,
             active_probes: Vec::new(),
             shm_ring: None,
+            kv_cache: crate::kv::KvCacheState::new(),
         }
     }
 
@@ -87,6 +90,8 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_UPDATE_PROBES => handle_host_update_probes(state, request),
         internal::HOST_INSPECT => handle_host_inspect(state, request),
         internal::HOST_VIEW => handle_host_view(state, request),
+        internal::HOST_KV_READ => handle_host_kv_read(state, request),
+        internal::HOST_KV_INTERVENE => handle_host_kv_intervene(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -210,6 +215,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     state.rank = req.rank;
     state.tick_state = TickState::new(req.rank);
     state.forward_pass = None;
+    state.kv_cache.reset();
 
     if let Some(old_ring) = state.shm_ring.take() {
         let old_name = old_ring.shm_name().to_owned();
@@ -287,6 +293,7 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
     state.module_paths.clear();
     state.container_paths.clear();
     state.last_outputs = None;
+    state.kv_cache.reset();
 
     if let Some(ring) = state.shm_ring.take() {
         let name = ring.shm_name().to_owned();
@@ -608,6 +615,11 @@ fn run_step_loop(
         if let Some(fwd) = state.forward_pass.as_mut() {
             fwd.forward_complete = true;
         }
+        // The initial forward pass is a prefill of the prompt. Once it
+        // completes, the model is positioned to generate the next token, so
+        // advance the token clock (which resets the operator clock to 0) and
+        // transition the phase from prefill to decode.
+        state.tick_state.advance_token();
     }
 
     let position = state.tick_state.to_tick_position();
@@ -940,6 +952,76 @@ fn compute_view(
     Ok(data)
 }
 
+/// Shared `model_handle` validation for the KV-cache handlers.
+///
+/// Returns a boxed `INTERNAL_ERROR` response when no model is loaded or the
+/// handle does not match the loaded model.
+fn validate_kv_handle(
+    state: &WorkerState,
+    request: &Request,
+    req_handle: u64,
+) -> Result<(), Box<Response>> {
+    let Some(handle) = state.model_handle else {
+        return Err(Box::new(internal_error(
+            request.id.clone(),
+            "No model loaded".to_owned(),
+        )));
+    };
+    if req_handle != handle {
+        return Err(Box::new(internal_error(
+            request.id.clone(),
+            format!("model handle mismatch: expected {handle}, got {req_handle}"),
+        )));
+    }
+    Ok(())
+}
+
+/// `_host/kv.read` — read per-(layer, position, head) KV-cache norms.
+///
+/// Delegates the norm/eviction computation to [`crate::kv::read`]. See that
+/// module for the documented backend stub: norms are deterministic, eviction
+/// is real worker state populated by `_host/kv.intervene`.
+fn handle_host_kv_read(state: &WorkerState, request: &Request) -> Response {
+    let req: HostKvReadRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    if let Err(resp) = validate_kv_handle(state, request, req.model_handle) {
+        return *resp;
+    }
+
+    let resp = crate::kv::read(&req, &state.kv_cache);
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+/// `_host/kv.intervene` — mutate the KV cache (zero / scale / evict / pin).
+///
+/// Delegates to [`crate::kv::intervene`], recording the worker's current
+/// tick id as the `evicted_at` tick for `evict` ops.
+fn handle_host_kv_intervene(state: &mut WorkerState, request: &Request) -> Response {
+    let req: HostKvInterveneRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    if let Err(resp) = validate_kv_handle(state, request, req.model_handle) {
+        return *resp;
+    }
+
+    let current_tick = state.tick_state.tick_id();
+    let resp = crate::kv::intervene(&req, &mut state.kv_cache, current_tick);
+
+    match serde_json::to_value(resp) {
+        Ok(value) => Response::success(request.id.clone(), value),
+        Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,6 +1179,123 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("No model loaded")
+        );
+    }
+
+    // --- WU-G: KV-cache dispatch ---------------------------------------
+
+    #[test]
+    fn dispatch_kv_read_invalid_params() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_KV_READ,
+            serde_json::json!({"wrong_field": 42}),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_kv_read_no_model_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_KV_READ,
+            serde_json::json!({"model_handle": 1, "layers": [0], "positions": [0]}),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No model loaded")
+        );
+    }
+
+    #[test]
+    fn dispatch_kv_read_with_model_returns_entries() {
+        let mut state = make_state();
+        state.model_handle = Some(1);
+        let req = make_request(
+            internal::HOST_KV_READ,
+            serde_json::json!({
+                "model_handle": 1,
+                "layers": [0, 1],
+                "positions": [0, 1, 2],
+                "heads": [0]
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_none());
+        let value = resp.result.unwrap();
+        let parsed: rocket_surgeon_protocol::messages::HostKvReadResponse =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.entries.len(), 6);
+    }
+
+    #[test]
+    fn dispatch_kv_intervene_evict_then_read_reports_evicted() {
+        let mut state = make_state();
+        state.model_handle = Some(1);
+
+        let evict = make_request(
+            internal::HOST_KV_INTERVENE,
+            serde_json::json!({
+                "model_handle": 1,
+                "layers": [0],
+                "positions": [5],
+                "op": "evict"
+            }),
+        );
+        let evict_resp = dispatch(&mut state, &evict);
+        assert!(evict_resp.error.is_none());
+        let iresp: rocket_surgeon_protocol::messages::HostKvInterveneResponse =
+            serde_json::from_value(evict_resp.result.unwrap()).unwrap();
+        assert_eq!(iresp.applied_op, "evict");
+
+        let read = make_request(
+            internal::HOST_KV_READ,
+            serde_json::json!({
+                "model_handle": 1,
+                "layers": [0],
+                "positions": [5],
+                "heads": [0]
+            }),
+        );
+        let read_resp = dispatch(&mut state, &read);
+        assert!(read_resp.error.is_none());
+        let rresp: rocket_surgeon_protocol::messages::HostKvReadResponse =
+            serde_json::from_value(read_resp.result.unwrap()).unwrap();
+        assert_eq!(
+            rresp.entries[0].overlay,
+            Some(rocket_surgeon_protocol::messages::KvOverlay::Evicted)
+        );
+        assert!(rresp.entries[0].k_metric.is_none());
+    }
+
+    #[test]
+    fn dispatch_kv_intervene_handle_mismatch_returns_error() {
+        let mut state = make_state();
+        state.model_handle = Some(1);
+        let req = make_request(
+            internal::HOST_KV_INTERVENE,
+            serde_json::json!({
+                "model_handle": 999,
+                "layers": [0],
+                "positions": [0],
+                "op": "zero"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("model handle mismatch")
         );
     }
 }

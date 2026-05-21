@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorCode;
 use crate::types::{
-    AliasEntry, BuiltInView, Capabilities, CheckpointRef, ComponentEntry, DType, EnvelopeMode,
-    GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status, StepDirection,
-    TensorSummary, TickGranularity, TickMapEntry, TickPosition,
+    AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier, ComponentEntry, DType,
+    EnvelopeMode, GranularityScope, InterventionRecipe, ProbeAction, ProbeDefinition, Status,
+    StepDirection, TensorSummary, TickGranularity, TickMapEntry, TickPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,9 @@ pub mod internal {
     pub const HOST_UPDATE_PROBES: &str = "_host/update_probes";
     pub const HOST_INSPECT: &str = "_host/inspect";
     pub const HOST_VIEW: &str = "_host/view";
+    pub const HOST_CHECKPOINT: &str = "_host/checkpoint";
+    pub const HOST_KV_READ: &str = "_host/kv.read";
+    pub const HOST_KV_INTERVENE: &str = "_host/kv.intervene";
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +269,9 @@ pub enum CheckpointRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointResponse {
     pub checkpoints: Vec<CheckpointRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_to: Option<TickPosition>,
 }
 
@@ -461,6 +466,49 @@ pub struct KvCacheEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KvReadResponse {
     pub entries: Vec<KvCacheEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// rocket/kv.intervene
+// ---------------------------------------------------------------------------
+
+/// Surgical operation applied to a KV-cache slot.
+///
+/// `kv.intervene` lets a client mutate the key/value cache between ticks —
+/// the cache-side analogue of `rocket/intervene` on activations. Each variant
+/// names a distinct mutation; the daemon validates the target slot exists and
+/// is not evicted before forwarding the op to the worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum KvInterveneOp {
+    /// Zero the selected key/value slot(s).
+    Zero,
+    /// Scale the selected slot(s) by a multiplicative factor.
+    Scale { factor: f64 },
+    /// Drop (evict) the selected position(s) from the cache.
+    Evict,
+    /// Pin the selected position(s) so they are exempt from eviction.
+    Pin,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvInterveneRequest {
+    pub layers: Vec<u32>,
+    pub positions: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heads: Option<Vec<u32>>,
+    #[serde(default)]
+    pub slot: KvSlot,
+    #[serde(flatten)]
+    pub operation: KvInterveneOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvInterveneResponse {
+    /// Number of (layer, position, head) cache slots the op touched.
+    pub slots_modified: u64,
+    /// Echo of the applied operation tag (`zero`, `scale`, `evict`, `pin`).
+    pub applied_op: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +932,105 @@ pub struct HostViewResponse {
     pub data: serde_json::Value,
 }
 
+// ---------------------------------------------------------------------------
+// _host/checkpoint (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+/// Only the two state-affecting checkpoint actions reach the worker.
+///
+/// `list`, `delete`, and `bookmark` are pure daemon bookkeeping and never
+/// round-trip. The daemon mints `checkpoint_id` so the worker can key its
+/// snapshot store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HostCheckpointRequest {
+    Create {
+        model_handle: u64,
+        checkpoint_id: String,
+        tier: CreateCheckpointTier,
+        tick_id: u64,
+        layer_idx: u32,
+    },
+    Restore {
+        model_handle: u64,
+        checkpoint_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCheckpointResponse {
+    pub checkpoint_id: String,
+    pub tier: CheckpointTier,
+    /// Populated on `Restore` with the worker's re-seated tick position.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_to: Option<TickPosition>,
+    /// Resident snapshot size, for VRAM accounting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_captured: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// _host/kv.read (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostKvReadRequest {
+    pub model_handle: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heads: Option<Vec<u32>>,
+    #[serde(default)]
+    pub slot: KvSlot,
+    #[serde(default)]
+    pub metric: KvMetric,
+}
+
+/// One evicted (position, tick) pair from a `_host/kv.read` response.
+///
+/// The worker reports these alongside the read entries; the daemon uses
+/// `evicted_at_tick` to populate the `KV_EVICTED` error context when a client
+/// reads an evicted position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvEvictionInfo {
+    pub position: u64,
+    pub evicted_at_tick: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostKvReadResponse {
+    pub entries: Vec<KvCacheEntry>,
+    /// Eviction metadata for any requested position that is evicted. Empty
+    /// when every requested position is live.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evicted: Vec<KvEvictionInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// _host/kv.intervene (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostKvInterveneRequest {
+    pub model_handle: u64,
+    pub layers: Vec<u32>,
+    pub positions: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heads: Option<Vec<u32>>,
+    #[serde(default)]
+    pub slot: KvSlot,
+    #[serde(flatten)]
+    pub operation: KvInterveneOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostKvInterveneResponse {
+    pub slots_modified: u64,
+    pub applied_op: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,6 +1212,51 @@ mod tests {
     }
 
     #[test]
+    fn internal_checkpoint_constant() {
+        assert_eq!(internal::HOST_CHECKPOINT, "_host/checkpoint");
+    }
+
+    #[test]
+    fn host_checkpoint_request_create_round_trip() {
+        let req = HostCheckpointRequest::Create {
+            model_handle: 1,
+            checkpoint_id: "ckpt-1".to_owned(),
+            tier: CreateCheckpointTier::Activation,
+            tick_id: 5,
+            layer_idx: 3,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostCheckpointRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("\"action\":\"create\""));
+    }
+
+    #[test]
+    fn host_checkpoint_request_restore_round_trip() {
+        let req = HostCheckpointRequest::Restore {
+            model_handle: 1,
+            checkpoint_id: "ckpt-1".to_owned(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostCheckpointRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("\"action\":\"restore\""));
+    }
+
+    #[test]
+    fn host_checkpoint_response_round_trip() {
+        let resp = HostCheckpointResponse {
+            checkpoint_id: "ckpt-1".to_owned(),
+            tier: CheckpointTier::FullSnapshot,
+            restored_to: None,
+            bytes_captured: Some(4096),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostCheckpointResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn host_step_request_with_granularity_round_trip() {
         let req = HostStepRequest {
             model_handle: 1,
@@ -1226,5 +1418,148 @@ mod tests {
     #[test]
     fn unsubscribe_method_constant() {
         assert_eq!(method::UNSUBSCRIBE, "rocket/unsubscribe");
+    }
+
+    // --- WU-G: KV-cache protocol surface -------------------------------
+
+    #[test]
+    fn internal_kv_constants() {
+        assert_eq!(internal::HOST_KV_READ, "_host/kv.read");
+        assert_eq!(internal::HOST_KV_INTERVENE, "_host/kv.intervene");
+    }
+
+    #[test]
+    fn kv_method_constants() {
+        assert_eq!(method::KV_READ, "rocket/kv.read");
+        assert_eq!(method::KV_INTERVENE, "rocket/kv.intervene");
+    }
+
+    #[test]
+    fn kv_intervene_request_zero_round_trip() {
+        let req = KvInterveneRequest {
+            layers: vec![0, 1],
+            positions: vec![3, 4],
+            heads: None,
+            slot: KvSlot::Both,
+            operation: KvInterveneOp::Zero,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"op\":\"zero\""));
+        let parsed: KvInterveneRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn kv_intervene_request_scale_round_trip() {
+        let req = KvInterveneRequest {
+            layers: vec![2],
+            positions: vec![0],
+            heads: Some(vec![1, 2]),
+            slot: KvSlot::K,
+            operation: KvInterveneOp::Scale { factor: 0.5 },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"op\":\"scale\""));
+        assert!(json.contains("\"factor\":0.5"));
+        let parsed: KvInterveneRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn kv_intervene_response_round_trip() {
+        let resp = KvInterveneResponse {
+            slots_modified: 12,
+            applied_op: "evict".to_owned(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: KvInterveneResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn host_kv_read_request_round_trip() {
+        let req = HostKvReadRequest {
+            model_handle: 7,
+            layers: Some(vec![0, 1]),
+            positions: Some(vec![0, 1, 2]),
+            heads: None,
+            slot: KvSlot::Both,
+            metric: KvMetric::L2Norm,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostKvReadRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_kv_read_request_defaults() {
+        let json = r#"{"model_handle":1}"#;
+        let req: HostKvReadRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.slot, KvSlot::Both);
+        assert_eq!(req.metric, KvMetric::L2Norm);
+        assert!(req.layers.is_none());
+    }
+
+    #[test]
+    fn host_kv_read_response_round_trip() {
+        let resp = HostKvReadResponse {
+            entries: vec![KvCacheEntry {
+                layer: 0,
+                position: 1,
+                head: 0,
+                k_metric: Some(1.5),
+                v_metric: Some(2.5),
+                overlay: None,
+            }],
+            evicted: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // An empty `evicted` list is omitted from the wire form.
+        assert!(!json.contains("evicted"));
+        let parsed: HostKvReadResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.entries.len(), parsed.entries.len());
+        assert_eq!(parsed.entries[0].k_metric, Some(1.5));
+    }
+
+    #[test]
+    fn host_kv_read_response_with_eviction_round_trip() {
+        let resp = HostKvReadResponse {
+            entries: vec![],
+            evicted: vec![KvEvictionInfo {
+                position: 5,
+                evicted_at_tick: 42,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostKvReadResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.evicted.len(), 1);
+        assert_eq!(parsed.evicted[0].evicted_at_tick, 42);
+    }
+
+    #[test]
+    fn host_kv_intervene_request_round_trip() {
+        let req = HostKvInterveneRequest {
+            model_handle: 3,
+            layers: vec![0],
+            positions: vec![5],
+            heads: None,
+            slot: KvSlot::Both,
+            operation: KvInterveneOp::Pin,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"op\":\"pin\""));
+        let parsed: HostKvInterveneRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn host_kv_intervene_response_round_trip() {
+        let resp = HostKvInterveneResponse {
+            slots_modified: 4,
+            applied_op: "zero".to_owned(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostKvInterveneResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
     }
 }

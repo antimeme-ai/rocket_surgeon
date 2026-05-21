@@ -26,7 +26,9 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
         | internal::HOST_CONFIGURE_HOOKS
         | internal::HOST_UPDATE_PROBES
         | internal::HOST_INSPECT
-        | internal::HOST_VIEW => forward_to_worker(state, request),
+        | internal::HOST_VIEW
+        | internal::HOST_KV_READ
+        | internal::HOST_KV_INTERVENE => forward_to_worker(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -362,6 +364,51 @@ mod tests {
                 "model_handle": 1,
                 "target": "model:0:0:q_proj:output",
                 "detail": "summary"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No worker running")
+        );
+    }
+
+    #[test]
+    fn host_kv_read_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_KV_READ,
+            serde_json::json!({
+                "model_handle": 1,
+                "layers": [0],
+                "positions": [0]
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No worker running")
+        );
+    }
+
+    #[test]
+    fn host_kv_intervene_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_KV_INTERVENE,
+            serde_json::json!({
+                "model_handle": 1,
+                "layers": [0],
+                "positions": [0],
+                "op": "zero"
             }),
         );
         let resp = dispatch(&mut state, &req);

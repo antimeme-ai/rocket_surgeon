@@ -1,6 +1,6 @@
 ---
 id: BEAD-0015
-title: Rebuild rocket-surgeon-tui on the Component template architecture (ADR-0008)
+title: Rebuild rocket-surgeon-tui on the Component template architecture (ADR-0009)
 status: open
 priority: medium
 created: 2026-05-21
@@ -11,7 +11,7 @@ created: 2026-05-21
 `rocket-surgeon-tui` was built without anchoring on a reference pattern: a
 synchronous `main.rs` loop that only handles terminal input, sitting beside a
 fully async (tokio) protocol client that nothing connects to, plus a bespoke
-per-view dirty-tracking system built twice. ADR-0008 chose the target: the
+per-view dirty-tracking system built twice. ADR-0009 chose the target: the
 Ratatui **Component template** pattern — a TEA spine (single `UiState` store,
 one `Action` enum, unidirectional flow) with `Component` decomposition for the
 view panels, on an owned `tokio` event loop.
@@ -20,7 +20,7 @@ Full blueprint: `docs/specs/2026-05-21-tui-architecture-design.md`.
 
 ## Why deferred
 
-The decision (ADR-0008) and blueprint are recorded; the rework itself is its
+The decision (ADR-0009) and blueprint are recorded; the rework itself is its
 own work. It must be delivered as incremental vertical slices, not a big-bang
 rewrite — each slice compiles, tests, and leaves the crate runnable.
 
