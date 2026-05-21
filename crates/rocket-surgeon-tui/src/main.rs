@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod client;
+mod components;
 mod daemon;
 mod input;
 mod render;

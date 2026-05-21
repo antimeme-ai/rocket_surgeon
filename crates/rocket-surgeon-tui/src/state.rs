@@ -57,8 +57,9 @@ pub struct ViewSlot {
 pub enum ViewKind {
     LayerStack,
     // In-flight scaffolding: view kinds for the planned panel set, built out
-    // per-panel in BEAD-0015 slice 5. The compositor already dispatches on
-    // `CommandLine`; the rest are not yet constructed.
+    // per-panel in BEAD-0015 slice 5. `StatusBar` and `CommandLine` are
+    // backed by components and used in the default layout; the rest are not
+    // yet constructed.
     #[allow(dead_code)]
     TensorDetail,
     #[allow(dead_code)]
@@ -69,7 +70,6 @@ pub enum ViewKind {
     KvCache,
     #[allow(dead_code)]
     Worldline,
-    #[allow(dead_code)]
     CommandLine,
     StatusBar,
 }
