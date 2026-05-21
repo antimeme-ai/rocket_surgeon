@@ -50,7 +50,7 @@ Added `.github/workflows/ci.yml` (branch `ci/remote-github-actions`, PR to
 check `master` branch protection must require.
 
 The job provisions the toolchain (`actions/checkout@v6`,
-`dtolnay/rust-toolchain@1.85.0` with rustfmt+clippy, `astral-sh/setup-uv@v8`
+`dtolnay/rust-toolchain@1.88.0` with rustfmt+clippy, `astral-sh/setup-uv@v8`
 for `uv` + Python 3.11, `lefthook` via `uv tool install`), caches the cargo
 registry/target (`Swatinem/rust-cache@v2`) and the uv environment, then runs
 `cargo xtask setup` followed by `cargo xtask ci` verbatim — fmt + clippy +

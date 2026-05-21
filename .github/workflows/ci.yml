@@ -33,10 +33,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Rust 1.85.0 — workspace `rust-version`, edition 2024. rustfmt + clippy
+      # Rust 1.88.0 — workspace `rust-version`, edition 2024. rustfmt + clippy
       # components are required by `cargo xtask ci` (fmt --check, clippy).
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
 
