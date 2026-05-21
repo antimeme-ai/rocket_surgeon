@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn name_too_long_rejected() {
-        let long_name = format!("/{}", "a".repeat(31));
+        let long_name = format!("/{}", "a".repeat(PSHMNAMLEN_MAX));
         let err = ShmRegion::create(&long_name, 4096).unwrap_err();
         assert!(matches!(err, ShmError::NameTooLong { .. }));
     }
