@@ -29,6 +29,7 @@ type Backend = CrosstermBackend<Stdout>;
 pub struct Tui {
     terminal: Terminal<Backend>,
     actions: mpsc::Receiver<Action>,
+    action_tx: mpsc::Sender<Action>,
     restored: bool,
 }
 
@@ -43,11 +44,12 @@ impl Tui {
 
         let (tx, actions) = mpsc::channel(256);
         spawn_input_reader(tx.clone());
-        spawn_ticker(tx, fps);
+        spawn_ticker(tx.clone(), fps);
 
         Ok(Self {
             terminal,
             actions,
+            action_tx: tx,
             restored: false,
         })
     }
@@ -55,6 +57,12 @@ impl Tui {
     /// Await the next action; `None` once every event task has stopped.
     pub async fn next_action(&mut self) -> Option<Action> {
         self.actions.recv().await
+    }
+
+    /// A sender for additional event sources — the daemon link — to feed the
+    /// same action channel the loop drains.
+    pub fn action_sender(&self) -> mpsc::Sender<Action> {
+        self.action_tx.clone()
     }
 
     /// Draw a frame. Wraps the owned terminal so callers never reach the
@@ -89,8 +97,8 @@ impl Drop for Tui {
 ///
 /// The task is detached, not joined: it observes the receiver closing only on
 /// its next `blocking_send` (within one ~100 ms poll cycle) and otherwise ends
-/// when the process exits. That latency is harmless at slice-1 shutdown; a
-/// deterministic cancel path can come with the daemon task in slice 2.
+/// when the process exits. Harmless at shutdown — the process is exiting; a
+/// deterministic cancel path is deferred to a later slice.
 fn spawn_input_reader(tx: mpsc::Sender<Action>) {
     tokio::task::spawn_blocking(move || {
         loop {

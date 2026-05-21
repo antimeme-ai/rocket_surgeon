@@ -2,7 +2,9 @@
 //! and renders. The single owner of [`UiState`] and [`Layout`].
 
 use ratatui::Frame;
+use rocket_surgeon_protocol::types::Status;
 
+use crate::action::DaemonEvent;
 use crate::input::events::InputEvent;
 use crate::input::terminal::decode;
 use crate::render::compositor;
@@ -44,6 +46,23 @@ impl App {
                 Flow::Continue
             }
             None => Flow::Continue,
+        }
+    }
+
+    /// Apply a daemon-link event to the session snapshot.
+    pub fn handle_daemon(&mut self, event: &DaemonEvent) {
+        match event {
+            DaemonEvent::Connected { protocol_version } => {
+                self.state.session.status = Status::Initialized;
+                protocol_version.clone_into(&mut self.state.session.protocol_version);
+            }
+            DaemonEvent::Disconnected => {
+                self.state.session.status = Status::Uninitialized;
+            }
+            DaemonEvent::TickStopped(position) => {
+                self.state.session.status = Status::Stopped;
+                self.state.session.position = Some(position.clone());
+            }
         }
     }
 
@@ -122,5 +141,42 @@ mod tests {
     fn handle_terminal_unmapped_key_is_continue() {
         let mut app = App::new();
         assert_eq!(app.handle_terminal(&key(KeyCode::F(9))), Flow::Continue);
+    }
+
+    fn sample_position() -> rocket_surgeon_protocol::types::TickPosition {
+        serde_json::from_value(serde_json::json!({
+            "tick_id": 3, "direction": "forward", "rank": 0, "layer": 1,
+            "component": "mlp", "event": "output", "replay_of": null,
+            "phase": {"type": "decode"}, "token_position": null, "clock": null
+        }))
+        .expect("position deserializes")
+    }
+
+    #[test]
+    fn handle_daemon_connected_sets_initialized() {
+        let mut app = App::new();
+        app.handle_daemon(&DaemonEvent::Connected {
+            protocol_version: "0.3.0".into(),
+        });
+        assert_eq!(app.state.session.status, Status::Initialized);
+        assert_eq!(app.state.session.protocol_version, "0.3.0");
+    }
+
+    #[test]
+    fn handle_daemon_disconnected_resets_status() {
+        let mut app = App::new();
+        app.handle_daemon(&DaemonEvent::Connected {
+            protocol_version: "0.3.0".into(),
+        });
+        app.handle_daemon(&DaemonEvent::Disconnected);
+        assert_eq!(app.state.session.status, Status::Uninitialized);
+    }
+
+    #[test]
+    fn handle_daemon_tick_stopped_updates_position() {
+        let mut app = App::new();
+        app.handle_daemon(&DaemonEvent::TickStopped(sample_position()));
+        assert_eq!(app.state.session.status, Status::Stopped);
+        assert_eq!(app.state.session.position.as_ref().unwrap().tick_id, 3);
     }
 }
