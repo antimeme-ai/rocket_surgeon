@@ -1,0 +1,77 @@
+# Remote CI for rocket_surgeon — BEAD-0016.
+#
+# Produces the status check `master` branch protection requires, so PRs no
+# longer need `gh pr merge --admin`. The job is named `ci` (see the `name:`
+# on the job below); set that string as the required status check on the
+# `master` protection rule once this workflow's first run is green.
+#
+# The job runs `cargo xtask ci` verbatim — the same gate `lefthook` enforces
+# locally (fmt + clippy + ruff + mypy + cargo test + pytest + e2e) — so the
+# remote and local gates are byte-identical. See xtask/src/main.rs (Ci arm).
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+# Least privilege: the job only reads the repo. No write scopes, no secrets.
+permissions:
+  contents: read
+
+# One in-flight run per ref; a new push cancels the stale run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Rust 1.85.0 — workspace `rust-version`, edition 2024. rustfmt + clippy
+      # components are required by `cargo xtask ci` (fmt --check, clippy).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: rustfmt, clippy
+
+      # Cache the cargo registry and target/ dir. Keyed on Cargo.lock by the
+      # action; the explicit job-scoped prefix keeps it isolated.
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci
+
+      # uv provisions the interpreter and builds the project venv.
+      # `python-version` must track `.python-version` (currently 3.11) — it
+      # only sets uv's default `UV_PYTHON`; `scripts/bootstrap.sh` re-reads
+      # `.python-version` itself, so the venv interpreter is pinned regardless.
+      # `enable-cache` caches the uv download/wheel store.
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      # `scripts/bootstrap.sh` (invoked by `cargo xtask setup`) hard-fails if
+      # `lefthook` is not on PATH. `lefthook install` only writes local git
+      # hook files — inert in CI — but the binary must exist for setup to run.
+      # `uv tool install` drops the binary in `~/.local/bin`; add that to
+      # PATH explicitly so the `cargo xtask setup` step below resolves it.
+      - name: Install lefthook
+        run: |
+          uv tool install lefthook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Bootstrap: venv, dev deps, maturin PyO3 extension, workspace build.
+      - name: Bootstrap project (cargo xtask setup)
+        run: cargo xtask setup
+
+      # The gate: fmt + clippy + ruff + mypy + cargo test + pytest + e2e.
+      - name: Run CI suite (cargo xtask ci)
+        run: cargo xtask ci
