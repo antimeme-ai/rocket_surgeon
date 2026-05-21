@@ -30,6 +30,7 @@ def sample_header_kwargs() -> dict:
         "offset": 0x1000,
         "size": 2 * 4096 * 4096 * 4,
         "flags": 0,
+        "generation": 0,
     }
 
 
@@ -84,6 +85,7 @@ class TestSerializeProbeFrameHeader:
             offset=0,
             size=0,
             flags=0,
+            generation=0,
         )
         parsed = parse_probe_frame_header(result)
         shape = list(parsed["shape"])
@@ -93,7 +95,7 @@ class TestSerializeProbeFrameHeader:
 
     def test_reserved_bytes_are_zero(self, sample_header_kwargs: dict) -> None:
         result = serialize_probe_frame_header(**sample_header_kwargs)
-        assert all(b == 0 for b in result[72:128])
+        assert all(b == 0 for b in result[80:128])
 
     def test_little_endian(self) -> None:
         result = serialize_probe_frame_header(
@@ -107,6 +109,7 @@ class TestSerializeProbeFrameHeader:
             offset=0,
             size=0,
             flags=0,
+            generation=0,
         )
         assert result[0] == 0x01
         assert result[1] == 0x02
@@ -160,6 +163,7 @@ class TestPurePythonFallback:
                 offset=0,
                 size=0,
                 flags=0,
+                generation=0,
             )
 
     def test_pure_python_parse_too_small(self) -> None:
@@ -179,6 +183,7 @@ class TestPurePythonFallback:
                 offset=0,
                 size=0,
                 flags=0,
+                generation=0,
             )
 
     def test_cross_path_serialize_rust_parse_python(self, sample_header_kwargs: dict) -> None:
@@ -215,6 +220,7 @@ class TestNativeExtension:
                 offset=0,
                 size=0,
                 flags=0,
+                generation=0,
             )
 
     def test_empty_shape(self) -> None:
@@ -229,6 +235,7 @@ class TestNativeExtension:
             offset=0,
             size=0,
             flags=0,
+            generation=0,
         )
         assert len(result) == PROBE_FRAME_HEADER_SIZE
         parsed = parse_probe_frame_header(result)
@@ -247,6 +254,7 @@ class TestNativeExtension:
             offset=0,
             size=0,
             flags=0,
+            generation=0,
         )
         parsed = parse_probe_frame_header(result)
         assert parsed["ndim"] == 8

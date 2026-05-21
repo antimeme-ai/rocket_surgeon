@@ -12,7 +12,7 @@ import struct
 from typing import Any
 
 PROBE_FRAME_HEADER_SIZE = 128
-_RESERVED_SIZE = 56
+_RESERVED_SIZE = 52
 _SHAPE_SLOTS = 8
 
 _HAS_NATIVE: bool
@@ -60,11 +60,13 @@ def serialize_probe_frame_header(
     offset: int,
     size: int,
     flags: int,
+    generation: int,
 ) -> bytes:
     """Serialize a ProbeFrame header to 128 bytes (little-endian packed)."""
     if _HAS_NATIVE:
         return _native_serialize(  # type: ignore[no-any-return]
-            rank, layer, comp_id, dtype, ndim, shape, tick_id, offset, size, flags
+            rank, layer, comp_id, dtype, ndim, shape, tick_id, offset, size, flags,
+            generation,
         )
     return _py_serialize_probe_frame_header(
         rank=rank,
@@ -77,6 +79,7 @@ def serialize_probe_frame_header(
         offset=offset,
         size=size,
         flags=flags,
+        generation=generation,
     )
 
 
@@ -99,6 +102,7 @@ def _py_serialize_probe_frame_header(
     offset: int,
     size: int,
     flags: int,
+    generation: int,
 ) -> bytes:
     """Pure-Python ProbeFrame header serialization."""
     if len(shape) > _SHAPE_SLOTS:
@@ -111,7 +115,7 @@ def _py_serialize_probe_frame_header(
     padded_shape = list(shape) + [0] * (_SHAPE_SLOTS - len(shape))
 
     buf = struct.pack(
-        "<IIHBB8IQQQI",
+        "<IIHBB8IQQQII",
         rank,
         layer,
         comp_id,
@@ -122,6 +126,7 @@ def _py_serialize_probe_frame_header(
         offset,
         size,
         flags,
+        generation,
     )
     buf += b"\x00" * _RESERVED_SIZE
     return buf
@@ -133,7 +138,7 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
         msg = f"buffer too small: expected {PROBE_FRAME_HEADER_SIZE} bytes, got {len(data)}"
         raise ValueError(msg)
 
-    fields = struct.unpack_from("<IIHBB8IQQQI", data, 0)
+    fields = struct.unpack_from("<IIHBB8IQQQII", data, 0)
     rank = fields[0]
     layer = fields[1]
     comp_id = fields[2]
@@ -144,6 +149,7 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
     offset = fields[14]
     size = fields[15]
     flags = fields[16]
+    generation = fields[17]
 
     return {
         "rank": rank,
@@ -156,4 +162,5 @@ def _py_parse_probe_frame_header(data: bytes) -> dict[str, Any]:
         "offset": offset,
         "size": size,
         "flags": flags,
+        "generation": generation,
     }
