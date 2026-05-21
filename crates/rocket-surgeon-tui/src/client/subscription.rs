@@ -70,7 +70,7 @@ pub async fn unsubscribe(
     state: &mut SubscriptionState,
     client: &ReconnectingClient,
 ) -> Result<(), ClientError> {
-    let params = serde_json::to_value(&serde_json::json!({})).unwrap();
+    let params = serde_json::to_value(serde_json::json!({})).unwrap();
     let resp = client.request(method::UNSUBSCRIBE, params).await?;
 
     if let Some(err) = resp.error {

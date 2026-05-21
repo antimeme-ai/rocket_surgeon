@@ -33,7 +33,7 @@ fn render_status_bar(frame: &mut Frame<'_>, rect: Rect, state: &UiState) {
         String::new()
     };
 
-    let text = format!(" {} | {} | {}{}", mode_str, status_str, pos_str, pending);
+    let text = format!(" {mode_str} | {status_str} | {pos_str}{pending}");
     let bar = Paragraph::new(Line::from(text))
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
     frame.render_widget(bar, rect);

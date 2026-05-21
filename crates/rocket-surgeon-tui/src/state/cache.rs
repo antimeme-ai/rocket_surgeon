@@ -1,3 +1,9 @@
+// In-flight scaffolding: the LRU `TensorCache` is fully unit-tested but not
+// yet consumed by the `main.rs` render loop — wiring it to live daemon data
+// is tracked as separate work. Every item is exercised by the `#[cfg(test)]`
+// suite below, so the bin-only `dead_code` lint is a false positive here.
+#![allow(dead_code)]
+
 use std::collections::{HashMap, VecDeque};
 
 use rocket_surgeon_protocol::types::TensorSummary;

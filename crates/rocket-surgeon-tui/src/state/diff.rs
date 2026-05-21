@@ -1,3 +1,9 @@
+// In-flight scaffolding: the view-dirtying diff engine is fully unit-tested
+// but not yet wired into the `main.rs` render loop — that integration is
+// tracked as separate work. Every item is exercised by the `#[cfg(test)]`
+// suite below, so the bin-only `dead_code` lint is a false positive here.
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use super::{DataDep, UiState, ViewId};
