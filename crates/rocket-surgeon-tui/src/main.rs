@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod client;
+mod daemon;
 mod input;
 mod render;
 mod state;
@@ -46,15 +47,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut tui = Tui::new(cli.fps)?;
-    let result = run(&mut tui).await;
+    let result = run(&mut tui, cli.socket).await;
     tui.restore()?;
     result
 }
 
 /// The application loop: redraw, then wait for the next action. Immediate
 /// mode — every iteration redraws, so a `Tick` is enough to refresh.
-async fn run(tui: &mut Tui) -> anyhow::Result<()> {
+async fn run(tui: &mut Tui, socket: String) -> anyhow::Result<()> {
     let mut app = App::new();
+    daemon::spawn(socket, tui.action_sender());
     loop {
         tui.draw(|frame| app.draw(frame))?;
         match tui.next_action().await {
@@ -63,6 +65,7 @@ async fn run(tui: &mut Tui) -> anyhow::Result<()> {
                     return Ok(());
                 }
             }
+            Some(Action::Daemon(ev)) => app.handle_daemon(&ev),
             Some(Action::Tick) => {}
             // Every event task has stopped — nothing left to drive the loop.
             None => return Ok(()),

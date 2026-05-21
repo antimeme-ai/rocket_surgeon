@@ -120,6 +120,9 @@ pub type ConnectFn = Box<
         + Sync,
 >;
 
+/// Retry-wrapping client. Retained, fully tested, for the reconnection slice;
+/// `daemon.rs` currently drives a bare [`Connection`].
+#[allow(dead_code)]
 pub struct ReconnectingClient {
     conn: tokio::sync::RwLock<Arc<Connection>>,
     connect: ConnectFn,
@@ -128,6 +131,7 @@ pub struct ReconnectingClient {
     base_delay: Duration,
 }
 
+#[allow(dead_code)]
 impl ReconnectingClient {
     pub fn new(
         conn: Arc<Connection>,

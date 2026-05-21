@@ -34,7 +34,7 @@ Deliver as separate slices (each a candidate sub-bead):
    `UiState::dirty`) is deleted. **— DONE 2026-05-21 (PR #25).**
 2. **Daemon wire-up** — `daemon.rs` connects `client/` as the second event
    source; `DaemonConnected`/`Disconnected` and `TickStopped` actions flow; the
-   client is no longer dead code.
+   client is no longer dead code. **— DONE 2026-05-21 (PR #26).**
 3. **Component trait** — `StatusBar` and `CommandLine` migrate behind a
    `Component` trait; App walks the `Layout` and calls `draw`.
 4. **Effect channel** — effect `Action`s (`RequestStep`, `RequestInspect`, …)
