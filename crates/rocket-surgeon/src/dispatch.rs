@@ -700,7 +700,7 @@ fn ingest_and_respond(
         None
     };
 
-    match session.inspect(&summaries, slice_data) {
+    match session.inspect(&summaries, slice_data, req.envelope) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
@@ -835,7 +835,7 @@ pub fn handle_view(
     request: &Request,
     host_response: Option<&HostViewResponse>,
 ) -> Response {
-    let _req: ViewRequest = match parse_params(request) {
+    let req: ViewRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
@@ -858,7 +858,10 @@ pub fn handle_view(
         view: hr.view,
         data: hr.data.clone(),
     };
-    serialize_envelope(request.id.clone(), session.envelope(resp))
+    serialize_envelope(
+        request.id.clone(),
+        session.envelope_with_mode(req.envelope, resp),
+    )
 }
 
 /// `rocket/kv.read` — read per-(layer, position, head) KV-cache norms.
@@ -1600,6 +1603,142 @@ mod tests {
         assert_eq!(err_data.error_code, ErrorCode::TensorNotFound);
     }
 
+    // --- inspect envelope tests (TCK envelope-compactness.feature) ---
+
+    fn inspect_host_resp() -> HostInspectResponse {
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        HostInspectResponse {
+            tensors: vec![CapturedTensor {
+                module_path: "model.layers.0.self_attn.q_proj".to_owned(),
+                canonical: "q_proj".to_owned(),
+                layer: 0,
+                shape: vec![4],
+                dtype: "float32".to_owned(),
+                device: "cpu".to_owned(),
+                tensor_id: "a".repeat(64),
+                shm_name: None,
+                shm_offset: None,
+                byte_length: None,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&data)),
+            }],
+        }
+    }
+
+    fn inspect_envelope_request(envelope: Option<&str>) -> Request {
+        let mut params = serde_json::json!({
+            "target": "model:0:0:q_proj:output",
+            "detail": "summary"
+        });
+        if let Some(mode) = envelope {
+            params["envelope"] = serde_json::Value::String(mode.to_owned());
+        }
+        make_request("rocket/inspect", params)
+    }
+
+    #[test]
+    fn handle_inspect_default_envelope_is_full() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = inspect_envelope_request(None);
+        let resp = handle_inspect(&session, &req, Some(&inspect_host_resp()), &mut store, None);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let state = &result["state"];
+        // The full envelope carries the entire SessionState.
+        assert!(state.get("session_id").is_some());
+        assert!(state.get("active_probes").is_some());
+        assert!(state.get("checkpoints").is_some());
+        assert!(state.get("available_actions").is_some());
+        assert!(result["data"]["tensors"].is_array());
+    }
+
+    #[test]
+    fn handle_inspect_position_envelope_omits_heavy_state() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = inspect_envelope_request(Some("position"));
+        let resp = handle_inspect(&session, &req, Some(&inspect_host_resp()), &mut store, None);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let state = &result["state"];
+        // Position envelope keeps status and tick position...
+        assert_eq!(state["status"], "stopped");
+        assert!(state.get("position").is_some());
+        // ...but omits the heavier SessionState fields.
+        assert!(state.get("active_probes").is_none());
+        assert!(state.get("checkpoints").is_none());
+        assert!(state.get("session_id").is_none());
+        assert!(state.get("available_actions").is_none());
+        // The tensor data payload is still present.
+        assert!(result["data"]["tensors"].is_array());
+    }
+
+    #[test]
+    fn handle_inspect_slice_none_envelope_carries_slice_data() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = make_request(
+            "rocket/inspect",
+            serde_json::json!({
+                "target": "model:0:0:q_proj:output",
+                "detail": "slice",
+                "slices": [[0, 8]],
+                "envelope": "none"
+            }),
+        );
+        let resp = handle_inspect(&session, &req, Some(&inspect_host_resp()), &mut store, None);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        // None envelope: no state wrapper; slice_data rides as a top-level
+        // InspectResponse field, not under a `data` key.
+        assert!(result.get("state").is_none());
+        assert!(result.get("data").is_none());
+        assert!(result["slice_data"].is_string());
+    }
+
+    #[test]
+    fn handle_inspect_none_envelope_is_data_only() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let mut store = TensorStore::new();
+        let req = inspect_envelope_request(Some("none"));
+        let resp = handle_inspect(&session, &req, Some(&inspect_host_resp()), &mut store, None);
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        // No envelope wrapper at all: the InspectResponse fields are top-level.
+        assert!(result.get("state").is_none());
+        assert!(result.get("data").is_none());
+        assert!(result["tensors"].is_array());
+    }
+
     // --- Probe tests ---
 
     #[test]
@@ -1896,6 +2035,93 @@ mod tests {
         let data = &resp.result.unwrap()["data"];
         assert_eq!(data["view"], "residual_stream_norm");
         assert!(data["data"]["norms"].is_array());
+    }
+
+    // --- view envelope tests (TCK envelope-compactness.feature) ---
+
+    fn view_host_resp() -> HostViewResponse {
+        HostViewResponse {
+            view: BuiltInView::ResidualStreamNorm,
+            data: serde_json::json!({"norms": [0.5, 0.6], "num_layers": 2, "norm_type": "l2"}),
+        }
+    }
+
+    fn view_envelope_request(envelope: Option<&str>) -> Request {
+        let mut params = serde_json::json!({"view": "residual_stream_norm"});
+        if let Some(mode) = envelope {
+            params["envelope"] = serde_json::Value::String(mode.to_owned());
+        }
+        make_request("rocket/view", params)
+    }
+
+    #[test]
+    fn handle_view_default_envelope_is_full() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = view_envelope_request(None);
+        let resp = handle_view(&session, &req, Some(&view_host_resp()));
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let state = &result["state"];
+        // The full envelope carries the entire SessionState.
+        assert!(state.get("session_id").is_some());
+        assert!(state.get("active_probes").is_some());
+        assert!(state.get("checkpoints").is_some());
+        assert!(state.get("available_actions").is_some());
+        assert_eq!(result["data"]["view"], "residual_stream_norm");
+    }
+
+    #[test]
+    fn handle_view_position_envelope_omits_heavy_state() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = view_envelope_request(Some("position"));
+        let resp = handle_view(&session, &req, Some(&view_host_resp()));
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        let state = &result["state"];
+        // Position envelope keeps status and tick position...
+        assert_eq!(state["status"], "stopped");
+        assert!(state.get("position").is_some());
+        // ...but omits the heavier SessionState fields.
+        assert!(state.get("active_probes").is_none());
+        assert!(state.get("checkpoints").is_none());
+        assert!(state.get("session_id").is_none());
+        assert!(state.get("available_actions").is_none());
+        // The view data payload is still present.
+        assert_eq!(result["data"]["view"], "residual_stream_norm");
+    }
+
+    #[test]
+    fn handle_view_none_envelope_is_data_only() {
+        let mut session = Session::new();
+        dispatch(&mut session, &make_request("initialize", init_params()));
+        test_attach_dispatch(&mut session);
+
+        let req = view_envelope_request(Some("none"));
+        let resp = handle_view(&session, &req, Some(&view_host_resp()));
+        assert!(
+            resp.error.is_none(),
+            "Expected success, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        // No envelope wrapper at all: the ViewResponse fields are top-level.
+        assert!(result.get("state").is_none());
+        assert_eq!(result["view"], "residual_stream_norm");
+        assert!(result["data"]["norms"].is_array());
     }
 
     // --- discover tests (TCK: tck/protocol/discover.feature) ---
