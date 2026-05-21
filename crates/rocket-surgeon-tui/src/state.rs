@@ -1,8 +1,5 @@
 pub mod cache;
-pub mod diff;
 pub mod reducer;
-
-use std::collections::HashSet;
 
 use rocket_surgeon_protocol::types::{Capabilities, InterventionRecipe, Status, TickPosition};
 
@@ -17,21 +14,25 @@ pub struct UiState {
     pub cursor: CursorState,
     pub mode: Mode,
     pub views: Vec<ViewSlot>,
+    /// Shown in the status bar; incremented once daemon requests are wired
+    /// (BEAD-0015 slice 2). Always `0` in slice 1 — no producer yet.
     pub pending_requests: u32,
     pub status_line: String,
     pub command_buffer: String,
-    pub dirty: HashSet<ViewId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub status: Status,
+    /// Daemon-populated; written once the daemon link is wired (slice 2).
+    #[allow(dead_code)]
     pub position: Option<TickPosition>,
     pub capabilities: Option<Capabilities>,
-    // In-flight scaffolding: populated/read once the interventions panel is
-    // wired up; the diff engine already compares this field in its tests.
+    /// Daemon-populated; written once the interventions flow is wired (slice 2).
     #[allow(dead_code)]
     pub active_interventions: Vec<InterventionRecipe>,
+    /// Daemon-populated; set from the `connected` handshake (slice 2).
+    #[allow(dead_code)]
     pub protocol_version: String,
 }
 
@@ -40,8 +41,8 @@ pub struct CursorState {
     pub layer: u32,
     pub component: String,
     pub token_position: u64,
-    // In-flight scaffolding: read once multi-view focus routing lands; the
-    // diff engine already compares this field in its tests.
+    /// In-flight scaffolding: read once multi-view focus routing lands
+    /// (BEAD-0015 slice 5).
     #[allow(dead_code)]
     pub focused_view: ViewId,
 }
@@ -50,15 +51,14 @@ pub struct CursorState {
 pub struct ViewSlot {
     pub id: ViewId,
     pub kind: ViewKind,
-    pub data_deps: Vec<DataDep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewKind {
     LayerStack,
-    // In-flight scaffolding: these view kinds are defined for the planned
-    // panel set; the compositor already dispatches on `CommandLine`. They are
-    // not yet constructed by the bin, so `dead_code` is a false positive.
+    // In-flight scaffolding: view kinds for the planned panel set, built out
+    // per-panel in BEAD-0015 slice 5. The compositor already dispatches on
+    // `CommandLine`; the rest are not yet constructed.
     #[allow(dead_code)]
     TensorDetail,
     #[allow(dead_code)]
@@ -72,22 +72,6 @@ pub enum ViewKind {
     #[allow(dead_code)]
     CommandLine,
     StatusBar,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DataDep {
-    SessionStatus,
-    CursorPosition,
-    // In-flight scaffolding: data dependencies for the tensor and
-    // interventions panels; the diff engine already references them in tests.
-    #[allow(dead_code)]
-    TensorAt {
-        layer: u32,
-        component: String,
-    },
-    #[allow(dead_code)]
-    Interventions,
-    Mode,
 }
 
 pub fn initial_ui_state() -> UiState {
@@ -110,6 +94,5 @@ pub fn initial_ui_state() -> UiState {
         pending_requests: 0,
         status_line: String::new(),
         command_buffer: String::new(),
-        dirty: HashSet::new(),
     }
 }

@@ -31,7 +31,7 @@ Deliver as separate slices (each a candidate sub-bead):
 1. **Tokio loop, terminal only** — `action.rs`, `tui.rs`, `app.rs`; `main` runs
    a tokio runtime; existing terminal behavior runs through the new loop; the
    dirty system (`state::diff`, `mark_dep_dirty`/`mark_all_dirty`, `DataDep`,
-   `UiState::dirty`) is deleted.
+   `UiState::dirty`) is deleted. **— DONE 2026-05-21 (PR #25).**
 2. **Daemon wire-up** — `daemon.rs` connects `client/` as the second event
    source; `DaemonConnected`/`Disconnected` and `TickStopped` actions flow; the
    client is no longer dead code.
