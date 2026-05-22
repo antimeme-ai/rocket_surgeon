@@ -839,7 +839,7 @@ pub struct HostConfigureHooksResponse {
 // _host/step (internal: daemon → orchestrator → worker)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostStepRequest {
     pub model_handle: u64,
     pub count: u32,
@@ -849,6 +849,8 @@ pub struct HostStepRequest {
     pub granularity: Option<TickGranularity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_events: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interventions: Vec<InterventionRecipe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -859,6 +861,8 @@ pub struct HostStepResponse {
     pub forward_complete: bool,
     #[serde(default)]
     pub events_truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_interventions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,6 +1131,7 @@ mod tests {
             direction: StepDirection::Forward,
             granularity: None,
             max_events: None,
+            interventions: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -1151,6 +1156,7 @@ mod tests {
             events: vec![],
             forward_complete: false,
             events_truncated: false,
+            fired_interventions: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostStepResponse = serde_json::from_str(&json).unwrap();
@@ -1264,6 +1270,7 @@ mod tests {
             direction: StepDirection::Forward,
             granularity: Some(TickGranularity::Layer),
             max_events: None,
+            interventions: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();

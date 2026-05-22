@@ -463,21 +463,21 @@ fn stash_tensor_output(
 ) -> anyhow::Result<()> {
     if tuple.len() > 2 {
         let output = tuple.get_item(2)?;
-        if !output.is_none() {
-            if let Some(lo) = last_outputs {
-                let dict = lo
-                    .bind(py)
-                    .downcast::<PyDict>()
-                    .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
-                let key = PyTuple::new(
-                    py,
-                    [
-                        path.into_pyobject(py)?.into_any(),
-                        call_index.into_pyobject(py)?.into_any(),
-                    ],
-                )?;
-                dict.set_item(key, output)?;
-            }
+        if !output.is_none()
+            && let Some(lo) = last_outputs
+        {
+            let dict = lo
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
+            let key = PyTuple::new(
+                py,
+                [
+                    path.into_pyobject(py)?.into_any(),
+                    call_index.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+            dict.set_item(key, output)?;
         }
     }
     Ok(())
@@ -629,6 +629,7 @@ fn run_step_loop(
         events: all_events,
         forward_complete,
         events_truncated: all_events_truncated,
+        fired_interventions: vec![],
     })
 }
 

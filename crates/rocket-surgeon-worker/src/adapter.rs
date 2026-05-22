@@ -697,15 +697,14 @@ mod tests {
         let decl = family_declaration("gpt2").unwrap();
         for (matcher, mapping) in decl.mappings {
             if matches!(matcher, ModuleMatcher::TypeAndName { attr_name, .. } if attr_name == "c_attn")
+                && let ModuleMapping::Fused { components } = mapping
             {
-                if let ModuleMapping::Fused { components } = mapping {
-                    assert_eq!(components.len(), 3);
-                    assert_eq!(components[0].canonical, "q_proj");
-                    assert_eq!(components[1].canonical, "k_proj");
-                    assert_eq!(components[2].canonical, "v_proj");
-                    assert!(components.iter().all(|c| c.split_dim == -1));
-                    return;
-                }
+                assert_eq!(components.len(), 3);
+                assert_eq!(components[0].canonical, "q_proj");
+                assert_eq!(components[1].canonical, "k_proj");
+                assert_eq!(components[2].canonical, "v_proj");
+                assert!(components.iter().all(|c| c.split_dim == -1));
+                return;
             }
         }
         panic!("c_attn fused mapping not found");
