@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from rocket_surgeon.host.interventions.composition import filter_recipes, sort_by_priority
 from rocket_surgeon.host.interventions.matching import target_matches
 from rocket_surgeon.host.interventions.recipes import RecipeError, parse_recipe
 
@@ -198,3 +199,71 @@ class TestRecipeParsing:
         }
         recipe = parse_recipe(raw)
         assert recipe["condition"] == "tick_id > 10"
+
+
+def _recipe(
+    recipe_id: str,
+    target: str,
+    itype: str = "scale",
+    params: dict | None = None,
+    priority: int = 0,
+    mode: str = "additive",
+    condition: str | None = None,
+) -> dict:
+    """Helper to build a normalized recipe dict for tests."""
+    return {
+        "id": recipe_id,
+        "intervention_type": itype,
+        "target": target,
+        "params": params or {},
+        "priority": priority,
+        "mode": mode,
+        "condition": condition,
+    }
+
+
+class TestComposition:
+    def test_filter_by_target(self) -> None:
+        recipes = [
+            _recipe("a", "gpt2:0:11:attn.o_proj:output", params={"factor": 2.0}),
+            _recipe("b", "gpt2:0:5:mlp.c_fc:output", params={"factor": 3.0}),
+            _recipe("c", "gpt2:*:*:attn.o_proj:output", itype="ablate", params={"mode": "zero"}),
+        ]
+        matched = filter_recipes(
+            recipes, family="gpt2", rank=0, layer=11, component="attn.o_proj", event="output"
+        )
+        assert len(matched) == 2
+        assert matched[0]["id"] == "a"
+        assert matched[1]["id"] == "c"
+
+    def test_sort_by_priority_ascending(self) -> None:
+        recipes = [
+            {"id": "hi", "priority": 10},
+            {"id": "lo", "priority": -5},
+            {"id": "mid", "priority": 0},
+        ]
+        sorted_r = sort_by_priority(recipes)
+        assert [r["id"] for r in sorted_r] == ["lo", "mid", "hi"]
+
+    def test_stable_sort_same_priority(self) -> None:
+        recipes = [
+            {"id": "first", "priority": 0},
+            {"id": "second", "priority": 0},
+            {"id": "third", "priority": 0},
+        ]
+        sorted_r = sort_by_priority(recipes)
+        assert [r["id"] for r in sorted_r] == ["first", "second", "third"]
+
+    def test_filter_skips_conditional_recipes(self) -> None:
+        recipes = [
+            _recipe(
+                "a",
+                "gpt2:0:11:attn.o_proj:output",
+                params={"factor": 2.0},
+                condition="tick_id > 10",
+            ),
+        ]
+        matched = filter_recipes(
+            recipes, family="gpt2", rank=0, layer=11, component="attn.o_proj", event="output"
+        )
+        assert len(matched) == 0
