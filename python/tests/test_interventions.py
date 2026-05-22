@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from rocket_surgeon.host.interventions.composition import filter_recipes, sort_by_priority
+from rocket_surgeon.host.interventions.engine import apply_interventions
 from rocket_surgeon.host.interventions.matching import target_matches
 from rocket_surgeon.host.interventions.recipes import RecipeError, parse_recipe
 
@@ -267,3 +269,251 @@ class TestComposition:
             recipes, family="gpt2", rank=0, layer=11, component="attn.o_proj", event="output"
         )
         assert len(matched) == 0
+
+
+class TestApplyInterventions:
+    def test_no_matching_recipes_returns_unchanged(self) -> None:
+        tensor = torch.ones(4)
+        recipes = [
+            _recipe("a", "gpt2:0:5:mlp:output", params={"factor": 0.0}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=11,
+            component="attn.o_proj",
+            event="output",
+        )
+        assert fired == []
+        assert torch.equal(result, torch.ones(4))
+
+    def test_ablate_zero(self) -> None:
+        tensor = torch.randn(8)
+        recipes = [
+            _recipe(
+                "z",
+                "gpt2:0:11:attn.o_proj:output",
+                itype="ablate",
+                params={"mode": "zero"},
+            ),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=11,
+            component="attn.o_proj",
+            event="output",
+        )
+        assert fired == ["z"]
+        assert torch.all(result == 0.0)
+
+    def test_ablate_mean(self) -> None:
+        tensor = torch.tensor([2.0, 4.0, 6.0])
+        recipes = [
+            _recipe("m", "*:*:*:*:*", itype="ablate", params={"mode": "mean"}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["m"]
+        assert torch.allclose(result, torch.tensor([4.0, 4.0, 4.0]))
+
+    def test_scale(self) -> None:
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        recipes = [
+            _recipe("s", "*:*:*:*:*", params={"factor": 0.5}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["s"]
+        assert torch.allclose(result, torch.tensor([0.5, 1.0, 1.5]))
+
+    def test_add_inline(self) -> None:
+        tensor = torch.tensor([1.0, 2.0, 3.0])
+        recipes = [
+            _recipe("a", "*:*:*:*:*", itype="add", params={"vector": [10.0, 20.0, 30.0]}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["a"]
+        assert torch.allclose(result, torch.tensor([11.0, 22.0, 33.0]))
+
+    def test_add_tensor_ref(self) -> None:
+        tensor = torch.tensor([1.0, 2.0])
+        store_tensor = torch.tensor([100.0, 200.0])
+        recipes = [
+            _recipe("a", "*:*:*:*:*", itype="add", params={"vector": "ref-id-1"}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+            tensor_store=lambda tid: store_tensor if tid == "ref-id-1" else None,
+        )
+        assert fired == ["a"]
+        assert torch.allclose(result, torch.tensor([101.0, 202.0]))
+
+    def test_patch(self) -> None:
+        tensor = torch.zeros(3)
+        patch_tensor = torch.tensor([7.0, 8.0, 9.0])
+        recipes = [
+            _recipe(
+                "p",
+                "*:*:*:*:*",
+                itype="patch",
+                params={"source_tensor_id": "src-1"},
+            ),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+            tensor_store=lambda tid: patch_tensor if tid == "src-1" else None,
+        )
+        assert fired == ["p"]
+        assert torch.allclose(result, torch.tensor([7.0, 8.0, 9.0]))
+
+    def test_clamp(self) -> None:
+        tensor = torch.tensor([-5.0, 0.0, 5.0, 10.0])
+        recipes = [
+            _recipe(
+                "c",
+                "*:*:*:*:*",
+                itype="clamp",
+                params={"min": -1.0, "max": 1.0},
+            ),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["c"]
+        assert torch.allclose(result, torch.tensor([-1.0, 0.0, 1.0, 1.0]))
+
+    def test_priority_ordering(self) -> None:
+        tensor = torch.tensor([10.0])
+        recipes = [
+            _recipe(
+                "clamp-hi",
+                "*:*:*:*:*",
+                itype="clamp",
+                params={"min": -1.0, "max": 1.0},
+                priority=10,
+            ),
+            _recipe("scale-lo", "*:*:*:*:*", params={"factor": 0.05}, priority=0),
+        ]
+        # scale first (priority 0): 10 * 0.05 = 0.5
+        # clamp second (priority 10): clamp(0.5, -1, 1) = 0.5
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["scale-lo", "clamp-hi"]
+        assert torch.allclose(result, torch.tensor([0.5]))
+
+    def test_replace_mode_discards_prior(self) -> None:
+        tensor = torch.tensor([10.0])
+        recipes = [
+            _recipe(
+                "add-first",
+                "*:*:*:*:*",
+                itype="add",
+                params={"vector": [100.0]},
+                priority=0,
+            ),
+            _recipe(
+                "scale-replace",
+                "*:*:*:*:*",
+                params={"factor": 2.0},
+                priority=5,
+                mode="replace",
+            ),
+        ]
+        # add first: 10 + 100 = 110, but then replace resets to original (10)
+        # scale on original: 10 * 2 = 20
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["add-first", "scale-replace"]
+        assert torch.allclose(result, torch.tensor([20.0]))
+
+    def test_empty_recipe_list(self) -> None:
+        tensor = torch.tensor([1.0, 2.0])
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=[],
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == []
+        assert torch.equal(result, torch.tensor([1.0, 2.0]))
+
+    def test_ablate_resample_changes_values(self) -> None:
+        torch.manual_seed(42)
+        tensor = torch.tensor([1.0, 3.0, 5.0, 7.0])
+        original = tensor.clone()
+        recipes = [
+            _recipe("r", "*:*:*:*:*", itype="ablate", params={"mode": "resample"}),
+        ]
+        result, fired = apply_interventions(
+            tensor=tensor,
+            recipes=recipes,
+            family="gpt2",
+            rank=0,
+            layer=0,
+            component="x",
+            event="output",
+        )
+        assert fired == ["r"]
+        assert not torch.equal(result, original)
