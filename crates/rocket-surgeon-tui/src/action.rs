@@ -27,3 +27,15 @@ pub enum DaemonEvent {
     /// The daemon stopped at a tick (`tick.stopped` notification).
     TickStopped(TickPosition),
 }
+
+/// A command issued by the application toward the daemon link.
+///
+/// The mirror of [`DaemonEvent`]: where `DaemonEvent` carries daemon→app state
+/// changes, `Effect` carries app→daemon requests. `App::update` returns an
+/// `Effect`; the loop forwards it to the daemon task, which turns it into a
+/// `rocket/*` JSON-RPC request (BEAD-0015 slice 4).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// Advance the forward pass by `count` ticks — a `rocket/step` request.
+    RequestStep { count: u32 },
+}

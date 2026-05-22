@@ -7,7 +7,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use rocket_surgeon_protocol::types::Status;
 
-use crate::action::DaemonEvent;
+use crate::action::{Action, DaemonEvent, Effect};
 use crate::components::Component;
 use crate::components::command_line::CommandLine;
 use crate::components::status_bar::StatusBar;
@@ -22,6 +22,28 @@ use crate::tiling::Layout;
 pub enum Flow {
     Continue,
     Quit,
+}
+
+/// The result of [`App::update`]: whether the loop continues, and any
+/// [`Effect`] the loop must route to the daemon task.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub flow: Flow,
+    pub effect: Option<Effect>,
+}
+
+impl Outcome {
+    /// Continue the loop, dispatching no effect — the common case.
+    const CONTINUE: Self = Self {
+        flow: Flow::Continue,
+        effect: None,
+    };
+
+    /// Quit the loop.
+    const QUIT: Self = Self {
+        flow: Flow::Quit,
+        effect: None,
+    };
 }
 
 /// The running TUI application.
@@ -45,21 +67,37 @@ impl App {
         }
     }
 
-    /// Decode a raw terminal event against the live input mode and apply it.
-    /// Returns [`Flow::Quit`] when the user asked to exit.
-    pub fn handle_terminal(&mut self, event: &crossterm::event::Event) -> Flow {
-        match decode(event, self.state.mode) {
-            Some(InputEvent::Quit) => Flow::Quit,
-            Some(input) => {
-                apply_input(&mut self.state, &input);
-                Flow::Continue
+    /// Apply one [`Action`] to the application — the loop's single entry point.
+    ///
+    /// Folds terminal input, daemon events, and ticks into the model and
+    /// returns an [`Outcome`]: whether to keep running, and any [`Effect`] the
+    /// loop must route to the daemon task.
+    pub fn update(&mut self, action: &Action) -> Outcome {
+        match action {
+            Action::Terminal(event) => self.apply_terminal(event),
+            Action::Daemon(event) => {
+                self.apply_daemon(event);
+                Outcome::CONTINUE
             }
-            None => Flow::Continue,
+            Action::Tick => Outcome::CONTINUE,
+        }
+    }
+
+    /// Decode a raw terminal event against the live input mode and apply it,
+    /// carrying up any [`Effect`] an executed command produced.
+    fn apply_terminal(&mut self, event: &crossterm::event::Event) -> Outcome {
+        match decode(event, self.state.mode) {
+            Some(InputEvent::Quit) => Outcome::QUIT,
+            Some(input) => Outcome {
+                flow: Flow::Continue,
+                effect: apply_input(&mut self.state, &input),
+            },
+            None => Outcome::CONTINUE,
         }
     }
 
     /// Apply a daemon-link event to the session snapshot.
-    pub fn handle_daemon(&mut self, event: &DaemonEvent) {
+    fn apply_daemon(&mut self, event: &DaemonEvent) {
         match event {
             DaemonEvent::Connected { protocol_version } => {
                 self.state.session.status = Status::Initialized;
@@ -174,31 +212,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handle_terminal_navigation_moves_cursor() {
-        let mut app = App::new();
-        let flow = app.handle_terminal(&key(KeyCode::Char('j')));
-        assert_eq!(flow, Flow::Continue);
-        assert_eq!(app.state.cursor.layer, 1);
-    }
-
-    #[test]
-    fn handle_terminal_quit_returns_quit() {
-        let mut app = App::new();
-        assert_eq!(app.handle_terminal(&key(KeyCode::Char('q'))), Flow::Quit);
-    }
-
-    #[test]
-    fn handle_terminal_colon_enters_command_mode() {
-        let mut app = App::new();
-        app.handle_terminal(&key(KeyCode::Char(':')));
-        assert_eq!(app.state.mode, Mode::Command);
-    }
-
-    #[test]
-    fn handle_terminal_unmapped_key_is_continue() {
-        let mut app = App::new();
-        assert_eq!(app.handle_terminal(&key(KeyCode::F(9))), Flow::Continue);
+    /// Drive one terminal key through `update`.
+    fn press(app: &mut App, code: KeyCode) -> Outcome {
+        app.update(&Action::Terminal(key(code)))
     }
 
     fn sample_position() -> rocket_surgeon_protocol::types::TickPosition {
@@ -211,31 +227,84 @@ mod tests {
     }
 
     #[test]
-    fn handle_daemon_connected_sets_initialized() {
+    fn update_navigation_moves_cursor() {
         let mut app = App::new();
-        app.handle_daemon(&DaemonEvent::Connected {
+        let outcome = press(&mut app, KeyCode::Char('j'));
+        assert_eq!(outcome.flow, Flow::Continue);
+        assert_eq!(outcome.effect, None);
+        assert_eq!(app.state.cursor.layer, 1);
+    }
+
+    #[test]
+    fn update_quit_key_returns_quit() {
+        let mut app = App::new();
+        assert_eq!(press(&mut app, KeyCode::Char('q')).flow, Flow::Quit);
+    }
+
+    #[test]
+    fn update_colon_enters_command_mode() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char(':'));
+        assert_eq!(app.state.mode, Mode::Command);
+    }
+
+    #[test]
+    fn update_unmapped_key_is_continue_without_effect() {
+        let mut app = App::new();
+        assert_eq!(press(&mut app, KeyCode::F(9)), Outcome::CONTINUE);
+    }
+
+    #[test]
+    fn update_executed_step_command_emits_effect() {
+        let mut app = App::new();
+        // ":" enters command mode; typing "step" fills the buffer; Enter runs it.
+        for code in [
+            KeyCode::Char(':'),
+            KeyCode::Char('s'),
+            KeyCode::Char('t'),
+            KeyCode::Char('e'),
+            KeyCode::Char('p'),
+        ] {
+            assert_eq!(press(&mut app, code).effect, None);
+        }
+        let outcome = press(&mut app, KeyCode::Enter);
+        assert_eq!(outcome.effect, Some(Effect::RequestStep { count: 1 }));
+        assert_eq!(outcome.flow, Flow::Continue);
+    }
+
+    #[test]
+    fn update_daemon_connected_sets_initialized() {
+        let mut app = App::new();
+        let outcome = app.update(&Action::Daemon(DaemonEvent::Connected {
             protocol_version: "0.3.0".into(),
-        });
+        }));
+        assert_eq!(outcome, Outcome::CONTINUE);
         assert_eq!(app.state.session.status, Status::Initialized);
         assert_eq!(app.state.session.protocol_version, "0.3.0");
     }
 
     #[test]
-    fn handle_daemon_disconnected_resets_status() {
+    fn update_daemon_disconnected_resets_status() {
         let mut app = App::new();
-        app.handle_daemon(&DaemonEvent::Connected {
+        app.update(&Action::Daemon(DaemonEvent::Connected {
             protocol_version: "0.3.0".into(),
-        });
-        app.handle_daemon(&DaemonEvent::Disconnected);
+        }));
+        app.update(&Action::Daemon(DaemonEvent::Disconnected));
         assert_eq!(app.state.session.status, Status::Uninitialized);
     }
 
     #[test]
-    fn handle_daemon_tick_stopped_updates_position() {
+    fn update_daemon_tick_stopped_updates_position() {
         let mut app = App::new();
-        app.handle_daemon(&DaemonEvent::TickStopped(sample_position()));
+        app.update(&Action::Daemon(DaemonEvent::TickStopped(sample_position())));
         assert_eq!(app.state.session.status, Status::Stopped);
         assert_eq!(app.state.session.position.as_ref().unwrap().tick_id, 3);
+    }
+
+    #[test]
+    fn update_tick_is_continue_without_effect() {
+        let mut app = App::new();
+        assert_eq!(app.update(&Action::Tick), Outcome::CONTINUE);
     }
 
     #[test]
