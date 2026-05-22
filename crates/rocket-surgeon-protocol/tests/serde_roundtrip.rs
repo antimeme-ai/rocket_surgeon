@@ -458,6 +458,7 @@ fn response_envelope_roundtrip() {
         data: Some(StepResponse {
             ticks_executed: 1,
             stopped_at: sample_tick_position(),
+            fired_interventions: vec![],
         }),
     };
     roundtrip(&env);
@@ -1030,6 +1031,7 @@ fn step_response_roundtrip() {
     let resp = StepResponse {
         ticks_executed: 5,
         stopped_at: sample_tick_position(),
+        fired_interventions: vec![],
     };
     roundtrip(&resp);
 }

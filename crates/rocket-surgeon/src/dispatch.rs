@@ -423,8 +423,12 @@ pub fn handle_step(
         Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
-    let (position, forward_complete) = if let Some(hr) = host_response {
-        (hr.position.clone(), hr.forward_complete)
+    let (position, forward_complete, fired_interventions) = if let Some(hr) = host_response {
+        (
+            hr.position.clone(),
+            hr.forward_complete,
+            hr.fired_interventions.clone(),
+        )
     } else {
         let tick_id = session.state().tick_id.unwrap_or(0) + u64::from(req.count);
         let pos = TickPosition {
@@ -439,10 +443,10 @@ pub fn handle_step(
             token_position: None,
             clock: None,
         };
-        (pos, false)
+        (pos, false, Vec::new())
     };
 
-    match session.step(&req, &position, forward_complete) {
+    match session.step(&req, &position, forward_complete, fired_interventions) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }

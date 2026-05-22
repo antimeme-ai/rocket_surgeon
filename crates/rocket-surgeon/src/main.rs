@@ -137,6 +137,7 @@ fn try_orchestrator_step(
     model_handle: Option<u64>,
     request: &rocket_surgeon_protocol::jsonrpc::Request,
     granularity_scopes: &[GranularityScope],
+    interventions: &[rocket_surgeon_protocol::types::InterventionRecipe],
 ) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
     let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
     let step_req: rocket_surgeon_protocol::messages::StepRequest = request
@@ -164,7 +165,7 @@ fn try_orchestrator_step(
         direction: step_req.direction,
         granularity,
         max_events: None,
-        interventions: vec![],
+        interventions: interventions.to_vec(),
     };
     match orch.step(&host_req) {
         Ok(hr) => Some(hr),
@@ -708,6 +709,7 @@ fn main() {
                 model_handle,
                 &request,
                 &granularity_scopes,
+                session.interventions(),
             );
             handle_step(&mut session, &request, step_host_response.as_ref())
         } else if request.method == method::INSPECT {

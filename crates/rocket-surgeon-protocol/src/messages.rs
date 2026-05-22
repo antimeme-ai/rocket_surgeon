@@ -159,6 +159,8 @@ pub struct StepRequest {
 pub struct StepResponse {
     pub ticks_executed: u32,
     pub stopped_at: TickPosition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_interventions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
