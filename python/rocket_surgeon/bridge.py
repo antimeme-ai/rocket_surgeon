@@ -13,7 +13,7 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM
 
-from rocket_surgeon.host.interventions import apply_interventions
+from rocket_surgeon.host.interventions import apply_interventions, parse_recipe
 
 _models: dict[int, torch.nn.Module] = {}
 _next_handle: int = 1
@@ -335,11 +335,13 @@ def apply_interventions_at_point(
     """Bridge entry point: apply intervention recipes to a tensor at a probe point.
 
     Called by the Rust worker at each hook barrier during the step loop.
+    Recipes arrive as raw dicts (wire format), so we parse them first.
     Returns (modified_tensor_or_original, list_of_fired_recipe_ids).
     """
+    parsed = [parse_recipe(r) for r in recipes]
     return apply_interventions(
         tensor=tensor,
-        recipes=recipes,
+        recipes=parsed,
         family=family,
         rank=rank,
         layer=layer,
