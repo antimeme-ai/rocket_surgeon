@@ -13,6 +13,8 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM
 
+from rocket_surgeon.host.interventions import apply_interventions
+
 _models: dict[int, torch.nn.Module] = {}
 _next_handle: int = 1
 
@@ -319,3 +321,29 @@ def run_forward(
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
+
+
+def apply_interventions_at_point(
+    tensor: torch.Tensor,
+    recipes: list[dict[str, Any]],
+    family: str,
+    rank: int,
+    layer: int,
+    component: str,
+    event: str,
+) -> tuple[torch.Tensor, list[str]]:
+    """Bridge entry point: apply intervention recipes to a tensor at a probe point.
+
+    Called by the Rust worker at each hook barrier during the step loop.
+    Returns (modified_tensor_or_original, list_of_fired_recipe_ids).
+    """
+    return apply_interventions(
+        tensor=tensor,
+        recipes=recipes,
+        family=family,
+        rank=rank,
+        layer=layer,
+        component=component,
+        event=event,
+        tensor_store=None,
+    )

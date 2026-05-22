@@ -359,3 +359,34 @@ pub fn split_fused_output<'py>(
         .map_err(|e| anyhow::anyhow!("expected list, got: {e}"))?;
     Ok(list.iter().collect())
 }
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_interventions_at_point<'py>(
+    py: Python<'py>,
+    tensor: &Bound<'py, pyo3::PyAny>,
+    recipes_json: &str,
+    family: &str,
+    rank: u32,
+    layer: u32,
+    component: &str,
+    event: &str,
+) -> anyhow::Result<(Bound<'py, pyo3::PyAny>, Vec<String>)> {
+    let bridge = py.import("rocket_surgeon.bridge")?;
+    let json_mod = py.import("json")?;
+    let py_recipes = json_mod.getattr("loads")?.call1((recipes_json,))?;
+    let result = bridge
+        .getattr("apply_interventions_at_point")?
+        .call1((tensor, py_recipes, family, rank, layer, component, event))?;
+    let tuple = result.downcast::<PyTuple>().map_err(|e| {
+        anyhow::anyhow!("expected tuple from apply_interventions_at_point, got: {e}")
+    })?;
+    let modified_tensor = tuple.get_item(0)?;
+    let fired_list = tuple.get_item(1)?;
+    let fired: Vec<String> = fired_list
+        .downcast::<PyList>()
+        .map_err(|e| anyhow::anyhow!("expected list for fired_ids, got: {e}"))?
+        .iter()
+        .map(|item| item.extract::<String>())
+        .collect::<PyResult<_>>()?;
+    Ok((modified_tensor, fired))
+}
