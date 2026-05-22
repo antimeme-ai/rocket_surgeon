@@ -13,7 +13,6 @@ use std::io;
 
 use clap::Parser;
 
-use action::Action;
 use app::{App, Flow};
 use render::capability;
 use tui::Tui;
@@ -53,23 +52,27 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// The application loop: redraw, then wait for the next action. Immediate
-/// mode — every iteration redraws, so a `Tick` is enough to refresh.
+/// The application loop: redraw, take the next action, apply it, and route any
+/// resulting effect to the daemon task. Immediate mode — every iteration
+/// redraws, so a `Tick` is enough to refresh.
 async fn run(tui: &mut Tui, socket: String) -> anyhow::Result<()> {
     let mut app = App::new();
-    daemon::spawn(socket, tui.action_sender());
+    let effects = daemon::spawn(socket, tui.action_sender());
     loop {
         tui.draw(|frame| app.draw(frame))?;
-        match tui.next_action().await {
-            Some(Action::Terminal(ev)) => {
-                if app.handle_terminal(&ev) == Flow::Quit {
-                    return Ok(());
-                }
-            }
-            Some(Action::Daemon(ev)) => app.handle_daemon(&ev),
-            Some(Action::Tick) => {}
+        let Some(action) = tui.next_action().await else {
             // Every event task has stopped — nothing left to drive the loop.
-            None => return Ok(()),
+            return Ok(());
+        };
+        let outcome = app.update(&action);
+        if let Some(effect) = outcome.effect {
+            // A closed channel means the daemon task has already exited; its
+            // `Disconnected` action will arrive on a later iteration. Drop the
+            // effect rather than failing the loop.
+            let _ = effects.send(effect).await;
+        }
+        if outcome.flow == Flow::Quit {
+            return Ok(());
         }
     }
 }

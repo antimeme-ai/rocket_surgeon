@@ -40,6 +40,9 @@ Deliver as separate slices (each a candidate sub-bead):
    **— DONE 2026-05-21 (PR #29).**
 4. **Effect channel** — effect `Action`s (`RequestStep`, `RequestInspect`, …)
    from `update()` route through `daemon.rs` into `rocket/*` requests.
+   **— DONE 2026-05-22 (PR #32).** Effects are a distinct `Effect` type on a
+   dedicated app→daemon channel (not `Action` variants); slice 4 ships
+   `RequestStep`. `Component::update` deferred to slice 5 — see the design note.
 5. **Per-panel components** — remaining `ViewKind`s (`LayerStack`,
    `TensorDetail`, `ProbeWatch`, `Timeline`, `KvCache`, `Worldline`) built one
    slice each; these are feature work the architecture unblocks.

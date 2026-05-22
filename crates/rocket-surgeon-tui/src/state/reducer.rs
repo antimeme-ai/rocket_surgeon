@@ -5,21 +5,29 @@
 //! Daemon-driven state changes arrive as their own `Action` variants once the
 //! daemon link is wired (BEAD-0015 slice 2).
 
+use crate::action::Effect;
 use crate::input::events::{CommandEvent, InputEvent, ModeEvent, NavigationEvent};
 use crate::input::mode::Mode;
 use crate::state::UiState;
 
 /// Apply a decoded input event to the UI state.
 ///
-/// `InputEvent::Quit` ends the loop and is handled by the caller; `Resize`
-/// needs no state change (the next draw re-reads the terminal size). Both are
-/// no-ops here.
-pub fn apply_input(state: &mut UiState, event: &InputEvent) {
+/// Returns an [`Effect`] when the input must reach the daemon — currently only
+/// an executed `:`-command. `InputEvent::Quit` ends the loop and is handled by
+/// the caller; `Resize` needs no state change (the next draw re-reads the
+/// terminal size). Both are no-ops here.
+pub fn apply_input(state: &mut UiState, event: &InputEvent) -> Option<Effect> {
     match event {
-        InputEvent::Navigation(nav) => reduce_navigation(state, nav),
-        InputEvent::Mode(mode_event) => reduce_mode(state, *mode_event),
+        InputEvent::Navigation(nav) => {
+            reduce_navigation(state, nav);
+            None
+        }
+        InputEvent::Mode(mode_event) => {
+            reduce_mode(state, *mode_event);
+            None
+        }
         InputEvent::Command(cmd) => reduce_command(state, cmd),
-        InputEvent::Resize { .. } | InputEvent::Quit => {}
+        InputEvent::Resize { .. } | InputEvent::Quit => None,
     }
 }
 
@@ -78,18 +86,51 @@ fn reduce_mode(state: &mut UiState, event: ModeEvent) {
     }
 }
 
-fn reduce_command(state: &mut UiState, cmd: &CommandEvent) {
+fn reduce_command(state: &mut UiState, cmd: &CommandEvent) -> Option<Effect> {
     match cmd {
-        CommandEvent::Char(c) => state.command_buffer.push(*c),
+        CommandEvent::Char(c) => {
+            state.command_buffer.push(*c);
+            None
+        }
         CommandEvent::Backspace => {
             state.command_buffer.pop();
+            None
         }
         CommandEvent::Execute => {
-            state.status_line = format!("executed: {}", state.command_buffer);
+            let effect = parse_command(&state.command_buffer);
+            state.status_line = match &effect {
+                Some(Effect::RequestStep { count }) => format!("step {count}"),
+                None if state.command_buffer.is_empty() => String::new(),
+                None => format!("unknown command: {}", state.command_buffer),
+            };
             state.command_buffer.clear();
+            effect
         }
-        CommandEvent::Cancel => state.command_buffer.clear(),
-        CommandEvent::TabComplete | CommandEvent::HistoryPrev | CommandEvent::HistoryNext => {}
+        CommandEvent::Cancel => {
+            state.command_buffer.clear();
+            None
+        }
+        CommandEvent::TabComplete | CommandEvent::HistoryPrev | CommandEvent::HistoryNext => None,
+    }
+}
+
+/// Parse an executed command-buffer string into an [`Effect`].
+///
+/// Returns `None` when the buffer is empty or the verb is unrecognised. `step`
+/// (alias `s`) takes an optional tick count, defaulting to — and floored at —
+/// one; a non-numeric argument also falls back to one.
+fn parse_command(buffer: &str) -> Option<Effect> {
+    let mut parts = buffer.split_whitespace();
+    match parts.next()? {
+        "step" | "s" => {
+            let count = parts
+                .next()
+                .and_then(|arg| arg.parse::<u32>().ok())
+                .unwrap_or(1)
+                .max(1);
+            Some(Effect::RequestStep { count })
+        }
+        _ => None,
     }
 }
 
@@ -226,5 +267,79 @@ mod tests {
         state.command_buffer = "hello".into();
         apply_input(&mut state, &InputEvent::Mode(ModeEvent::ExitToNormal));
         assert!(state.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn parse_command_step_defaults_to_one() {
+        assert_eq!(
+            parse_command("step"),
+            Some(Effect::RequestStep { count: 1 })
+        );
+    }
+
+    #[test]
+    fn parse_command_step_reads_count() {
+        assert_eq!(
+            parse_command("step 5"),
+            Some(Effect::RequestStep { count: 5 })
+        );
+    }
+
+    #[test]
+    fn parse_command_step_alias() {
+        assert_eq!(parse_command("s 3"), Some(Effect::RequestStep { count: 3 }));
+    }
+
+    #[test]
+    fn parse_command_step_bad_arg_defaults_to_one() {
+        assert_eq!(
+            parse_command("step abc"),
+            Some(Effect::RequestStep { count: 1 })
+        );
+    }
+
+    #[test]
+    fn parse_command_step_zero_floored_to_one() {
+        assert_eq!(
+            parse_command("step 0"),
+            Some(Effect::RequestStep { count: 1 })
+        );
+    }
+
+    #[test]
+    fn parse_command_unknown_verb_is_none() {
+        assert_eq!(parse_command("teleport"), None);
+    }
+
+    #[test]
+    fn parse_command_empty_is_none() {
+        assert_eq!(parse_command("   "), None);
+    }
+
+    #[test]
+    fn command_execute_emits_step_effect() {
+        let mut state = initial_ui_state();
+        state.mode = Mode::Command;
+        state.command_buffer = "step 4".into();
+        let effect = apply_input(&mut state, &InputEvent::Command(CommandEvent::Execute));
+        assert_eq!(effect, Some(Effect::RequestStep { count: 4 }));
+        assert!(state.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn command_execute_unknown_emits_no_effect() {
+        let mut state = initial_ui_state();
+        state.mode = Mode::Command;
+        state.command_buffer = "bogus".into();
+        let effect = apply_input(&mut state, &InputEvent::Command(CommandEvent::Execute));
+        assert_eq!(effect, None);
+        assert!(state.status_line.contains("unknown command"));
+    }
+
+    #[test]
+    fn navigation_input_emits_no_effect() {
+        let mut state = initial_ui_state();
+        let effect = apply_input(&mut state, &InputEvent::Navigation(NavigationEvent::Down));
+        assert_eq!(effect, None);
     }
 }
