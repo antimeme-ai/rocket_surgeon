@@ -9,11 +9,13 @@
 //! Reconnection is a later refinement: on any disconnect the task emits
 //! [`DaemonEvent::Disconnected`] and ends.
 
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use rocket_surgeon_protocol::jsonrpc::{Notification, Response};
 use rocket_surgeon_protocol::types::TickPosition;
-use tokio::net::UnixStream;
+use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::action::{Action, DaemonEvent, Effect};
@@ -28,10 +30,10 @@ const PROTOCOL_VERSION: &str = "0.3.0";
 /// into `tx`, turns [`Effect`]s received on the returned channel into
 /// `rocket/*` requests, and on any disconnect emits `Disconnected` exactly
 /// once and ends.
-pub fn spawn(socket: String, tx: mpsc::Sender<Action>) -> mpsc::Sender<Effect> {
+pub fn spawn(daemon_bin: PathBuf, tx: mpsc::Sender<Action>) -> mpsc::Sender<Effect> {
     let (effect_tx, effect_rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        if let Err(e) = run(&socket, &tx, effect_rx).await {
+        if let Err(e) = run(&daemon_bin, &tx, effect_rx).await {
             tracing::warn!(error = %e, "daemon link ended");
         }
         let _ = tx.send(Action::Daemon(DaemonEvent::Disconnected)).await;
@@ -39,18 +41,42 @@ pub fn spawn(socket: String, tx: mpsc::Sender<Action>) -> mpsc::Sender<Effect> {
     effect_tx
 }
 
-/// Connect to the daemon socket, then drive the handshake + event loop.
+/// Spawn the `rocket-surgeon` daemon as a subprocess with piped stdio, then
+/// drive the handshake + event loop over its stdin/stdout. The daemon's
+/// stderr inherits the TUI's — its tracing lands wherever the user's `2>`
+/// redirect points (BEAD-0020).
 async fn run(
-    socket: &str,
+    daemon_bin: &Path,
     tx: &mpsc::Sender<Action>,
     effect_rx: mpsc::Receiver<Effect>,
 ) -> Result<(), ClientError> {
-    let stream = UnixStream::connect(socket).await?;
-    let (read, write) = stream.into_split();
+    let mut child = Command::new(daemon_bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io_other("daemon child stdin unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io_other("daemon child stdout unavailable"))?;
     let (notif_tx, _) = broadcast::channel(256);
-    let conn = Connection::spawn(read, write, notif_tx);
+    let conn = Connection::spawn(stdout, stdin, notif_tx);
     let notifications = conn.subscribe();
-    drive(conn, notifications, tx, effect_rx).await
+    let result = drive(conn, notifications, tx, effect_rx).await;
+    // Belt-and-suspenders shutdown: `kill_on_drop` covers a panic; killing
+    // here covers the normal exit path so the daemon doesn't outlive a clean
+    // TUI quit.
+    let _ = child.kill().await;
+    result
+}
+
+fn io_other(msg: &str) -> ClientError {
+    ClientError::Io(std::io::Error::other(msg))
 }
 
 /// Handshake, subscribe, then service both directions of the link: daemon
@@ -89,11 +115,28 @@ async fn drive(
     )
     .await?;
 
-    // Subscribe to the unfiltered event stream.
-    checked(
-        conn.request("rocket/subscribe", serde_json::json!({}))
-            .await?,
-    )?;
+    // Subscribe to the unfiltered event stream. The daemon rejects this
+    // pre-attach (`INVALID_STATE` — "Attach a model before calling this
+    // method"); that is informational, not link-fatal — the connection is up
+    // and notifications simply will not flow until subscribe is re-issued
+    // after a successful attach. A transport failure here ends the task; an
+    // RPC rejection does not. (Mirrors `dispatch_effect`'s error split.)
+    match conn
+        .request("rocket/subscribe", serde_json::json!({}))
+        .await
+    {
+        Ok(response) => {
+            if let Some(error) = response.error {
+                tracing::warn!(
+                    code = error.code,
+                    message = %error.message,
+                    "rocket/subscribe rejected — notifications will not flow until attach"
+                );
+            }
+        }
+        Err(e @ (ClientError::Closed | ClientError::Cancelled)) => return Err(e),
+        Err(e) => tracing::warn!(error = %e, "rocket/subscribe failed"),
+    }
 
     // `conn` is held for the task's lifetime — it is the request handle for
     // effect dispatch. Slice 2 dropped it here so a notification-stream close
