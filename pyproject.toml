@@ -110,3 +110,5 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+markers = ["slow: marks tests that require large model downloads"]
+addopts = "--ignore=python/tests/conformance"
