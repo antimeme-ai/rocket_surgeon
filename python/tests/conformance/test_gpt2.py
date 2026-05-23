@@ -9,9 +9,20 @@ Requires GPT-2 model download (~500MB) on first run.
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 
 import pytest
-from conftest import build_binaries, make_request, recv_message, send_message, spawn_daemon
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from e2e_harness import (  # noqa: E402
+    build_binaries,
+    make_request,
+    recv_message,
+    send_message,
+    spawn_daemon,
+)
 
 GPT2_MODEL = "gpt2"
 GPT2_NUM_LAYERS = 12
