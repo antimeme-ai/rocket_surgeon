@@ -264,6 +264,33 @@ Feature: Surgical interventions on the forward pass
     And the error "data.current_state" is "stepping"
     And the error "data.severity" is "recoverable"
 
+  # ── Execution validation ──────────────────────────────────────────
+
+  Scenario: Step with registered intervention reports fired_interventions
+    When the client sends "rocket/intervene" with:
+      """json
+      {
+        "action": "set",
+        "recipe": {
+          "id": "iv-exec-1",
+          "type": "scale",
+          "target": "*:*:*:*:fwd",
+          "params": {"factor": 0.5},
+          "priority": 0
+        }
+      }
+      """
+    And the client sends "rocket/step" with:
+      | direction | forward   |
+      | count     | 1         |
+    Then the response data field "fired_interventions" contains "iv-exec-1"
+
+  Scenario: Step without interventions returns empty fired_interventions
+    When the client sends "rocket/step" with:
+      | direction | forward   |
+      | count     | 1         |
+    Then the response data field "fired_interventions" is an empty array
+
   # ── Extended activation patching ─────────────────────────────────
 
   Scenario: Ablate with mode zero (default)
