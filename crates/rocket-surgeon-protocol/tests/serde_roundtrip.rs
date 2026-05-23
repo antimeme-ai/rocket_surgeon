@@ -2225,3 +2225,48 @@ fn phase_unknown_type_rejected() {
     let result: Result<Phase, _> = serde_json::from_value(json);
     assert!(result.is_err());
 }
+
+#[test]
+fn export_request_roundtrip() {
+    use rocket_surgeon_protocol::messages::ExportRequest;
+    let req = ExportRequest {
+        path: "/tmp/session-abc.tar.gz".into(),
+        include_tensors: true,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn export_request_include_tensors_defaults_true() {
+    use rocket_surgeon_protocol::messages::ExportRequest;
+    let req: ExportRequest = serde_json::from_value(json!({"path": "/tmp/out.tar.gz"})).unwrap();
+    assert!(req.include_tensors);
+}
+
+#[test]
+fn export_response_roundtrip() {
+    use rocket_surgeon_protocol::messages::ExportResponse;
+    let resp = ExportResponse {
+        path: "/tmp/session-abc.tar.gz".into(),
+        size_bytes: 12_345_678,
+        artifact_count: 9,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn host_export_env_request_roundtrip() {
+    use rocket_surgeon_protocol::messages::HostExportEnvRequest;
+    roundtrip(&HostExportEnvRequest { model_handle: 42 });
+}
+
+#[test]
+fn host_export_env_response_roundtrip() {
+    use rocket_surgeon_protocol::messages::HostExportEnvResponse;
+    let resp = HostExportEnvResponse {
+        env: json!({"torch_version": "2.1.0"}),
+        model_info: json!({"family": "llama", "layers": 32}),
+        prompt: Some(json!({"tokens": [1, 2, 3]})),
+    };
+    roundtrip(&resp);
+}
