@@ -10,6 +10,7 @@ use rocket_surgeon_protocol::types::Status;
 use crate::action::{Action, DaemonEvent, Effect};
 use crate::components::Component;
 use crate::components::command_line::CommandLine;
+use crate::components::layer_stack::LayerStack;
 use crate::components::status_bar::StatusBar;
 use crate::input::events::InputEvent;
 use crate::input::terminal::decode;
@@ -50,6 +51,7 @@ impl Outcome {
 pub struct App {
     state: UiState,
     layout: Layout,
+    layer_stack: LayerStack,
     status_bar: StatusBar,
     command_line: CommandLine,
 }
@@ -62,6 +64,7 @@ impl App {
         Self {
             state,
             layout: default_layout(),
+            layer_stack: LayerStack,
             status_bar: StatusBar,
             command_line: CommandLine,
         }
@@ -128,6 +131,7 @@ impl App {
                 .find(|v| &v.id == view_id)
                 .map(|v| &v.kind);
             match kind {
+                Some(ViewKind::LayerStack) => self.layer_stack.draw(frame, *rect, &self.state),
                 Some(ViewKind::StatusBar) => self.status_bar.draw(frame, *rect, &self.state),
                 Some(ViewKind::CommandLine) => self.command_line.draw(frame, *rect, &self.state),
                 _ => Self::draw_placeholder(frame, *rect, view_id),
@@ -332,10 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn draw_renders_placeholder_for_layerstack() {
-        // ViewId(0) is a LayerStack — an unmapped kind — so it routes to the
-        // placeholder, whose bordered block is titled "View 0".
-        let app = App::new();
+    fn draw_renders_placeholder_for_unmapped_kind() {
+        // LayerStack now has a component (slice 5a); swap the main panel to
+        // an unmapped kind so the placeholder path is still exercised.
+        let mut app = App::new();
+        app.state.views[0].kind = ViewKind::TensorDetail;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
