@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod bundle;
 mod dispatch;
 mod notifications;
 mod orchestrator_handle;
