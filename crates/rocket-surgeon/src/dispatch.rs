@@ -137,8 +137,9 @@ const CANONICAL_COMPONENTS: &[&str] = &[
     "router",
     "residual_pre",
     "residual_post",
-    "ln_1",
-    "ln_2",
+    "ln1",
+    "ln2",
+    "ln_final",
     "lm_head",
 ];
 
