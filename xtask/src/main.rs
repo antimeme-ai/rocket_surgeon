@@ -32,6 +32,8 @@ enum Xtask {
     E2e,
     /// Run TCK (Technology Compatibility Kit) tests
     Tck,
+    /// Run model conformance tests
+    Conformance,
     /// Run full CI suite (all lints + all tests)
     Ci,
     /// Bootstrap the project (idempotent): venv, deps, maturin, cargo build
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
         Xtask::Mypy => mypy()?,
         Xtask::Pytest => pytest()?,
         Xtask::E2e => e2e()?,
+        Xtask::Conformance => conformance()?,
         Xtask::Tck => tck()?,
         Xtask::Ci => {
             fmt(true)?;
@@ -179,6 +182,22 @@ fn e2e() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn conformance() -> Result<()> {
+    run(
+        &venv_python()?,
+        &[
+            "-m",
+            "pytest",
+            "python/tests/conformance",
+            "-v",
+            "--no-header",
+            "-m",
+            "not nightly",
+        ],
+    )
+    .context("conformance tests failed")
 }
 
 fn tck() -> Result<()> {
