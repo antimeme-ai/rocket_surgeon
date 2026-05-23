@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod bundle;
 mod dispatch;
 mod notifications;
@@ -19,8 +18,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_inspect, handle_kv_intervene, handle_kv_read, handle_probe,
-    handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    dispatch, handle_attach, handle_export, handle_inspect, handle_kv_intervene, handle_kv_read,
+    handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -764,6 +763,8 @@ fn main() {
         } else if request.method == method::UNSUBSCRIBE {
             events_enabled = false;
             handle_unsubscribe(&session, &request)
+        } else if request.method == method::SESSION_EXPORT {
+            handle_export(&session, &request, &trace_log, &mut tensor_store)
         } else {
             dispatch(&mut session, &request)
         };

@@ -204,6 +204,19 @@ impl TensorStore {
     }
 
     #[allow(dead_code)]
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
+    pub fn raw_data(&mut self, tensor_id: &str) -> Option<&[u8]> {
+        let entry = self.entries.get_mut(tensor_id)?;
+        entry.last_access_gen = self.access_generation;
+        self.access_generation += 1;
+        entry.last_access = Instant::now();
+        Some(&entry.data)
+    }
+
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
