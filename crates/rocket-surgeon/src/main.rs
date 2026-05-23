@@ -1,3 +1,4 @@
+mod bundle;
 mod dispatch;
 mod notifications;
 mod orchestrator_handle;
@@ -17,8 +18,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_inspect, handle_kv_intervene, handle_kv_read, handle_probe,
-    handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    dispatch, handle_attach, handle_export, handle_inspect, handle_kv_intervene, handle_kv_read,
+    handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -137,6 +138,7 @@ fn try_orchestrator_step(
     model_handle: Option<u64>,
     request: &rocket_surgeon_protocol::jsonrpc::Request,
     granularity_scopes: &[GranularityScope],
+    interventions: &[rocket_surgeon_protocol::types::InterventionRecipe],
 ) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
     let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
     let step_req: rocket_surgeon_protocol::messages::StepRequest = request
@@ -164,6 +166,7 @@ fn try_orchestrator_step(
         direction: step_req.direction,
         granularity,
         max_events: None,
+        interventions: interventions.to_vec(),
     };
     match orch.step(&host_req) {
         Ok(hr) => Some(hr),
@@ -707,6 +710,7 @@ fn main() {
                 model_handle,
                 &request,
                 &granularity_scopes,
+                session.interventions(),
             );
             handle_step(&mut session, &request, step_host_response.as_ref())
         } else if request.method == method::INSPECT {
@@ -759,6 +763,8 @@ fn main() {
         } else if request.method == method::UNSUBSCRIBE {
             events_enabled = false;
             handle_unsubscribe(&session, &request)
+        } else if request.method == method::SESSION_EXPORT {
+            handle_export(&session, &request, &trace_log, &mut tensor_store)
         } else {
             dispatch(&mut session, &request)
         };

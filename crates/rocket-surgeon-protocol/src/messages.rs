@@ -34,6 +34,7 @@ pub mod method {
     pub const SWEEP: &str = "rocket/sweep";
     pub const VIEW_FOCUS: &str = "rocket/view.focus";
     pub const VIEW_DEFINE: &str = "rocket/view.define";
+    pub const SESSION_EXPORT: &str = "rocket/session.export";
 }
 
 pub mod event {
@@ -61,6 +62,7 @@ pub mod internal {
     pub const HOST_CHECKPOINT: &str = "_host/checkpoint";
     pub const HOST_KV_READ: &str = "_host/kv.read";
     pub const HOST_KV_INTERVENE: &str = "_host/kv.intervene";
+    pub const HOST_EXPORT_ENV: &str = "_host/export_env";
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,8 @@ pub struct StepRequest {
 pub struct StepResponse {
     pub ticks_executed: u32,
     pub stopped_at: TickPosition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_interventions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -839,7 +843,7 @@ pub struct HostConfigureHooksResponse {
 // _host/step (internal: daemon → orchestrator → worker)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostStepRequest {
     pub model_handle: u64,
     pub count: u32,
@@ -849,6 +853,8 @@ pub struct HostStepRequest {
     pub granularity: Option<TickGranularity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_events: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interventions: Vec<InterventionRecipe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -859,6 +865,8 @@ pub struct HostStepResponse {
     pub forward_complete: bool,
     #[serde(default)]
     pub events_truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_interventions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1039,41 @@ pub struct HostKvInterveneResponse {
     pub applied_op: String,
 }
 
+// ---------------------------------------------------------------------------
+// rocket/session.export
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportRequest {
+    pub path: String,
+    #[serde(default = "crate::types::default_true")]
+    pub include_tensors: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportResponse {
+    pub path: String,
+    pub size_bytes: u64,
+    pub artifact_count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// _host/export_env (internal: daemon → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostExportEnvRequest {
+    pub model_handle: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostExportEnvResponse {
+    pub env: serde_json::Value,
+    pub model_info: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,6 +1170,7 @@ mod tests {
             direction: StepDirection::Forward,
             granularity: None,
             max_events: None,
+            interventions: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -1151,6 +1195,7 @@ mod tests {
             events: vec![],
             forward_complete: false,
             events_truncated: false,
+            fired_interventions: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostStepResponse = serde_json::from_str(&json).unwrap();
@@ -1264,6 +1309,7 @@ mod tests {
             direction: StepDirection::Forward,
             granularity: Some(TickGranularity::Layer),
             max_events: None,
+            interventions: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();

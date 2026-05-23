@@ -463,21 +463,21 @@ fn stash_tensor_output(
 ) -> anyhow::Result<()> {
     if tuple.len() > 2 {
         let output = tuple.get_item(2)?;
-        if !output.is_none() {
-            if let Some(lo) = last_outputs {
-                let dict = lo
-                    .bind(py)
-                    .downcast::<PyDict>()
-                    .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
-                let key = PyTuple::new(
-                    py,
-                    [
-                        path.into_pyobject(py)?.into_any(),
-                        call_index.into_pyobject(py)?.into_any(),
-                    ],
-                )?;
-                dict.set_item(key, output)?;
-            }
+        if !output.is_none()
+            && let Some(lo) = last_outputs
+        {
+            let dict = lo
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|e| anyhow::anyhow!("last_outputs is not a dict: {e}"))?;
+            let key = PyTuple::new(
+                py,
+                [
+                    path.into_pyobject(py)?.into_any(),
+                    call_index.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+            dict.set_item(key, output)?;
         }
     }
     Ok(())
@@ -516,6 +516,43 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
     }
 }
 
+fn try_apply_interventions<'py>(
+    py: Python<'py>,
+    state: &WorkerState,
+    req: &HostStepRequest,
+    tuple: &pyo3::Bound<'py, PyTuple>,
+    layer: u32,
+    canonical: &str,
+) -> anyhow::Result<Option<(Bound<'py, pyo3::PyAny>, Vec<String>)>> {
+    if req.interventions.is_empty() || tuple.len() <= 2 {
+        return Ok(None);
+    }
+    let output = tuple.get_item(2)?;
+    if output.is_none() {
+        return Ok(None);
+    }
+    let family = state
+        .component_map
+        .as_ref()
+        .map_or("unknown", |m| m.model_family.as_str());
+    let recipes_json = serde_json::to_string(&req.interventions)?;
+    let (modified, fired) = crate::bridge::apply_interventions_at_point(
+        py,
+        &output,
+        &recipes_json,
+        family,
+        state.rank,
+        layer,
+        canonical,
+        "fwd",
+    )?;
+    if fired.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some((modified, fired)))
+    }
+}
+
 fn run_step_loop(
     py: Python<'_>,
     state: &mut WorkerState,
@@ -545,6 +582,7 @@ fn run_step_loop(
     let mut forward_complete = false;
     let mut all_events: Vec<ProbeFiredEvent> = Vec::new();
     let mut all_events_truncated = false;
+    let mut all_fired: Vec<String> = Vec::new();
     let max_events = req.max_events.unwrap_or(256);
 
     loop {
@@ -595,6 +633,9 @@ fn run_step_loop(
             }
         }
 
+        let intervention_result =
+            try_apply_interventions(py, state, req, tuple, layer, &canonical)?;
+
         if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
             if step_driver::is_layer_boundary(tracking_layer, layer) {
                 ticks_consumed += 1;
@@ -608,7 +649,12 @@ fn run_step_loop(
             break;
         }
 
-        resume_mb.call_method1("put", (py.None(),))?;
+        if let Some((modified_tensor, fired)) = intervention_result {
+            all_fired.extend(fired);
+            resume_mb.call_method1("put", (modified_tensor,))?;
+        } else {
+            resume_mb.call_method1("put", (py.None(),))?;
+        }
     }
 
     if forward_complete {
@@ -629,6 +675,7 @@ fn run_step_loop(
         events: all_events,
         forward_complete,
         events_truncated: all_events_truncated,
+        fired_interventions: all_fired,
     })
 }
 

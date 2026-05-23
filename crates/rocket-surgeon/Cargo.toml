@@ -29,6 +29,8 @@ half.workspace = true
 blake3.workspace = true
 rocket-surgeon-shm.workspace = true
 perfetto-writer.workspace = true
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

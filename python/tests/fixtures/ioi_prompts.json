@@ -1,0 +1,14 @@
+[
+  {
+    "text": "When Mary and John went to the store, John gave a drink to",
+    "io": "Mary",
+    "s": "John",
+    "template": "ABB"
+  },
+  {
+    "text": "When Alice and Bob went to the park, Bob gave a ball to",
+    "io": "Alice",
+    "s": "Bob",
+    "template": "ABB"
+  }
+]

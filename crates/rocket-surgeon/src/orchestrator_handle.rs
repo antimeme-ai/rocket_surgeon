@@ -272,6 +272,7 @@ mod tests {
             direction: StepDirection::Forward,
             granularity: None,
             max_events: None,
+            interventions: vec![],
         };
         let result = handle.step(&req);
         assert!(result.is_err());

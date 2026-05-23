@@ -216,9 +216,9 @@ mod tests {
 
     #[test]
     fn u64_fields_8byte_aligned() {
-        const { assert!(OFFSET_TICK_ID % 8 == 0) };
-        const { assert!(OFFSET_DATA_OFF % 8 == 0) };
-        const { assert!(OFFSET_SIZE % 8 == 0) };
+        const { assert!(OFFSET_TICK_ID.is_multiple_of(8)) };
+        const { assert!(OFFSET_DATA_OFF.is_multiple_of(8)) };
+        const { assert!(OFFSET_SIZE.is_multiple_of(8)) };
     }
 
     #[test]

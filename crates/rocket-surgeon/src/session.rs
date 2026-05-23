@@ -835,6 +835,7 @@ impl Session {
         req: &StepRequest,
         host_position: &TickPosition,
         _forward_complete: bool,
+        fired_interventions: Vec<String>,
     ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/step")?;
 
@@ -849,6 +850,7 @@ impl Session {
         let data = StepResponse {
             ticks_executed: req.count,
             stopped_at: host_position.clone(),
+            fired_interventions,
         };
         Ok(self.envelope_with_mode(req.envelope, data))
     }
@@ -1655,7 +1657,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        let result = session.step(&req, &host_position, false);
+        let result = session.step(&req, &host_position, false, vec![]);
         assert!(result.is_ok());
         let envelope = result.unwrap();
         assert_eq!(envelope["state"]["status"], "stopped");
@@ -1686,7 +1688,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        let err = session.step(&req, &pos, false).unwrap_err();
+        let err = session.step(&req, &pos, false, vec![]).unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
     }
 
@@ -1712,7 +1714,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        let err = session.step(&req, &pos, false).unwrap_err();
+        let err = session.step(&req, &pos, false, vec![]).unwrap_err();
         assert_eq!(
             err.error_data().error_code,
             ErrorCode::CapabilityNotSupported
@@ -1741,7 +1743,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        session.step(&req, &pos1, false).unwrap();
+        session.step(&req, &pos1, false, vec![]).unwrap();
         assert_eq!(session.state().tick_id, Some(1));
 
         let pos2 = TickPosition {
@@ -1756,7 +1758,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        session.step(&req, &pos2, false).unwrap();
+        session.step(&req, &pos2, false, vec![]).unwrap();
         assert_eq!(session.state().tick_id, Some(2));
     }
 
@@ -1782,7 +1784,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        session.step(&req, &pos, false).unwrap();
+        session.step(&req, &pos, false, vec![]).unwrap();
         let state = session.state();
         assert!(state.position.is_some());
         let session_pos = state.position.as_ref().unwrap();
@@ -1812,7 +1814,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        let envelope = session.step(&req, &pos, false).unwrap();
+        let envelope = session.step(&req, &pos, false, vec![]).unwrap();
         assert_eq!(envelope["state"]["session_id"].as_str().unwrap().len(), 36);
         assert!(envelope["state"]["model_id"].is_string());
         assert_eq!(envelope["state"]["status"], "stopped");
@@ -1902,7 +1904,7 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        session.step(&req, &pos, false).unwrap();
+        session.step(&req, &pos, false, vec![]).unwrap();
         let tick_before = session.state().tick_id;
         let pos_before = session.state().position.clone();
 
@@ -2124,7 +2126,7 @@ mod tests {
     fn step_full_envelope_includes_complete_session_state() {
         let mut session = stopped_session();
         let value = session
-            .step(&step_req(EnvelopeMode::Full), &step_pos(), false)
+            .step(&step_req(EnvelopeMode::Full), &step_pos(), false, vec![])
             .unwrap();
         let state = &value["state"];
         // The full envelope carries the entire SessionState.
@@ -2141,7 +2143,12 @@ mod tests {
         // No explicit envelope field -> EnvelopeMode default -> Full.
         let mut session = stopped_session();
         let value = session
-            .step(&step_req(EnvelopeMode::default()), &step_pos(), false)
+            .step(
+                &step_req(EnvelopeMode::default()),
+                &step_pos(),
+                false,
+                vec![],
+            )
             .unwrap();
         assert!(value["state"].get("active_probes").is_some());
         assert!(value["state"].get("checkpoints").is_some());
@@ -2151,7 +2158,12 @@ mod tests {
     fn step_position_envelope_has_status_and_position_only() {
         let mut session = stopped_session();
         let value = session
-            .step(&step_req(EnvelopeMode::Position), &step_pos(), false)
+            .step(
+                &step_req(EnvelopeMode::Position),
+                &step_pos(),
+                false,
+                vec![],
+            )
             .unwrap();
         let state = &value["state"];
         // Position envelope keeps status and tick position...
@@ -2171,7 +2183,7 @@ mod tests {
     fn step_none_envelope_is_data_payload_only() {
         let mut session = stopped_session();
         let value = session
-            .step(&step_req(EnvelopeMode::None), &step_pos(), false)
+            .step(&step_req(EnvelopeMode::None), &step_pos(), false, vec![])
             .unwrap();
         // No envelope wrapper at all: the StepResponse fields are top-level.
         assert!(value.get("state").is_none());

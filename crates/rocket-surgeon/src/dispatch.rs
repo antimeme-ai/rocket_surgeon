@@ -3,19 +3,21 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, CheckpointRequest, DiscoverRequest, EventType, HostAttachResponse,
-    HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
-    InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
-    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest, StepRequest,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    AttachRequest, CheckpointRequest, DiscoverRequest, EventType, ExportRequest, ExportResponse,
+    HostAttachResponse, HostKvInterveneResponse, HostKvReadResponse, HostViewResponse,
+    InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest,
+    KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest,
+    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
     ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
     DType, InterventionRecipe, Phase, StepDirection, TickEvent, TickPosition,
 };
 
+use crate::bundle::{BundleArtifact, assemble_bundle};
 use crate::session::{Session, SessionError};
 use crate::tensor_store::TensorStore;
+use crate::trace_log::TraceLog;
 
 /// Canonical, actionable recovery hint for an error code.
 ///
@@ -135,8 +137,9 @@ const CANONICAL_COMPONENTS: &[&str] = &[
     "router",
     "residual_pre",
     "residual_post",
-    "ln_1",
-    "ln_2",
+    "ln1",
+    "ln2",
+    "ln_final",
     "lm_head",
 ];
 
@@ -423,8 +426,12 @@ pub fn handle_step(
         Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
-    let (position, forward_complete) = if let Some(hr) = host_response {
-        (hr.position.clone(), hr.forward_complete)
+    let (position, forward_complete, fired_interventions) = if let Some(hr) = host_response {
+        (
+            hr.position.clone(),
+            hr.forward_complete,
+            hr.fired_interventions.clone(),
+        )
     } else {
         let tick_id = session.state().tick_id.unwrap_or(0) + u64::from(req.count);
         let pos = TickPosition {
@@ -439,10 +446,10 @@ pub fn handle_step(
             token_position: None,
             clock: None,
         };
-        (pos, false)
+        (pos, false, Vec::new())
     };
 
-    match session.step(&req, &position, forward_complete) {
+    match session.step(&req, &position, forward_complete, fired_interventions) {
         Ok(envelope) => serialize_envelope(request.id.clone(), envelope),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
@@ -1121,6 +1128,106 @@ pub fn handle_intervene(session: &mut Session, request: &Request) -> Response {
         applied,
     };
     serialize_envelope(request.id.clone(), session.envelope(resp))
+}
+
+pub fn handle_export(
+    session: &Session,
+    request: &Request,
+    trace_log: &TraceLog,
+    tensor_store: &mut TensorStore,
+) -> Response {
+    let req: ExportRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(e) => return invalid_params_response(request.id.clone(), &e),
+    };
+
+    if let Err(ref e) = session.require_stopped("rocket/session.export") {
+        return session_error_to_response(request.id.clone(), e);
+    }
+
+    let path = std::path::Path::new(&req.path);
+    let mut artifacts = Vec::new();
+
+    let manifest = serde_json::json!({
+        "protocol_version": "0.1.0",
+        "session_id": session.state().session_id,
+        "bundle_schema_version": "1.0.0",
+    });
+    let manifest_bytes = match serde_json::to_vec_pretty(&manifest) {
+        Ok(b) => b,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("manifest serialization failed: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+    artifacts.push(BundleArtifact {
+        name: "manifest.json".into(),
+        data: manifest_bytes,
+    });
+
+    let interventions_json = match serde_json::to_vec_pretty(session.interventions()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("interventions serialization failed: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
+    artifacts.push(BundleArtifact {
+        name: "interventions.json".into(),
+        data: interventions_json,
+    });
+
+    let trace_jsonl = trace_log.to_jsonl();
+    if !trace_jsonl.is_empty() {
+        artifacts.push(BundleArtifact {
+            name: "protocol-trace.jsonl".into(),
+            data: trace_jsonl.into_bytes(),
+        });
+    }
+
+    if req.include_tensors {
+        let ids: Vec<String> = tensor_store.ids().map(String::from).collect();
+        for id in ids {
+            if let Some(data) = tensor_store.raw_data(&id) {
+                artifacts.push(BundleArtifact {
+                    name: format!("tensors/{id}.bin"),
+                    data: data.to_vec(),
+                });
+            }
+        }
+    }
+
+    let artifact_count = artifacts.len() as u32;
+    match assemble_bundle(path, &artifacts) {
+        Ok(size_bytes) => {
+            let resp = ExportResponse {
+                path: req.path,
+                size_bytes,
+                artifact_count,
+            };
+            serialize_envelope(request.id.clone(), session.envelope(resp))
+        }
+        Err(e) => Response::error(
+            request.id.clone(),
+            RpcError {
+                code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                message: format!("bundle assembly failed: {e}"),
+                data: None,
+            },
+        ),
+    }
 }
 
 #[cfg(test)]
