@@ -76,8 +76,8 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
       "hidden_dim": 768,
       "num_ranks": 1,
       "component_vocabulary": [
-        {"canonical": "gpt2:0:0:attn.c_attn:output", "type_name": "Conv1D"},
-        {"canonical": "gpt2:0:0:attn.c_proj:output", "type_name": "Conv1D"}
+        {"canonical": "attn.q_proj", "event": "output", "tensor_shape": [1, 768], "category": "attention"},
+        {"canonical": "attn.o_proj", "event": "output", "tensor_shape": [1, 768], "category": "attention"}
       ]
     }
   }
@@ -115,7 +115,7 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
       "stopped_at": {
         "tick_id": 5,
         "layer": 1,
-        "component": "attn.c_attn",
+        "component": "attn.q_proj",
         "event": "output",
         "direction": "forward",
         "phase": "prefill",
@@ -135,7 +135,7 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
   "id": 4,
   "method": "rocket/inspect",
   "params": {
-    "target": "gpt2:0:0:attn.c_attn:output"
+    "target": "gpt2:0:0:attn.q_proj:output"
   }
 }
 ```
@@ -149,7 +149,7 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
     "state": {"status": "stopped"},
     "data": {
       "tensor_id": "abc123...",
-      "shape": [1, 5, 2304],
+      "shape": [1, 5, 768],
       "dtype": "float32",
       "stats": {
         "mean": 0.0012,
@@ -178,7 +178,7 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
     "recipe": {
       "id": "scale-attn-0",
       "type": "scale",
-      "target": "gpt2:0:0:attn.c_proj:fwd",
+      "target": "gpt2:0:0:attn.o_proj:fwd",
       "params": {"factor": 0.5},
       "priority": 0
     }
@@ -199,7 +199,7 @@ Copy-pasteable JSON-RPC 2.0 request/response pairs for all core verbs. Send thes
         {
           "id": "scale-attn-0",
           "type": "scale",
-          "target": "gpt2:0:0:attn.c_proj:fwd",
+          "target": "gpt2:0:0:attn.o_proj:fwd",
           "params": {"factor": 0.5},
           "priority": 0
         }
@@ -293,7 +293,7 @@ family:rank:layer:component:event
 ```
 
 Examples:
-- `gpt2:0:11:attn.c_proj:fwd` — GPT-2 layer 11 attention output projection
+- `gpt2:0:11:attn.o_proj:fwd` — GPT-2 layer 11 attention output projection
 - `llama:0:0:mlp:output` — Llama layer 0 MLP output
 - `*:*:*:*:fwd` — All components (wildcard)
-- `gpt2:0:9:attn.c_proj:fwd` — Specific layer for IOI name-mover head ablation
+- `gpt2:0:9:attn.o_proj:fwd` — Specific layer for IOI name-mover head ablation

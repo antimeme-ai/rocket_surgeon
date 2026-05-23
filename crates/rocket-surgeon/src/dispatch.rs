@@ -1152,12 +1152,37 @@ pub fn handle_export(
         "session_id": session.state().session_id,
         "bundle_schema_version": "1.0.0",
     });
+    let manifest_bytes = match serde_json::to_vec_pretty(&manifest) {
+        Ok(b) => b,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("manifest serialization failed: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
     artifacts.push(BundleArtifact {
         name: "manifest.json".into(),
-        data: serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        data: manifest_bytes,
     });
 
-    let interventions_json = serde_json::to_vec_pretty(session.interventions()).unwrap_or_default();
+    let interventions_json = match serde_json::to_vec_pretty(session.interventions()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Response::error(
+                request.id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("interventions serialization failed: {e}"),
+                    data: None,
+                },
+            );
+        }
+    };
     artifacts.push(BundleArtifact {
         name: "interventions.json".into(),
         data: interventions_json,

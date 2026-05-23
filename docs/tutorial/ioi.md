@@ -33,15 +33,15 @@ The response shows `stopped_at` position and `ticks_executed`. With no intervent
 Target the output projections of name-mover heads at layers 9 and 10:
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-9.9","type":"ablate","target":"gpt2:0:9:attn.c_proj:fwd","params":{},"priority":0}}}
+{"jsonrpc":"2.0","id":4,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-9.9","type":"ablate","target":"gpt2:0:9:attn.o_proj:fwd","params":{},"priority":0}}}
 ```
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-9.6","type":"ablate","target":"gpt2:0:9:attn.c_proj:fwd","params":{},"priority":0}}}
+{"jsonrpc":"2.0","id":5,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-9.6","type":"ablate","target":"gpt2:0:9:attn.o_proj:fwd","params":{},"priority":0}}}
 ```
 
 ```json
-{"jsonrpc":"2.0","id":6,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-10.0","type":"ablate","target":"gpt2:0:10:attn.c_proj:fwd","params":{},"priority":0}}}
+{"jsonrpc":"2.0","id":6,"method":"rocket/intervene","params":{"action":"set","recipe":{"id":"ablate-nm-10.0","type":"ablate","target":"gpt2:0:10:attn.o_proj:fwd","params":{},"priority":0}}}
 ```
 
 Verify with a list:
@@ -69,5 +69,5 @@ Repeat for each intervention ID. After clearing, subsequent steps will have no f
 ## What this validates
 
 - **Full-stack intervention flow**: daemon registers recipes, worker applies them at hook barriers, Python engine zeroes the tensors, fired IDs bubble back up through the protocol response.
-- **Target matching**: `gpt2:0:9:attn.c_proj:fwd` correctly matches the attention output projection at layer 9.
+- **Target matching**: `gpt2:0:9:attn.o_proj:fwd` correctly matches the attention output projection at layer 9.
 - **Persistence**: interventions survive across multiple `rocket/step` calls until explicitly cleared.

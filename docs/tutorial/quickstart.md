@@ -82,7 +82,7 @@ Each tick advances through one component in the model's execution order. The res
   "id": 4,
   "method": "rocket/inspect",
   "params": {
-    "target": "gpt2:0:0:attn.c_attn:output"
+    "target": "gpt2:0:0:attn.q_proj:output"
   }
 }
 ```
@@ -101,7 +101,7 @@ Returns tensor summary statistics: mean, std, min, max, shape, dtype, sparsity.
     "recipe": {
       "id": "scale-layer0-attn",
       "type": "scale",
-      "target": "gpt2:0:0:attn.c_proj:fwd",
+      "target": "gpt2:0:0:attn.o_proj:fwd",
       "params": {"factor": 0.5},
       "priority": 0
     }

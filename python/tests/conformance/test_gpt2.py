@@ -8,7 +8,6 @@ Requires GPT-2 model download (~500MB) on first run.
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -26,7 +25,15 @@ from e2e_harness import (  # noqa: E402
 
 GPT2_MODEL = "gpt2"
 GPT2_NUM_LAYERS = 12
-EXPECTED_COMPONENTS_PER_LAYER = {"attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"}
+EXPECTED_COMPONENTS = {
+    "attn.q_proj",
+    "attn.k_proj",
+    "attn.v_proj",
+    "attn.o_proj",
+    "attn.scores",
+    "mlp",
+    "residual_post",
+}
 
 
 @pytest.mark.slow
@@ -70,22 +77,25 @@ class TestGpt2Conformance:
             req_id += 1
             send_message(
                 proc,
-                make_request("rocket/discover", {"pattern": "*"}, req_id),
+                make_request("rocket/discover", {"pattern": "*:*:*:*:*"}, req_id),
             )
             resp = recv_message(proc)
             assert resp.get("error") is None, f"discover: {resp.get('error')}"
 
             matches = resp["result"]["data"]["matches"]
             canonicals = [m["canonical"] for m in matches]
+            unique_canonicals = set(canonicals)
 
-            for layer_idx in range(GPT2_NUM_LAYERS):
-                layer_components = {
-                    _extract_component(c) for c in canonicals if _is_layer(c, layer_idx)
-                }
-                for expected in EXPECTED_COMPONENTS_PER_LAYER:
-                    assert expected in layer_components, (
-                        f"layer {layer_idx} missing {expected}, got: {sorted(layer_components)}"
-                    )
+            for expected in EXPECTED_COMPONENTS:
+                assert expected in unique_canonicals, (
+                    f"missing component {expected}, got: {sorted(unique_canonicals)}"
+                )
+
+            expected_total = GPT2_NUM_LAYERS * len(EXPECTED_COMPONENTS)
+            assert len(canonicals) == expected_total, (
+                f"expected {expected_total} entries (12 layers x {len(EXPECTED_COMPONENTS)} "
+                f"components), got {len(canonicals)}"
+            )
 
             print(f"PASS: {len(canonicals)} components discovered, all 12 layers complete")
 
@@ -156,16 +166,3 @@ class TestGpt2Conformance:
         finally:
             proc.stdin.close()
             proc.wait(timeout=60)
-
-
-_CANONICAL_RE = re.compile(r"^[^:]+:\d+:(\d+):([^:]+):[^:]+$")
-
-
-def _extract_component(canonical: str) -> str:
-    m = _CANONICAL_RE.match(canonical)
-    return m.group(2) if m else ""
-
-
-def _is_layer(canonical: str, layer: int) -> bool:
-    m = _CANONICAL_RE.match(canonical)
-    return m is not None and int(m.group(1)) == layer

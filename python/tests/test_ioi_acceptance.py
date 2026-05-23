@@ -15,7 +15,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -29,8 +28,6 @@ from e2e_harness import (  # noqa: E402
     send_message,
     spawn_daemon,
 )
-
-IOI_PROMPTS = json.loads((Path(__file__).parent / "fixtures" / "ioi_prompts.json").read_text())
 
 CANDIDATE_NAME_MOVERS = [(9, 9), (9, 6), (10, 0)]
 
@@ -91,7 +88,7 @@ def run_test() -> None:  # noqa: PLR0915
                         "recipe": {
                             "id": f"ablate-nm-{layer}.{head}",
                             "type": "ablate",
-                            "target": f"gpt2:0:{layer}:attn.c_proj:fwd",
+                            "target": f"gpt2:0:{layer}:attn.o_proj:fwd",
                             "params": {},
                             "priority": 0,
                         },
@@ -139,6 +136,9 @@ def run_test() -> None:  # noqa: PLR0915
                 assert f_id in expected_ids, f"unexpected fired intervention: {f_id}"
             print("  PASS: name-mover ablations fired correctly")
         else:
+            assert len(fired) == 0, (
+                f"interventions should not fire before layer 9, but got {fired}"
+            )
             print("  PASS: haven't reached name-mover layers yet (layer < 9)")
 
         # List interventions (verify persistence across steps)
