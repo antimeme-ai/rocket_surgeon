@@ -43,9 +43,14 @@ Deliver as separate slices (each a candidate sub-bead):
    **— DONE 2026-05-22 (PR #32).** Effects are a distinct `Effect` type on a
    dedicated app→daemon channel (not `Action` variants); slice 4 ships
    `RequestStep`. `Component::update` deferred to slice 5 — see the design note.
-5. **Per-panel components** — remaining `ViewKind`s (`LayerStack`,
-   `TensorDetail`, `ProbeWatch`, `Timeline`, `KvCache`, `Worldline`) built one
-   slice each; these are feature work the architecture unblocks.
+5. **Per-panel components** — remaining `ViewKind`s built one slice each;
+   these are feature work the architecture unblocks.
+   - [x] `LayerStack` — DONE 2026-05-22 (PR #34).
+   - [ ] `TensorDetail`
+   - [ ] `ProbeWatch`
+   - [ ] `Timeline`
+   - [ ] `KvCache`
+   - [ ] `Worldline`
 
 Slices 1–4 are the architecture rework; slice 5 is the feature build-out.
 

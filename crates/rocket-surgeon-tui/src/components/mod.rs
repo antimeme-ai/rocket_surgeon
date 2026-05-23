@@ -11,6 +11,7 @@
 //! in `UiState` and is passed in by reference.
 
 pub mod command_line;
+pub mod layer_stack;
 pub mod status_bar;
 
 use ratatui::Frame;
