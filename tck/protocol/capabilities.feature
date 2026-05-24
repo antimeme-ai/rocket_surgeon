@@ -15,28 +15,28 @@ Feature: Capability negotiation at session initialization
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the response status is "initialized"
     And the response data contains a "capabilities" object
 
-  Scenario: Capabilities includes protocol_version 0.1.0
+  Scenario: Capabilities includes protocol_version 0.3.0
     When the client sends "initialize" with:
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
-    Then the capabilities field "protocol_version" is "0.1.0"
+    Then the capabilities field "protocol_version" is "0.3.0"
 
   Scenario: Capabilities lists tick_granularities including layer and component
     When the client sends "initialize" with:
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the capabilities field "tick_granularities" is an array
@@ -91,7 +91,7 @@ Feature: Capability negotiation at session initialization
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the capabilities field "supports_checkpointing" is false
@@ -101,7 +101,7 @@ Feature: Capability negotiation at session initialization
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the capabilities field "supports_moe" is false
@@ -111,27 +111,24 @@ Feature: Capability negotiation at session initialization
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the capabilities field "head_granularity" is "unavailable"
 
   # ── Capability-gated verb rejection ───────────────────────────────
 
-  Scenario: Checkpoint verb when supports_checkpointing is false returns CAPABILITY_NOT_SUPPORTED
-    Given the session is initialized with protocol_version "0.1.0"
+  Scenario: Checkpoint create succeeds in stopped state
+    Given the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
-    And the session has been stepped to tick 0 at layer 0
     When the client sends "rocket/checkpoint" with:
       """json
       {
         "action": "create"
       }
       """
-    Then the response is a JSON-RPC error
-    And the error "data.error_code" is "CAPABILITY_NOT_SUPPORTED"
-    And the error "data.severity" is "recoverable"
-    And the error "data.context.required_capability" is "supports_checkpointing"
+    Then the response status is "stopped"
+    And the response "data.checkpoint_id" is a non-empty string
 
   # ── Forward compatibility ─────────────────────────────────────────
 
@@ -140,7 +137,7 @@ Feature: Capability negotiation at session initialization
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0",
+        "protocol_version": "0.3.0",
         "client_capabilities": {
           "supports_quantum_tunneling": true,
           "max_entanglement_depth": 42

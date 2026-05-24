@@ -6,7 +6,7 @@ Feature: Event subscription and notification delivery
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 
@@ -110,7 +110,7 @@ Feature: Event subscription and notification delivery
   # Background attaches+steps, so detach first to reach Initialized state.
 
   Scenario: Subscribe without attached model returns model-not-attached error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """

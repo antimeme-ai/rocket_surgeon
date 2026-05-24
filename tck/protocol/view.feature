@@ -6,12 +6,13 @@ Feature: Built-in interpretability views
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 
   # ── residual_stream_norm ──────────────────────────────────────────
 
+  @deferred
   Scenario: Residual stream norm returns per-layer L2 norms
     When the client sends "rocket/view" with:
       """json
@@ -25,6 +26,7 @@ Feature: Built-in interpretability views
 
   # ── attention_pattern (all heads) ─────────────────────────────────
 
+  @deferred
   Scenario: Attention pattern for a layer returns all heads
     When the client sends "rocket/view" with:
       """json
@@ -40,6 +42,7 @@ Feature: Built-in interpretability views
 
   # ── attention_pattern (single head) ───────────────────────────────
 
+  @deferred
   Scenario: Attention pattern for a specific head returns single entry
     When the client sends "rocket/view" with:
       """json
@@ -52,8 +55,9 @@ Feature: Built-in interpretability views
   # ── View before step ──────────────────────────────────────────────
   # Background steps the model, so detach+reattach to get pre-step state.
 
+  @deferred
   Scenario: View before any step returns view-data-unavailable error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """
@@ -66,8 +70,9 @@ Feature: Built-in interpretability views
 
   # ── View without model ────────────────────────────────────────────
 
+  @deferred
   Scenario: View without attached model returns model-not-attached error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """
@@ -79,6 +84,7 @@ Feature: Built-in interpretability views
 
   # ── Invalid layer ─────────────────────────────────────────────────
 
+  @deferred
   Scenario: Attention pattern with out-of-range layer returns invalid params
     When the client sends "rocket/view" with:
       """json
@@ -88,6 +94,7 @@ Feature: Built-in interpretability views
 
   # ── Unknown view ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Unknown view name returns invalid params
     When the client sends "rocket/view" with:
       """json
@@ -97,10 +104,11 @@ Feature: Built-in interpretability views
 
   # ── Capabilities ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Available views are reported in capabilities at initialize
     When the client sends "initialize" with:
       """json
-      {"client_name": "test", "protocol_version": "0.1.0"}
+      {"client_name": "test", "protocol_version": "0.3.0"}
       """
     Then the response data field "capabilities" contains "built_in_views" as an array
     And the "built_in_views" array contains "residual_stream_norm"

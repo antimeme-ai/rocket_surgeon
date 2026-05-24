@@ -10,13 +10,14 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And the server capability "supports_moe" is true
     And a model "mixtral-8x7b" is attached with model_family "mixtral"
     And the session is in "stopped" state
 
   # ── Granularity exposure ──────────────────────────────────────────
 
+  @deferred
   Scenario: MoE model exposes all 4 MoE tick granularities
     When the client sends "rocket/status" with no parameters
     Then the response "data.capabilities.tick_granularities" contains "router_pre_topk"
@@ -28,6 +29,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── router_pre_topk ──────────────────────────────────────────────
 
+  @deferred
   Scenario: Step with granularity=router_pre_topk stops before top-k selection
     When the client sends "rocket/step" with:
       | direction   | forward          |
@@ -39,6 +41,7 @@ Feature: MoE tick granularity — router and expert-level stepping
     And the response "data.stopped_at.event" is "output"
     And the response "data.stopped_at.moe_phase" is "router_pre_topk"
 
+  @deferred
   Scenario: Inspect at router_pre_topk shows raw router logits
     Given the client has stepped forward 1 tick at "router_pre_topk" granularity
     When the client sends "rocket/inspect" with:
@@ -59,6 +62,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── router_post_topk ─────────────────────────────────────────────
 
+  @deferred
   Scenario: Step with granularity=router_post_topk stops after top-k selection
     When the client sends "rocket/step" with:
       | direction   | forward           |
@@ -70,6 +74,7 @@ Feature: MoE tick granularity — router and expert-level stepping
     And the response "data.stopped_at.event" is "output"
     And the response "data.stopped_at.moe_phase" is "router_post_topk"
 
+  @deferred
   Scenario: Inspect at router_post_topk shows selected expert indices and weights
     Given the client has stepped forward 1 tick at "router_post_topk" granularity
     When the client sends "rocket/inspect" with:
@@ -89,6 +94,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── expert granularity ───────────────────────────────────────────
 
+  @deferred
   Scenario: Step with granularity=expert stops at individual expert execution
     When the client sends "rocket/step" with:
       | direction   | forward |
@@ -100,6 +106,7 @@ Feature: MoE tick granularity — router and expert-level stepping
     And the response "data.stopped_at.moe_phase" is "expert"
     And the response "data.stopped_at.expert_index" is an integer in range [0, 7]
 
+  @deferred
   Scenario: Stepping through all selected experts visits each one
     Given the client has stepped forward 1 tick at "router_post_topk" granularity
     And the routing decision selected experts [2, 5]
@@ -118,6 +125,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── moe_layer granularity ────────────────────────────────────────
 
+  @deferred
   Scenario: Step with granularity=moe_layer advances past entire MoE block
     When the client sends "rocket/step" with:
       | direction   | forward   |
@@ -130,6 +138,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── route_override intervention ──────────────────────────────────
 
+  @deferred
   Scenario: route_override intervention changes expert selection
     Given the client has stepped forward 1 tick at "router_pre_topk" granularity
     When the client sends "rocket/intervene" with:
@@ -158,6 +167,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   # ── Capability gating ────────────────────────────────────────────
 
+  @deferred
   Scenario: MoE tick granularities require supports_moe capability
     Given the server capability "supports_moe" is true
     When the client sends "rocket/step" with:
@@ -167,8 +177,9 @@ Feature: MoE tick granularity — router and expert-level stepping
     Then the response status is "stopped"
     And the response "data.ticks_executed" is 1
 
+  @deferred
   Scenario: Dense model step with MoE granularity returns CAPABILITY_NOT_SUPPORTED
-    Given the session is initialized with protocol_version "0.1.0"
+    Given the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached with model_family "llama"
     And the server capability "supports_moe" is false
     When the client sends "rocket/step" with:

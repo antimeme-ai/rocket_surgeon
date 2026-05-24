@@ -45,13 +45,18 @@ Feature: Forward-pass stepping — rocket/step verb
       | layer       | 1     |
       | layer       | 2     |
 
-  Scenario: Layer granularity produces fewer ticks than component for same layer count
-    Given the client steps forward 1 tick at "layer" granularity
-    And the resulting tick_id is saved as "layer_tick"
-    When the session is reset to stopped at tick 0
-    And the client steps forward 1 tick at "component" granularity
-    And the resulting tick_id is saved as "component_tick"
-    Then "layer_tick" advanced further in layer index than "component_tick"
+  Scenario: Layer granularity covers more of the forward pass than component
+    When the client sends "rocket/step" with:
+      | direction   | forward   |
+      | count       | 1         |
+      | granularity | component |
+    And the response "data.stopped_at.layer" is saved as "comp_layer"
+    When the client sends "rocket/step" with:
+      | direction   | forward |
+      | count       | 1       |
+      | granularity | layer   |
+    And the response "data.stopped_at.layer" is saved as "layer_end"
+    Then "layer_end" > "comp_layer"
 
   # ── First step from initial position ───────────────────────────────
 
@@ -105,9 +110,9 @@ Feature: Forward-pass stepping — rocket/step verb
 
   Scenario: Position layer advances across successive steps
     When the client sends "rocket/step" with:
-      | direction   | forward |
-      | count       | 1       |
-      | granularity | layer   |
+      | direction   | forward   |
+      | count       | 1         |
+      | granularity | component |
     And the response "data.stopped_at.layer" is saved as "layer_a"
     And the client sends "rocket/step" with:
       | direction   | forward |

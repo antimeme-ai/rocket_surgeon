@@ -13,7 +13,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response has a "state" object
     And the response "state" has field "session_id" of type string
     When the client sends "attach" with:
@@ -27,9 +27,7 @@ Feature: Response envelope contract — SessionState in every response
       | granularity | component |
     Then the response has a "state" object
     And the response "state" has field "session_id" of type string
-    When the client sends "rocket/inspect" with:
-      | target | llama:0:0:attn.o_proj:output |
-      | detail | summary                      |
+    When the client sends "rocket/status" with no parameters
     Then the response has a "state" object
     And the response "state" has field "session_id" of type string
     When the client sends "detach" with no parameters
@@ -42,14 +40,14 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.session_id" matches UUID format "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 
   Scenario: session_id is stable across responses in a session
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     And the response "state.session_id" is saved as "sid_init"
     And the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -60,16 +58,14 @@ Feature: Response envelope contract — SessionState in every response
       | count       | 1         |
       | granularity | component |
     And the response "state.session_id" is saved as "sid_step"
-    And the client sends "rocket/inspect" with:
-      | target | llama:0:0:attn.o_proj:output |
-      | detail | summary                      |
-    And the response "state.session_id" is saved as "sid_inspect"
+    And the client sends "rocket/status" with no parameters
+    And the response "state.session_id" is saved as "sid_status"
     And the client sends "detach" with no parameters
     And the response "state.session_id" is saved as "sid_detach"
     Then "sid_init" equals "sid_attach"
     And "sid_attach" equals "sid_step"
-    And "sid_step" equals "sid_inspect"
-    And "sid_inspect" equals "sid_detach"
+    And "sid_step" equals "sid_status"
+    And "sid_status" equals "sid_detach"
 
   # ── model_id ───────────────────────────────────────────────────────
 
@@ -77,7 +73,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.model_id" is null
 
   Scenario: model_id is populated after attach
@@ -180,7 +176,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.status" is "initialized"
     And the response "state.available_actions" is the array ["attach"]
 

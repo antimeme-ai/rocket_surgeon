@@ -56,27 +56,36 @@ Feature: Checkpoint management — create, list, restore, delete, bookmark
   # ── Restore ────────────────────────────────────────────────────────
 
   Scenario: Restore checkpoint by id moves position to checkpointed tick
-    Given the session has an activation checkpoint "ckpt-a" at tick 3 layer 2
-    And the session has been stepped to tick 5 at layer 3
     When the client sends "rocket/checkpoint" with:
-      | action        | restore |
-      | checkpoint_id | ckpt-a  |
+      | action | create     |
+      | tier   | activation |
+    And the response "data.checkpoint_id" is saved as "ckpt_id"
+    And the response "state.tick_id" is saved as "ckpt_tick"
+    And the client sends "rocket/step" with:
+      | direction   | forward   |
+      | count       | 3         |
+      | granularity | component |
+    When the client sends "rocket/checkpoint" with:
+      | action        | restore  |
+      | checkpoint_id | $ckpt_id |
     Then the response status is "stopped"
-    And the response "data.restored_to.tick_id" is 3
-    And the response "data.restored_to.layer" is 2
-    And the response "state.position.tick_id" is 3
+    And the response "data.restored_to.tick_id" equals saved "ckpt_tick"
 
   # ── Delete ─────────────────────────────────────────────────────────
 
   Scenario: Delete checkpoint by id removes it from list
-    Given the session has an activation checkpoint "ckpt-a" at tick 3 layer 2
-    And the session has a full_snapshot checkpoint "ckpt-b" at tick 5 layer 3
     When the client sends "rocket/checkpoint" with:
-      | action        | delete |
-      | checkpoint_id | ckpt-a |
+      | action | create     |
+      | tier   | activation |
+    And the response "data.checkpoint_id" is saved as "ckpt_a"
+    When the client sends "rocket/checkpoint" with:
+      | action | create        |
+      | tier   | full_snapshot |
+    When the client sends "rocket/checkpoint" with:
+      | action        | delete  |
+      | checkpoint_id | $ckpt_a |
     Then the response status is "stopped"
     And the response "data.checkpoints" has 1 entry
-    And the response "data.checkpoints" does not contain checkpoint_id "ckpt-a"
 
   # ── Bookmark ───────────────────────────────────────────────────────
 

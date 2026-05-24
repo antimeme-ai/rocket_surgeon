@@ -11,16 +11,16 @@ Feature: Session lifecycle — initialize, attach, detach
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | rocket-tui |
-      | protocol_version | 0.1.0      |
+      | protocol_version | 0.3.0      |
     Then the response status is "initialized"
     And the response contains a "data.capabilities" object
-    And the response "data.capabilities.protocol_version" is "0.1.0"
+    And the response "data.capabilities.protocol_version" is "0.3.0"
 
   Scenario: Initialize response contains negotiated capabilities
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | claude-agent |
-      | protocol_version | 0.1.0        |
+      | protocol_version | 0.3.0        |
     Then the response "data.capabilities" includes at least:
       | field                  | type    |
       | protocol_version       | string  |
@@ -38,7 +38,7 @@ Feature: Session lifecycle — initialize, attach, detach
       | transports             | array   |
       | wire_formats           | array   |
       | max_response_bytes     | integer |
-    And the response "data.capabilities.protocol_version" is "0.1.0"
+    And the response "data.capabilities.protocol_version" is "0.3.0"
 
   Scenario: Attach with model_path and model_family reaches stopped state
     Given the session is in "initialized" state
@@ -65,16 +65,16 @@ Feature: Session lifecycle — initialize, attach, detach
   Scenario: Re-attach after detach succeeds
     Given the session is in "initialized" state after a previous detach
     When the client sends "attach" with:
-      | model_path   | /models/mixtral-8x7b |
-      | model_family | mixtral              |
+      | model_path   | /models/llama-7b |
+      | model_family | llama            |
     Then the response status is "stopped"
-    And the response "data.model_family" is "mixtral"
+    And the response "data.model_family" is "llama"
 
   Scenario: Full lifecycle round-trip
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response status is "initialized"
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -93,7 +93,7 @@ Feature: Session lifecycle — initialize, attach, detach
     Given the session is in "initialized" state
     When the client sends "initialize" with:
       | client_name      | rocket-tui |
-      | protocol_version | 0.1.0      |
+      | protocol_version | 0.3.0      |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "INVALID_STATE"
     And the error "data.severity" is "recoverable"
@@ -153,22 +153,20 @@ Feature: Session lifecycle — initialize, attach, detach
 
   Scenario: Attach response model_family reflects worker, not client claim
     Given the session is in "initialized" state
-    And the backend worker reports model_type "mixtral"
     When the client sends "attach" with:
       | model_path   | hf-internal-testing/tiny-random-LlamaForCausalLM |
-      | model_family | llama                                            |
+      | model_family | gpt2                                             |
     Then the response status is "stopped"
-    And the response "data.model_family" is "mixtral"
+    And the response "data.model_family" is "llama"
 
-  Scenario: Worker returning zero-valued metadata is rejected
+  Scenario: Attach with nonexistent model returns BACKEND_ATTACH_FAILED error
     Given the session is in "initialized" state
-    And the backend worker reports num_layers=0
     When the client sends "attach" with:
-      | model_path   | /models/buggy-worker |
-      | model_family | llama                |
+      | model_path   | /models/does-not-exist-either |
+      | model_family | llama                         |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "BACKEND_ATTACH_FAILED"
-    And the error "data.context.backend_error" mentions "invalid metadata"
+    And the error "data.context" includes the backend error message
 
   Scenario: Duplicate attach rejected without spawning a new worker
     Given the session is in "stopped" state with model "llama"

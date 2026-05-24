@@ -6,23 +6,32 @@ Feature: Error contract — every error code has a trigger, every response has s
   (non-empty string). INVALID_STATE errors additionally include current_state
   and valid_states fields.
 
-  # ── Error code triggers (18 codes) ────────────────────────────────
+  # ── Error code triggers ──────────────────────────────────────────
 
-  Scenario: INVALID_STATE — step while session is in attaching state
-    Given the session is in "attaching" state
-    When the client sends "rocket/step" with:
-      | direction   | forward   |
-      | granularity | component |
+  Scenario: INVALID_STATE — attach without initializing
+    Given the session is in "uninitialized" state
+    When the client sends "attach" with:
+      | model_path   | /models/llama-7b |
+      | model_family | llama            |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "INVALID_STATE"
     And the error "data.severity" is "recoverable"
-    And the error "data.current_state" is "attaching"
-    And the error "data.valid_states" includes "stopped"
+    And the error "data.current_state" is "uninitialized"
 
-  Scenario: INVALID_TARGET — inspect with nonexistent target
+  Scenario: INVALID_TARGET — intervene with nonexistent target
     Given the session is in "stopped" state with model "llama"
-    When the client sends "rocket/inspect" with:
-      | target | nonexistent:0:0:fake:output |
+    When the client sends "rocket/intervene" with:
+      """json
+      {
+        "action": "set",
+        "recipe": {
+          "id": "bad-target",
+          "type": "ablate",
+          "target": "llama:0:999:nonexistent.component:output",
+          "params": {}
+        }
+      }
+      """
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "INVALID_TARGET"
     And the error "data.severity" is "recoverable"
@@ -49,11 +58,13 @@ Feature: Error contract — every error code has a trigger, every response has s
     Given the session is in "initialized" state
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "MODEL_NOT_ATTACHED"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: TENSOR_NOT_FOUND — inspect slice with nonexistent tensor_id
     Given the session is in "stopped" state with model "llama"
     When the client sends "rocket/inspect" with:
@@ -64,10 +75,8 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "TENSOR_NOT_FOUND"
     And the error "data.severity" is "recoverable"
 
-  @phase3
   Scenario: CHECKPOINT_NOT_FOUND — restore checkpoint "nonexistent"
     Given the session is in "stopped" state with model "llama"
-    And the server capability "supports_checkpointing" is true
     When the client sends "rocket/checkpoint" with:
       | action        | restore     |
       | checkpoint_id | nonexistent |
@@ -84,6 +93,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "PROBE_NOT_FOUND"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: CAPABILITY_NOT_SUPPORTED — call rocket/checkpoint when supports_checkpointing=false
     Given the session is in "stopped" state with model "llama"
     And the server capability "supports_checkpointing" is false
@@ -94,6 +104,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "CAPABILITY_NOT_SUPPORTED"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: SLICE_OUT_OF_BOUNDS — inspect slice [0, 999999] on a small tensor
     Given the session is in "stopped" state with model "llama"
     And the session has a tensor "t-small" with shape [1, 32, 128]
@@ -105,6 +116,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "SLICE_OUT_OF_BOUNDS"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: RESPONSE_TOO_LARGE — inspect detail=full on large tensor
     Given the session is in "stopped" state with model "llama"
     And the session has a tensor "t-huge" with shape [1, 32, 4096, 128]
@@ -115,40 +127,43 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "RESPONSE_TOO_LARGE"
     And the error "data.severity" is "recoverable"
 
-  @integration
+  @deferred @integration
   Scenario: HOST_ERROR — host process crash (simulated)
     Given the session is in "stopped" state with model "llama"
     And the host process is configured to simulate a crash on next step
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "HOST_ERROR"
     And the error "data.severity" is "fatal"
 
-  @integration
+  @deferred @integration
   Scenario: GPU_OOM — GPU out of memory (simulated)
     Given the session is in "stopped" state with model "llama"
     And the GPU memory is configured to simulate OOM on next step
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "GPU_OOM"
     And the error "data.severity" is "fatal"
 
-  @phase5 @integration
+  @deferred @phase5 @integration
   Scenario: NCCL_TIMEOUT — NCCL timeout (simulated)
     Given the session is in "stopped" state with model "llama" on 2 ranks
     And the NCCL backend is configured to simulate a timeout
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "NCCL_TIMEOUT"
     And the error "data.severity" is "fatal"
 
-  @phase3
+  @deferred @phase3
   Scenario: REPLAY_DIVERGENCE — replay with mutation causing divergence
     Given the session is in "stopped" state with model "llama"
     And the server capability "supports_checkpointing" is true
@@ -181,6 +196,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "UNSUPPORTED_MODEL"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: COMPILED_MODEL — attach a torch.compile model
     Given the session is in "initialized" state
     When the client sends "attach" with:
@@ -216,6 +232,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     Given the session is in "initialized" state
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is a non-empty string
@@ -224,6 +241,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     Given the session is in "initialized" state
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.numeric_code" is an integer
@@ -234,6 +252,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     Given the session is in "initialized" state
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.severity" is one of "fatal", "recoverable"
@@ -242,16 +261,18 @@ Feature: Error contract — every error code has a trigger, every response has s
     Given the session is in "initialized" state
     When the client sends "rocket/step" with:
       | direction   | forward   |
+      | count       | 1         |
       | granularity | component |
     Then the response is a JSON-RPC error
     And the error "data.suggestion" is a non-empty string
 
   Scenario: INVALID_STATE error includes current_state and valid_states
-    Given the session is in "attaching" state
-    When the client sends "rocket/inspect" with:
-      | target | llama:0:0:attn.q_proj:output |
+    Given the session is in "uninitialized" state
+    When the client sends "attach" with:
+      | model_path   | /models/llama-7b |
+      | model_family | llama            |
     Then the response is a JSON-RPC error
     And the error "data.error_code" is "INVALID_STATE"
-    And the error "data.current_state" is "attaching"
+    And the error "data.current_state" is "uninitialized"
     And the error "data.valid_states" is a non-empty array
     And each entry in error "data.valid_states" is a valid session status

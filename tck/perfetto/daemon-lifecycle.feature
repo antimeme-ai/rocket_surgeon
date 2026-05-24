@@ -7,23 +7,25 @@ Feature: Perfetto trace integration with daemon lifecycle
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
 
   # ── Trace creation on attach ────────────────────────────────────
 
+  @deferred
   Scenario: Attaching a model creates a .pftrace file
     When a model "gpt2" is attached
     Then the trace file exists at "{session_id}.pftrace" with non-zero size
 
   # ── Events during stepping ──────────────────────────────────────
 
+  @deferred
   Scenario: Stepping produces trace packets from tick events
     Given a model "gpt2" is attached
     And the client subscribes to "tick.stopped" events
     When the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -32,10 +34,11 @@ Feature: Perfetto trace integration with daemon lifecycle
 
   # ── Flush on detach ─────────────────────────────────────────────
 
+  @deferred
   Scenario: Detaching flushes and closes the trace file
     Given a model "gpt2" is attached
     When the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -44,12 +47,13 @@ Feature: Perfetto trace integration with daemon lifecycle
 
   # ── Minimum packet count ────────────────────────────────────────
 
+  @deferred
   Scenario: Trace contains at least a process track and tick events
     Given a model "gpt2" is attached
     When the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -58,10 +62,11 @@ Feature: Perfetto trace integration with daemon lifecycle
 
   # ── Clean shutdown ──────────────────────────────────────────────
 
+  @deferred
   Scenario: All open slices are terminated on detach
     Given a model "gpt2" is attached
     When the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """

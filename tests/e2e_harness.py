@@ -12,9 +12,7 @@ from __future__ import annotations
 import json
 import os
 import select
-import site
 import subprocess
-import sysconfig
 import time
 from pathlib import Path
 
@@ -208,7 +206,12 @@ def build_binaries() -> None:
     )
 
     print("[build] Building worker separately (PyO3 auto-initialize)...")
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python3.11"
+    python_libdir = subprocess.check_output(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
+        text=True,
+        timeout=10,
+    ).strip()
     env = os.environ.copy()
     env["DYLD_LIBRARY_PATH"] = python_libdir
     env["LD_LIBRARY_PATH"] = python_libdir
@@ -238,15 +241,24 @@ def spawn_daemon(env_extras: dict[str, str] | None = None) -> subprocess.Popen:
     Returns the Popen handle with stdin/stdout pipes.
     *env_extras* is merged into the base environment (PYTHONPATH, lib paths).
     """
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
     env = os.environ.copy()
-    # Worker uses PyO3 auto-initialize: the embedded interpreter derives
-    # PYTHONHOME from libpython's location (the uv-managed Python), not from
-    # the venv. Extend PYTHONPATH with the venv site-packages so torch and
-    # other venv-installed packages are visible.
-    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), *site.getsitepackages()])
-    env["DYLD_LIBRARY_PATH"] = python_libdir
-    env["LD_LIBRARY_PATH"] = python_libdir
+    # Worker uses PyO3 auto-initialize linked to the uv-managed Python 3.11.
+    # Point PYTHONPATH at the .venv site-packages (also 3.11) — NOT the host
+    # interpreter's site-packages, which may be a different Python version.
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python3.11"
+    venv_site = subprocess.check_output(
+        [str(venv_python), "-c", "import site; print(site.getsitepackages()[0])"],
+        text=True,
+        timeout=10,
+    ).strip()
+    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), venv_site])
+    venv_libdir = subprocess.check_output(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
+        text=True,
+        timeout=10,
+    ).strip()
+    env["DYLD_LIBRARY_PATH"] = venv_libdir
+    env["LD_LIBRARY_PATH"] = venv_libdir
     if env_extras:
         env.update(env_extras)
 

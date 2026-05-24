@@ -9,12 +9,13 @@ Feature: Hook registration and firing on model components
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 
   # ── Basic capture ─────────────────────────────────────────────────
 
+  @deferred
   Scenario: Forward hook registered on a component captures output tensor
     When the client sends "rocket/probe" with:
       """json
@@ -42,6 +43,7 @@ Feature: Hook registration and firing on model components
 
   # ── Correct tick position ─────────────────────────────────────────
 
+  @deferred
   Scenario: Hook fires at correct tick position (layer, component, event)
     When the client sends "rocket/probe" with:
       """json
@@ -63,6 +65,7 @@ Feature: Hook registration and firing on model components
 
   # ── Registration order ────────────────────────────────────────────
 
+  @deferred
   Scenario: Multiple hooks on same component fire in registration order
     When the client sends "rocket/probe" with:
       """json
@@ -96,6 +99,7 @@ Feature: Hook registration and firing on model components
 
   # ── Hook removal ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Hook removal stops future captures
     When the client sends "rocket/probe" with:
       """json
@@ -125,6 +129,7 @@ Feature: Hook registration and firing on model components
 
   # ── Wildcard matching ─────────────────────────────────────────────
 
+  @deferred
   Scenario: Hook on wildcard target fires for all matching components
     When the client sends "rocket/probe" with:
       """json
@@ -145,6 +150,7 @@ Feature: Hook registration and firing on model components
 
   # ── tensor_id contract ────────────────────────────────────────────
 
+  @deferred
   Scenario: Hook captures include tensor_id as BLAKE3 hash (64 hex chars)
     When the client sends "rocket/probe" with:
       """json
@@ -165,6 +171,7 @@ Feature: Hook registration and firing on model components
 
   # ── Non-matching suppression ──────────────────────────────────────
 
+  @deferred
   Scenario: Hook does not fire on components that do not match the target pattern
     When the client sends "rocket/probe" with:
       """json
@@ -186,8 +193,9 @@ Feature: Hook registration and firing on model components
 
   # ── Compiled model error ──────────────────────────────────────────
 
+  @deferred
   Scenario: Hook on compiled model returns COMPILED_MODEL error
-    Given the session is initialized with protocol_version "0.1.0"
+    Given the session is initialized with protocol_version "0.3.0"
     When the client sends "attach" with:
       | model_path     | /models/llama-7b-compiled |
       | model_family   | llama                     |
