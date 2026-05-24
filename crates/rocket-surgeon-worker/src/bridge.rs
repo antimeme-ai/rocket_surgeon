@@ -107,6 +107,20 @@ pub fn get_model_config(handle: u64) -> anyhow::Result<ModelConfig> {
     })
 }
 
+pub fn collect_export_env(handle: u64) -> anyhow::Result<serde_json::Value> {
+    Python::with_gil(|py| {
+        let bridge = py.import("rocket_surgeon.bridge")?;
+        let result = bridge.getattr("collect_export_env")?.call1((handle,))?;
+        let json_str = py
+            .import("json")?
+            .getattr("dumps")?
+            .call1((result,))?
+            .extract::<String>()?;
+        let value: serde_json::Value = serde_json::from_str(&json_str)?;
+        Ok(value)
+    })
+}
+
 pub fn discover_modules(handle: u64) -> anyhow::Result<Vec<RawModule>> {
     Python::with_gil(|py| {
         let bridge = py.import("rocket_surgeon.bridge")?;
