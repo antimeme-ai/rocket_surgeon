@@ -2,6 +2,12 @@
 
 Called from Rust worker via PyO3. Wraps arena pointers as PyTorch
 tensors for zero-copy CUDA DMA.
+
+SAFETY: Arena pointers (dst_ptr/src_ptr) are raw addresses into the
+mmap'd CheckpointArena owned by the Rust worker. The arena cannot be
+dropped while these functions execute because dispatch is single-threaded:
+the same serial dispatch loop that calls into Python via PyO3 owns the
+arena reference, so the arena is alive for the duration of each call.
 """
 
 from __future__ import annotations
@@ -11,6 +17,13 @@ import struct
 from typing import Any
 
 import torch
+
+_ELEMENT_SIZES = {
+    torch.float16: 2,
+    torch.bfloat16: 2,
+    torch.float32: 4,
+    torch.float64: 8,
+}
 
 
 def capture_activation(
@@ -54,19 +67,21 @@ def restore_activation(
     nelement = 1
     for s in shape:
         nelement *= s
-    nbytes = nelement * torch.tensor([], dtype=torch_dtype).element_size()
+    nbytes = nelement * _ELEMENT_SIZES[torch_dtype]
     if nbytes > src_len:
         msg = f"restore tensor {nbytes} bytes exceeds slot capacity {src_len}"
         raise ValueError(msg)
     buf = (ctypes.c_byte * nbytes).from_address(src_ptr)
     cpu_view = torch.frombuffer(buf, dtype=torch_dtype).reshape(shape)
     target = last_outputs.get(key)
-    if target is not None:
-        if isinstance(target, tuple):
-            target = target[0]
-        target.copy_(cpu_view)
-        if target.is_cuda:
-            torch.cuda.synchronize()
+    if target is None:
+        msg = f"no activation for {key} in last_outputs — cannot restore"
+        raise KeyError(msg)
+    if isinstance(target, tuple):
+        target = target[0]
+    target.copy_(cpu_view)
+    if target.is_cuda:
+        torch.cuda.synchronize()
     del cpu_view
 
 

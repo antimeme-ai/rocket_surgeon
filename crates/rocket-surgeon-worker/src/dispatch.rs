@@ -44,6 +44,7 @@ pub struct WorkerState {
     pub container_paths: Vec<String>,
     pub model_handle: Option<u64>,
     pub rank: u32,
+    pub num_layers: u32,
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
     pub last_outputs: Option<pyo3::PyObject>,
@@ -66,6 +67,7 @@ impl WorkerState {
             container_paths: Vec::new(),
             model_handle: None,
             rank: 0,
+            num_layers: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
             last_outputs: None,
@@ -217,6 +219,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         .collect();
     state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
+    state.num_layers = info.num_layers;
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
     state.tick_state = TickState::new(req.rank);
@@ -257,7 +260,10 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         ) => 2,
         _ => 4,
     };
-    let max_seq_len: usize = 2048;
+    let max_seq_len: usize = std::env::var("RS_MAX_SEQ_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048);
     let sqrt_layers = crate::checkpoint::checkpoint_layers(info.num_layers);
     let slots_per_checkpoint = sqrt_layers.len() + 1; // +1 for RNG sentinel
     let num_checkpoint_slots = slots_per_checkpoint * 2 + 2; // 2 checkpoints + headroom
@@ -964,7 +970,12 @@ fn try_shm_publish(
 }
 
 fn layer_index_from_path(path: &str) -> Option<u32> {
-    path.split('.').find_map(|seg| seg.parse::<u32>().ok())
+    let parts: Vec<&str> = path.split('.').collect();
+    parts
+        .iter()
+        .position(|&s| s == "layers")
+        .and_then(|i| parts.get(i + 1))
+        .and_then(|s| s.parse::<u32>().ok())
 }
 
 fn build_layer_container_map(container_paths: &[String]) -> HashMap<u32, String> {
@@ -983,12 +994,35 @@ fn build_layer_container_map(container_paths: &[String]) -> HashMap<u32, String>
     map
 }
 
+fn is_safe_checkpoint_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && !id.contains('\0')
+}
+
 #[allow(clippy::too_many_lines)]
 fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
     let req: HostCheckpointRequest = match parse_params(request) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
+
+    let ckpt_id = match &req {
+        HostCheckpointRequest::Create { checkpoint_id, .. }
+        | HostCheckpointRequest::Restore { checkpoint_id, .. } => checkpoint_id.as_str(),
+    };
+    if !is_safe_checkpoint_id(ckpt_id) {
+        return Response::error(
+            request.id.clone(),
+            RpcError {
+                code: INVALID_PARAMS,
+                message: format!("invalid checkpoint_id: {ckpt_id:?}"),
+                data: None,
+            },
+        );
+    }
 
     let Some(handle) = state.model_handle else {
         return internal_error(request.id.clone(), "No model loaded".to_owned());
@@ -1022,14 +1056,7 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
 
             let layer_containers = build_layer_container_map(&state.container_paths);
 
-            let num_layers = state.component_map.as_ref().map_or(32, |m| {
-                m.components
-                    .iter()
-                    .filter_map(|c| c.layer_index)
-                    .max()
-                    .unwrap_or(0)
-                    + 1
-            });
+            let num_layers = state.num_layers;
 
             let layers = crate::checkpoint::checkpoint_layers(num_layers);
             let snap = arena.snapshot();
@@ -1067,8 +1094,11 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                         crate::checkpoint::DtypeTag::Float32 => 4,
                         crate::checkpoint::DtypeTag::Float64 => 8,
                     };
-                    let byte_len =
-                        shape.iter().copied().product::<i64>().unsigned_abs() * elem_size;
+                    anyhow::ensure!(
+                        shape.iter().all(|&d| d >= 0),
+                        "negative dimension in shape {shape:?} for layer {layer}"
+                    );
+                    let byte_len = shape.iter().copied().product::<i64>() as u64 * elem_size;
                     let header = crate::checkpoint::SlotHeader {
                         magic: crate::checkpoint::SLOT_MAGIC,
                         dtype,
@@ -1095,23 +1125,26 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
 
             match bridge::capture_rng_state() {
                 Ok(rng_bytes) => {
-                    if let Ok((rng_ptr, _)) = arena.alloc_slot(&checkpoint_id, u32::MAX) {
-                        let header = crate::checkpoint::SlotHeader {
-                            magic: crate::checkpoint::SLOT_MAGIC,
-                            dtype: crate::checkpoint::DtypeTag::Float32,
-                            ndim: 1,
-                            shape: [rng_bytes.len() as u64, 0, 0, 0, 0, 0],
-                            byte_len: rng_bytes.len() as u64,
-                        };
-                        // SAFETY: rng_ptr from alloc_slot, within arena mmap region.
-                        unsafe {
-                            arena.update_header(rng_ptr, &header);
-                            std::ptr::copy_nonoverlapping(
-                                rng_bytes.as_ptr(),
-                                rng_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE),
-                                rng_bytes.len(),
-                            );
+                    match arena.alloc_slot(&checkpoint_id, u32::MAX) {
+                        Ok((rng_ptr, _)) => {
+                            let header = crate::checkpoint::SlotHeader {
+                                magic: crate::checkpoint::SLOT_MAGIC,
+                                dtype: crate::checkpoint::DtypeTag::Float32,
+                                ndim: 1,
+                                shape: [rng_bytes.len() as u64, 0, 0, 0, 0, 0],
+                                byte_len: rng_bytes.len() as u64,
+                            };
+                            // SAFETY: rng_ptr from alloc_slot, within arena mmap region.
+                            unsafe {
+                                arena.update_header(rng_ptr, &header);
+                                std::ptr::copy_nonoverlapping(
+                                    rng_bytes.as_ptr(),
+                                    rng_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE),
+                                    rng_bytes.len(),
+                                );
+                            }
                         }
+                        Err(e) => tracing::warn!("RNG slot alloc failed, skipping: {e}"),
                     }
                 }
                 Err(e) => tracing::warn!("RNG state capture failed: {e}"),
@@ -1125,7 +1158,9 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                 && oldest != checkpoint_id
             {
                 let spill_dir = std::env::temp_dir().join("rocket-surgeon-spill");
-                std::fs::create_dir_all(&spill_dir).ok();
+                if let Err(e) = std::fs::create_dir_all(&spill_dir) {
+                    tracing::warn!("failed to create spill dir: {e}");
+                }
                 match crate::checkpoint::spill_checkpoint(arena, &oldest, &spill_dir) {
                     Ok(_) => tracing::info!(id = %oldest, "spilled auto-checkpoint"),
                     Err(e) => tracing::warn!(id = %oldest, "spill failed: {e}"),
@@ -1849,5 +1884,17 @@ mod tests {
         assert_eq!(layer_index_from_path("model.layers.5"), Some(5));
         assert_eq!(layer_index_from_path("model.layers.0.self_attn"), Some(0));
         assert_eq!(layer_index_from_path("embed_tokens"), None);
+        assert_eq!(layer_index_from_path("model.42.bias"), None);
+    }
+
+    #[test]
+    fn checkpoint_id_sanitization() {
+        assert!(is_safe_checkpoint_id("auto-tick-5"));
+        assert!(is_safe_checkpoint_id("ckpt-1"));
+        assert!(!is_safe_checkpoint_id("../../etc/passwd"));
+        assert!(!is_safe_checkpoint_id("foo/bar"));
+        assert!(!is_safe_checkpoint_id("foo\\bar"));
+        assert!(!is_safe_checkpoint_id(""));
+        assert!(!is_safe_checkpoint_id("bad\0id"));
     }
 }

@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-pub const SLOT_MAGIC: u32 = 0x434B_5054; // "CKPT"
+// "CKPT" in ASCII — stored as little-endian u32, reads as "TPKC" in hex dumps.
+pub const SLOT_MAGIC: u32 = 0x434B_5054;
 pub const SLOT_HEADER_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,9 +67,12 @@ impl SlotHeader {
         buf[56..64].copy_from_slice(&self.byte_len.to_le_bytes());
     }
 
-    pub fn read_from(buf: &[u8; SLOT_HEADER_SIZE]) -> Self {
+    pub fn read_from(buf: &[u8; SLOT_HEADER_SIZE]) -> Option<Self> {
         let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let dtype = DtypeTag::from_u8(buf[4]).unwrap_or(DtypeTag::Float32);
+        if magic != SLOT_MAGIC {
+            return None;
+        }
+        let dtype = DtypeTag::from_u8(buf[4])?;
         let ndim = buf[5];
         let mut shape = [0u64; 6];
         for (i, dim) in shape.iter_mut().enumerate() {
@@ -76,22 +80,24 @@ impl SlotHeader {
             *dim = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
         }
         let byte_len = u64::from_le_bytes(buf[56..64].try_into().unwrap());
-        Self {
+        Some(Self {
             magic,
             dtype,
             ndim,
             shape,
             byte_len,
-        }
+        })
     }
 }
 
 pub fn align_up(val: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two(), "align must be a power of two");
     (val + align - 1) & !(align - 1)
 }
 
 struct SlotDescriptor {
     offset: usize,
+    #[allow(dead_code)]
     checkpoint_id: String,
     layer_idx: u32,
 }
@@ -114,17 +120,22 @@ struct ArenaInner {
     slots: Vec<SlotDescriptor>,
     index: HashMap<(String, u32), usize>,
     checkpoint_slots: HashMap<String, Vec<usize>>,
+    checkpoint_order: Vec<String>,
 }
 
 // SAFETY: The arena is single-threaded (worker dispatch loop is serial).
 // The mmap'd region is accessed only through &self methods that use
-// RefCell for interior mutability of bookkeeping.
+// RefCell for interior mutability of bookkeeping. RefCell's borrow
+// checking is NOT atomic — if the worker is ever made multi-threaded,
+// this impl must be removed and RefCell replaced with Mutex.
 unsafe impl Send for CheckpointArena {}
 
 impl CheckpointArena {
     pub fn new(slot_size: usize, num_slots: usize) -> anyhow::Result<Self> {
         assert!(slot_size >= SLOT_HEADER_SIZE);
-        let capacity = slot_size * num_slots;
+        let capacity = slot_size
+            .checked_mul(num_slots)
+            .ok_or_else(|| anyhow::anyhow!("arena capacity overflow: {slot_size} * {num_slots}"))?;
         if capacity == 0 {
             anyhow::bail!("arena capacity must be non-zero");
         }
@@ -165,6 +176,7 @@ impl CheckpointArena {
                 slots: Vec::new(),
                 index: HashMap::new(),
                 checkpoint_slots: HashMap::new(),
+                checkpoint_order: Vec::new(),
             }),
         })
     }
@@ -181,7 +193,7 @@ impl CheckpointArena {
         self.inner.borrow().free_list.len()
     }
 
-    pub fn base_ptr(&self) -> (*mut u8, usize) {
+    pub(crate) fn base_ptr(&self) -> (*mut u8, usize) {
         (self.ptr, self.capacity)
     }
 
@@ -224,11 +236,15 @@ impl CheckpointArena {
         inner
             .index
             .insert((checkpoint_id.to_owned(), layer_idx), desc_idx);
+        let is_new = !inner.checkpoint_slots.contains_key(checkpoint_id);
         inner
             .checkpoint_slots
             .entry(checkpoint_id.to_owned())
             .or_default()
             .push(slot_idx);
+        if is_new {
+            inner.checkpoint_order.push(checkpoint_id.to_owned());
+        }
 
         Ok((slot_ptr, header))
     }
@@ -244,7 +260,7 @@ impl CheckpointArena {
         unsafe {
             std::ptr::copy_nonoverlapping(slot_ptr, hdr_buf.as_mut_ptr(), SLOT_HEADER_SIZE);
         }
-        let header = SlotHeader::read_from(&hdr_buf);
+        let header = SlotHeader::read_from(&hdr_buf)?;
         Some((slot_ptr, header))
     }
 
@@ -263,12 +279,14 @@ impl CheckpointArena {
 
     pub fn free_checkpoint(&self, checkpoint_id: &str) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(slot_indices) = inner.checkpoint_slots.remove(checkpoint_id) {
-            for &slot_idx in &slot_indices {
-                inner.free_list.push(slot_idx);
-            }
+        let Some(slot_indices) = inner.checkpoint_slots.remove(checkpoint_id) else {
+            return;
+        };
+        for &slot_idx in &slot_indices {
+            inner.free_list.push(slot_idx);
         }
         inner.index.retain(|k, _| k.0 != checkpoint_id);
+        inner.checkpoint_order.retain(|id| id != checkpoint_id);
     }
 
     pub fn snapshot(&self) -> ArenaSnapshot {
@@ -284,25 +302,32 @@ impl CheckpointArena {
 
     pub fn oldest_checkpoint(&self) -> Option<String> {
         let inner = self.inner.borrow();
-        inner.checkpoint_slots.keys().next().cloned()
+        inner.checkpoint_order.first().cloned()
     }
 
     pub fn slot_info_for_checkpoint(&self, checkpoint_id: &str) -> Vec<(u32, usize, SlotHeader)> {
         let inner = self.inner.borrow();
-        inner
-            .slots
+        let Some(slot_indices) = inner.checkpoint_slots.get(checkpoint_id) else {
+            return Vec::new();
+        };
+        slot_indices
             .iter()
-            .filter(|d| d.checkpoint_id == checkpoint_id)
-            .map(|d| {
-                // SAFETY: d.offset was computed from a valid slot index during alloc.
-                let slot_ptr = unsafe { self.ptr.add(d.offset) };
+            .filter_map(|&slot_idx| {
+                let offset = slot_idx * self.slot_size;
+                let key = inner
+                    .index
+                    .iter()
+                    .find(|(_, didx)| inner.slots[**didx].offset == offset)?;
+                let desc = &inner.slots[*key.1];
+                // SAFETY: offset was computed from a valid slot index during alloc.
+                let slot_ptr = unsafe { self.ptr.add(offset) };
                 let mut hdr_buf = [0u8; SLOT_HEADER_SIZE];
                 // SAFETY: slot_ptr is within the mmap region.
                 unsafe {
                     std::ptr::copy_nonoverlapping(slot_ptr, hdr_buf.as_mut_ptr(), SLOT_HEADER_SIZE);
                 }
-                let header = SlotHeader::read_from(&hdr_buf);
-                (d.layer_idx, d.offset, header)
+                let header = SlotHeader::read_from(&hdr_buf)?;
+                Some((desc.layer_idx, offset, header))
             })
             .collect()
     }
@@ -323,7 +348,7 @@ impl Drop for CheckpointArena {
 // NVMe spill / load
 // ---------------------------------------------------------------------------
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 const SPILL_MAGIC: &[u8; 8] = b"CKPTSPIL";
@@ -356,9 +381,9 @@ impl SpillIndexEntry {
         buf[76..80].copy_from_slice(&[0u8; 4]);
     }
 
-    fn read_from(buf: &[u8; SPILL_INDEX_ENTRY_SIZE]) -> Self {
+    fn read_from(buf: &[u8; SPILL_INDEX_ENTRY_SIZE]) -> Option<Self> {
         let layer_idx = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let dtype = DtypeTag::from_u8(buf[4]).unwrap_or(DtypeTag::Float32);
+        let dtype = DtypeTag::from_u8(buf[4])?;
         let ndim = buf[5];
         let mut shape = [0u64; 6];
         for (i, dim) in shape.iter_mut().enumerate() {
@@ -368,7 +393,7 @@ impl SpillIndexEntry {
         let data_offset = u64::from_le_bytes(buf[56..64].try_into().unwrap());
         let data_len = u64::from_le_bytes(buf[64..72].try_into().unwrap());
         let crc32 = u32::from_le_bytes(buf[72..76].try_into().unwrap());
-        Self {
+        Some(Self {
             layer_idx,
             dtype,
             ndim,
@@ -376,7 +401,7 @@ impl SpillIndexEntry {
             data_offset,
             data_len,
             crc32,
-        }
+        })
     }
 }
 
@@ -390,6 +415,11 @@ pub fn spill_checkpoint(
         anyhow::bail!("checkpoint {checkpoint_id} not found in arena");
     }
 
+    anyhow::ensure!(
+        u32::try_from(slot_infos.len()).is_ok(),
+        "too many slots to spill: {}",
+        slot_infos.len()
+    );
     let header_size = 8 + 4 + 4 + slot_infos.len() * SPILL_INDEX_ENTRY_SIZE;
     let mut data_offset = align_up(header_size, 64) as u64;
     let mut index_entries = Vec::with_capacity(slot_infos.len());
@@ -437,19 +467,20 @@ pub fn spill_checkpoint(
 
     let current_pos = 8 + 4 + 4 + index_entries.len() * SPILL_INDEX_ENTRY_SIZE;
     let padding = align_up(current_pos, 64) - current_pos;
+    let zero_pad = [0u8; 64];
     if padding > 0 {
-        file.write_all(&vec![0u8; padding])?;
+        file.write_all(&zero_pad[..padding])?;
     }
 
     for data in &slot_data {
         file.write_all(data)?;
         let pad = align_up(data.len(), 64) - data.len();
         if pad > 0 {
-            file.write_all(&vec![0u8; pad])?;
+            file.write_all(&zero_pad[..pad])?;
         }
     }
 
-    file.flush()?;
+    file.sync_all()?;
     arena.free_checkpoint(checkpoint_id);
 
     Ok(checkpoint_id.to_owned())
@@ -460,54 +491,61 @@ pub fn load_spilled_checkpoint(
     path: &Path,
     checkpoint_id: &str,
 ) -> anyhow::Result<()> {
-    let mut file = std::fs::File::open(path)?;
+    let file_bytes = std::fs::read(path)?;
 
-    let mut magic = [0u8; 8];
-    file.read_exact(&mut magic)?;
-    if &magic != SPILL_MAGIC {
-        anyhow::bail!("invalid spill file magic");
-    }
+    anyhow::ensure!(file_bytes.len() >= 16, "spill file too short");
+    anyhow::ensure!(&file_bytes[0..8] == SPILL_MAGIC, "invalid spill file magic");
 
-    let mut version_buf = [0u8; 4];
-    file.read_exact(&mut version_buf)?;
-    let version = u32::from_le_bytes(version_buf);
-    if version != SPILL_VERSION {
-        anyhow::bail!("unsupported spill version {version}");
-    }
+    let version = u32::from_le_bytes(file_bytes[8..12].try_into().unwrap());
+    anyhow::ensure!(
+        version == SPILL_VERSION,
+        "unsupported spill version {version}"
+    );
 
-    let mut count_buf = [0u8; 4];
-    file.read_exact(&mut count_buf)?;
-    let num_slots = u32::from_le_bytes(count_buf) as usize;
+    let num_slots = u32::from_le_bytes(file_bytes[12..16].try_into().unwrap()) as usize;
+    let index_end = 16 + num_slots * SPILL_INDEX_ENTRY_SIZE;
+    anyhow::ensure!(
+        file_bytes.len() >= index_end,
+        "spill file truncated in index"
+    );
 
     let mut entries = Vec::with_capacity(num_slots);
-    for _ in 0..num_slots {
-        let mut buf = [0u8; SPILL_INDEX_ENTRY_SIZE];
-        file.read_exact(&mut buf)?;
-        entries.push(SpillIndexEntry::read_from(&buf));
+    for i in 0..num_slots {
+        let off = 16 + i * SPILL_INDEX_ENTRY_SIZE;
+        let buf: &[u8; SPILL_INDEX_ENTRY_SIZE] = file_bytes[off..off + SPILL_INDEX_ENTRY_SIZE]
+            .try_into()
+            .unwrap();
+        let entry = SpillIndexEntry::read_from(buf)
+            .ok_or_else(|| anyhow::anyhow!("invalid spill index entry {i}: bad dtype tag"))?;
+        entries.push(entry);
     }
 
-    let file_bytes = std::fs::read(path)?;
+    let max_data_size = arena.slot_size() - SLOT_HEADER_SIZE;
 
     for entry in &entries {
         let start = entry.data_offset as usize;
         let end = start + entry.data_len as usize;
-        if end > file_bytes.len() {
-            anyhow::bail!(
-                "spill file truncated: need {} bytes, got {}",
-                end,
-                file_bytes.len()
-            );
-        }
+        anyhow::ensure!(
+            end <= file_bytes.len(),
+            "spill file truncated: need {} bytes, got {}",
+            end,
+            file_bytes.len()
+        );
+        anyhow::ensure!(
+            entry.data_len as usize <= max_data_size,
+            "spill data ({} bytes) exceeds slot capacity ({} bytes)",
+            entry.data_len,
+            max_data_size
+        );
         let data = &file_bytes[start..end];
         let actual_crc = crc32fast::hash(data);
-        if actual_crc != entry.crc32 {
-            anyhow::bail!(
-                "CRC32 mismatch for layer {}: expected {:#010x}, got {:#010x}",
-                entry.layer_idx,
-                entry.crc32,
-                actual_crc
-            );
-        }
+        anyhow::ensure!(
+            actual_crc == entry.crc32,
+            "CRC32 mismatch for layer {}: expected {:#010x}, got {:#010x}",
+            entry.layer_idx,
+            entry.crc32,
+            actual_crc
+        );
 
         let (slot_ptr, _) = arena.alloc_slot(checkpoint_id, entry.layer_idx)?;
         let header = SlotHeader {
@@ -518,6 +556,7 @@ pub fn load_spilled_checkpoint(
             byte_len: entry.data_len,
         };
         // SAFETY: slot_ptr was just returned by alloc_slot and is valid.
+        // data.len() <= max_data_size is checked above.
         unsafe {
             arena.update_header(slot_ptr, &header);
             std::ptr::copy_nonoverlapping(
@@ -548,7 +587,7 @@ mod tests {
         };
         let mut buf = [0u8; SLOT_HEADER_SIZE];
         header.write_to(&mut buf);
-        let parsed = SlotHeader::read_from(&buf);
+        let parsed = SlotHeader::read_from(&buf).unwrap();
         assert_eq!(parsed.magic, SLOT_MAGIC);
         assert_eq!(parsed.dtype, DtypeTag::Bfloat16);
         assert_eq!(parsed.ndim, 3);
@@ -820,5 +859,81 @@ mod tests {
                 "n={n}: layers {layers:?} should exclude layer 0"
             );
         }
+    }
+
+    #[test]
+    fn slot_header_read_from_rejects_bad_magic() {
+        let mut buf = [0u8; SLOT_HEADER_SIZE];
+        buf[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        buf[4] = DtypeTag::Float32 as u8;
+        assert!(SlotHeader::read_from(&buf).is_none());
+    }
+
+    #[test]
+    fn slot_header_read_from_rejects_bad_dtype() {
+        let mut buf = [0u8; SLOT_HEADER_SIZE];
+        buf[0..4].copy_from_slice(&SLOT_MAGIC.to_le_bytes());
+        buf[4] = 255;
+        assert!(SlotHeader::read_from(&buf).is_none());
+    }
+
+    #[test]
+    fn load_spilled_with_preexisting_checkpoint_is_additive() {
+        let dir = std::env::temp_dir().join(format!("rs-ckpt-preexist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let arena = CheckpointArena::new(128, 8).unwrap();
+
+        let (ptr, _) = arena.alloc_slot("ckpt-spill", 0).unwrap();
+        // SAFETY: ptr is a valid slot from alloc_slot, writing 64 bytes after header is within slot_size.
+        unsafe {
+            std::ptr::write_bytes(ptr.add(SLOT_HEADER_SIZE), 0xCC, 64);
+            arena.update_header(
+                ptr,
+                &SlotHeader {
+                    magic: SLOT_MAGIC,
+                    dtype: DtypeTag::Float32,
+                    ndim: 1,
+                    shape: [16, 0, 0, 0, 0, 0],
+                    byte_len: 64,
+                },
+            );
+        }
+
+        spill_checkpoint(&arena, "ckpt-spill", &dir).unwrap();
+
+        arena.alloc_slot("existing", 0).unwrap();
+        assert_eq!(arena.available(), 7);
+
+        let path = dir.join("ckpt-spill.ckpt");
+        load_spilled_checkpoint(&arena, &path, "loaded").unwrap();
+        assert_eq!(arena.available(), 6);
+
+        assert!(arena.get_slot("existing", 0).is_some());
+        assert!(arena.get_slot("loaded", 0).is_some());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn double_free_is_noop() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        arena.alloc_slot("ckpt-1", 0).unwrap();
+        assert_eq!(arena.available(), 3);
+        arena.free_checkpoint("ckpt-1");
+        assert_eq!(arena.available(), 4);
+        arena.free_checkpoint("ckpt-1");
+        assert_eq!(arena.available(), 4);
+    }
+
+    #[test]
+    fn oldest_checkpoint_respects_insertion_order() {
+        let arena = CheckpointArena::new(128, 8).unwrap();
+        arena.alloc_slot("alpha", 0).unwrap();
+        arena.alloc_slot("beta", 0).unwrap();
+        arena.alloc_slot("gamma", 0).unwrap();
+        assert_eq!(arena.oldest_checkpoint().as_deref(), Some("alpha"));
+        arena.free_checkpoint("alpha");
+        assert_eq!(arena.oldest_checkpoint().as_deref(), Some("beta"));
     }
 }
