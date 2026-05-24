@@ -29,12 +29,23 @@ def _resolve_path(obj: Any, path: str) -> Any:
     return obj
 
 
-def _datatable_to_params(datatable: Sequence[Sequence[object]]) -> dict[str, Any]:
-    """Convert a 2-column datatable into a dict, coercing numeric strings."""
+def _datatable_to_params(
+    datatable: Sequence[Sequence[object]],
+    saved_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Convert a 2-column datatable into a dict, coercing numeric strings.
+
+    Values starting with ``$`` are substituted from *saved_values*.
+    """
     params: dict[str, Any] = {}
     for row in datatable:
         key = str(row[0])
         val = str(row[1])
+        if saved_values and val.startswith("$"):
+            resolved = saved_values.get(val[1:])
+            if resolved is not None:
+                params[key] = resolved
+                continue
         if val.isdigit():
             params[key] = int(val)
         elif val.replace(".", "", 1).isdigit():
@@ -159,18 +170,44 @@ def given_server_capability(cap: str, value: str) -> None:
         r" at tick (?P<tick>\d+) layer (?P<layer>\d+)"
     )
 )
-def given_checkpoint(tier: str, cid: str, tick: str, layer: str) -> None:
-    pass
+def given_checkpoint(
+    tier: str, cid: str, tick: str, layer: str, rpc: Any, saved_values: dict
+) -> None:
+    resp = rpc.send("rocket/checkpoint", {"action": "create", "tier": tier})
+    real_id = resp.get("result", {}).get("data", {}).get("checkpoint_id", "")
+    saved_values[cid] = real_id
 
 
 @given(
     parsers.re(
         r'a defined probe "(?P<pid>[^"]+)" at point "(?P<point>[^"]+)"'
-        r' with action "(?P<action>[^"]+)".*'
+        r' with action "(?P<action>[^"]+)"(?P<extras>.*)'
     )
 )
-def given_probe_defined(pid: str, point: str, action: str) -> None:
-    pass
+def given_probe_defined(pid: str, point: str, action: str, extras: str, rpc: Any) -> None:
+    enabled = True
+    priority = 0
+    if "enabled false" in extras:
+        enabled = False
+    if "enabled true" in extras:
+        enabled = True
+    m = re.search(r"priority (\d+)", extras)
+    if m:
+        priority = int(m.group(1))
+    rpc.send(
+        "rocket/probe",
+        {
+            "action": "define",
+            "probe": {
+                "id": pid,
+                "point": point,
+                "action": action,
+                "config": {"summary": True},
+                "enabled": enabled,
+                "priority": priority,
+            },
+        },
+    )
 
 
 @given(
@@ -298,8 +335,8 @@ def given_client_sends_no_params(verb: str, rpc: Any) -> None:
 
 
 @given(parsers.re(r'the client sends "(?P<verb>[^"]+)" with:'))
-def given_client_sends_verb(verb: str, rpc: Any, datatable: Any) -> None:
-    params = _datatable_to_params(datatable)
+def given_client_sends_verb(verb: str, rpc: Any, datatable: Any, saved_values: dict) -> None:
+    params = _datatable_to_params(datatable, saved_values)
     rpc.send(verb, params)
 
 
@@ -344,12 +381,16 @@ def given_params_json(params_json: str) -> None:
 
 @when(parsers.re(r'the client sends "(?P<verb>[^"]+)" with:'))
 def when_client_sends_verb(
-    verb: str, rpc: Any, datatable: Any = None, docstring: str | None = None
+    verb: str,
+    rpc: Any,
+    saved_values: dict,
+    datatable: Any = None,
+    docstring: str | None = None,
 ) -> None:
     if docstring is not None:
         params = json.loads(docstring)
     elif datatable is not None:
-        params = _datatable_to_params(datatable)
+        params = _datatable_to_params(datatable, saved_values)
     else:
         params = {}
     if verb == "attach":
@@ -710,6 +751,14 @@ def then_values_equal(a: str, b: str, saved_values: dict) -> None:
     )
 
 
+@then(parsers.re(r'the response "(?P<path>[^"]+)" equals saved "(?P<name>[^"]+)"'))
+def then_response_equals_saved(path: str, name: str, rpc: Any, saved_values: dict) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    expected = saved_values.get(name)
+    assert actual == expected, f"'{path}'={actual} != saved '{name}'={expected}"
+
+
 @then(parsers.re(r'"(?P<a>[^"]+)" < "(?P<b>[^"]+)" < "(?P<c>[^"]+)"'))
 def then_values_ordered(a: str, b: str, c: str, saved_values: dict) -> None:
     va, vb, vc = saved_values[a], saved_values[b], saved_values[c]
@@ -769,8 +818,32 @@ def then_response_data_field(field: str, rest: str, rpc: Any) -> None:
 
 
 @then(parsers.re(r'the entry "(?P<eid>[^"]+)" has (?P<rest>.+)'))
-def then_entry_has(eid: str, rest: str) -> None:
-    pass
+def then_entry_has(eid: str, rest: str, rpc: Any) -> None:
+    data = rpc.last_response.get("result", {}).get("data", {})
+    entries = data.get("probes", []) + data.get("active_interventions", [])
+    entry = next((e for e in entries if e.get("id") == eid), None)
+    assert entry is not None, f"No entry with id '{eid}'"
+    parts = rest.strip().split(None, 1)
+    field = parts[0]
+    expected_raw = parts[1] if len(parts) > 1 else ""
+    if expected_raw.startswith("equal to "):
+        expected_raw = expected_raw[len("equal to ") :]
+    actual: Any = entry
+    for seg in field.split("."):
+        assert isinstance(actual, dict), f"'{eid}'.{field}: not a dict at '{seg}'"
+        actual = actual.get(seg)
+    msg = f"'{eid}'.{field}: expected {expected_raw}, got {actual}"
+    if expected_raw.lower() == "true":
+        assert actual is True, msg
+    elif expected_raw.lower() == "false":
+        assert actual is False, msg
+    elif expected_raw.startswith('"') and expected_raw.endswith('"'):
+        assert actual == expected_raw[1:-1], msg
+    else:
+        try:
+            assert float(actual) == float(expected_raw), msg
+        except (ValueError, TypeError):
+            assert str(actual) == expected_raw, msg
 
 
 @then(parsers.re(r'the first tensor (?:in )?"(?P<path>[^"]+)" (?P<rest>.+)'))

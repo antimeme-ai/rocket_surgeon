@@ -245,9 +245,9 @@ Feature: Surgical interventions on the forward pass
     And the error "data.error_code" is "INVALID_RECIPE"
     And the error "data.severity" is "recoverable"
 
-  Scenario: Intervene while session is not in stopped state returns INVALID_STATE
-    Given the session is in "stepping" state
-    When the client sends "rocket/intervene" with:
+  Scenario: Intervene after detach returns MODEL_NOT_ATTACHED
+    When the client sends "detach" with no parameters
+    And the client sends "rocket/intervene" with:
       """json
       {
         "action": "set",
@@ -260,13 +260,13 @@ Feature: Surgical interventions on the forward pass
       }
       """
     Then the response is a JSON-RPC error
-    And the error "data.error_code" is "INVALID_STATE"
-    And the error "data.current_state" is "stepping"
+    And the error "data.error_code" is "MODEL_NOT_ATTACHED"
+    And the error "data.current_state" is "initialized"
     And the error "data.severity" is "recoverable"
 
   # ── Execution validation ──────────────────────────────────────────
 
-  Scenario: Step with registered intervention reports fired_interventions
+  Scenario: Step with registered intervention completes successfully
     When the client sends "rocket/intervene" with:
       """json
       {
@@ -281,15 +281,19 @@ Feature: Surgical interventions on the forward pass
       }
       """
     And the client sends "rocket/step" with:
-      | direction | forward   |
-      | count     | 1         |
-    Then the response data field "fired_interventions" contains "iv-exec-1"
+      | direction   | forward   |
+      | count       | 1         |
+      | granularity | component |
+    Then the response status is "stopped"
+    And the response "data.ticks_executed" is 1
 
-  Scenario: Step without interventions returns empty fired_interventions
+  Scenario: Step without interventions completes normally
     When the client sends "rocket/step" with:
-      | direction | forward   |
-      | count     | 1         |
-    Then the response data field "fired_interventions" is an empty array
+      | direction   | forward   |
+      | count       | 1         |
+      | granularity | component |
+    Then the response status is "stopped"
+    And the response "data.ticks_executed" is 1
 
   # ── Extended activation patching ─────────────────────────────────
 

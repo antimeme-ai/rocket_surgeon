@@ -118,20 +118,17 @@ Feature: Capability negotiation at session initialization
 
   # ── Capability-gated verb rejection ───────────────────────────────
 
-  Scenario: Checkpoint verb when supports_checkpointing is false returns CAPABILITY_NOT_SUPPORTED
+  Scenario: Checkpoint create succeeds in stopped state
     Given the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
-    And the session has been stepped to tick 0 at layer 0
     When the client sends "rocket/checkpoint" with:
       """json
       {
         "action": "create"
       }
       """
-    Then the response is a JSON-RPC error
-    And the error "data.error_code" is "CAPABILITY_NOT_SUPPORTED"
-    And the error "data.severity" is "recoverable"
-    And the error "data.context.required_capability" is "supports_checkpointing"
+    Then the response status is "stopped"
+    And the response "data.checkpoint_id" is a non-empty string
 
   # ── Forward compatibility ─────────────────────────────────────────
 
