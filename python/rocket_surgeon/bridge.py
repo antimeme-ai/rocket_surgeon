@@ -7,6 +7,8 @@ no IPC — just the thinnest possible bridge to PyTorch.
 from __future__ import annotations
 
 import gc
+import platform
+import sys
 import threading
 from typing import Any
 
@@ -113,6 +115,47 @@ def model_config(handle: int) -> dict[str, Any]:
         "num_heads": getattr(config, "num_attention_heads", 0),
         "hidden_size": getattr(config, "hidden_size", 0),
         "num_kv_heads": getattr(config, "num_key_value_heads", None),
+    }
+
+
+def collect_export_env(handle: int) -> dict[str, Any]:
+    """Collect environment and model info for session bundle export."""
+    model = _models[handle]
+    config = model.config
+
+    num_params = sum(p.numel() for p in model.parameters())
+    param = next(model.parameters(), None)
+    dtype_str = str(param.dtype).replace("torch.", "") if param is not None else "unknown"
+
+    env = {
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_name": (torch.cuda.get_device_name(0) if torch.cuda.is_available() else None),
+        "nccl_version": (
+            ".".join(str(v) for v in torch.cuda.nccl.version())  # type: ignore[no-untyped-call]
+            if torch.cuda.is_available()
+            else None
+        ),
+        "python_version": sys.version.split()[0],
+        "os": platform.platform(),
+        "rocket_surgeon_version": "0.1.0",
+    }
+
+    model_info = {
+        "model_family": getattr(config, "model_type", "unknown"),
+        "model_path": getattr(config, "name_or_path", "unknown"),
+        "num_layers": getattr(config, "num_hidden_layers", 0),
+        "num_heads": getattr(config, "num_attention_heads", 0),
+        "hidden_dim": getattr(config, "hidden_size", 0),
+        "num_params": num_params,
+        "dtype": dtype_str,
+    }
+
+    return {
+        "env": env,
+        "model_info": model_info,
+        "prompt": None,
     }
 
 

@@ -12,9 +12,10 @@ use rocket_surgeon_protocol::jsonrpc::{
 use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
     CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
-    HostDetachResponse, HostInspectRequest, HostInspectResponse, HostKvInterveneRequest,
-    HostKvReadRequest, HostStepRequest, HostStepResponse, HostUpdateProbesRequest,
-    HostUpdateProbesResponse, HostViewRequest, HostViewResponse, ProbeFiredEvent,
+    HostDetachResponse, HostExportEnvRequest, HostExportEnvResponse, HostInspectRequest,
+    HostInspectResponse, HostKvInterveneRequest, HostKvReadRequest, HostStepRequest,
+    HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest,
+    HostViewResponse, ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -92,6 +93,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_VIEW => handle_host_view(state, request),
         internal::HOST_KV_READ => handle_host_kv_read(state, request),
         internal::HOST_KV_INTERVENE => handle_host_kv_intervene(state, request),
+        internal::HOST_EXPORT_ENV => handle_host_export_env(request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -1066,6 +1068,39 @@ fn handle_host_kv_intervene(state: &mut WorkerState, request: &Request) -> Respo
     match serde_json::to_value(resp) {
         Ok(value) => Response::success(request.id.clone(), value),
         Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+    }
+}
+
+fn handle_host_export_env(request: &Request) -> Response {
+    let req: HostExportEnvRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let result = bridge::collect_export_env(req.model_handle);
+    match result {
+        Ok(value) => {
+            let env = value.get("env").cloned().unwrap_or(serde_json::Value::Null);
+            let model_info = value
+                .get("model_info")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let prompt = value
+                .get("prompt")
+                .cloned()
+                .and_then(|v| if v.is_null() { None } else { Some(v) });
+
+            let resp = HostExportEnvResponse {
+                env,
+                model_info,
+                prompt,
+            };
+            Response::success(request.id.clone(), serde_json::to_value(resp).unwrap())
+        }
+        Err(e) => internal_error(
+            request.id.clone(),
+            format!("collect_export_env failed: {e}"),
+        ),
     }
 }
 

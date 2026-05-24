@@ -4,11 +4,11 @@ use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, CheckpointRequest, DiscoverRequest, EventType, ExportRequest, ExportResponse,
-    HostAttachResponse, HostKvInterveneResponse, HostKvReadResponse, HostViewResponse,
-    InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest,
-    KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest,
-    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
-    ViewDefineRequest, ViewRequest, ViewResponse, method,
+    HostAttachResponse, HostExportEnvRequest, HostKvInterveneResponse, HostKvReadResponse,
+    HostViewResponse, InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse,
+    KvInterveneRequest, KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest,
+    ProbeResponse, ReplayRequest, StepRequest, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
     DType, InterventionRecipe, Phase, StepDirection, TickEvent, TickPosition,
@@ -1130,11 +1130,76 @@ pub fn handle_intervene(session: &mut Session, request: &Request) -> Response {
     serialize_envelope(request.id.clone(), session.envelope(resp))
 }
 
+#[allow(clippy::result_large_err)]
+fn collect_env_artifacts(
+    orchestrator: &mut crate::orchestrator_handle::OrchestratorHandle,
+    model_handle: u64,
+    request_id: &RequestId,
+) -> Result<Vec<BundleArtifact>, Response> {
+    let env_resp = orchestrator
+        .export_env(&HostExportEnvRequest { model_handle })
+        .map_err(|e| {
+            Response::error(
+                request_id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("export_env call failed: {e}"),
+                    data: None,
+                },
+            )
+        })?;
+
+    let mut arts = Vec::with_capacity(3);
+
+    arts.push(BundleArtifact {
+        name: "env.json".into(),
+        data: serde_json::to_vec_pretty(&env_resp.env).map_err(|e| {
+            Response::error(
+                request_id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("env serialization failed: {e}"),
+                    data: None,
+                },
+            )
+        })?,
+    });
+
+    arts.push(BundleArtifact {
+        name: "model-info.json".into(),
+        data: serde_json::to_vec_pretty(&env_resp.model_info).map_err(|e| {
+            Response::error(
+                request_id.clone(),
+                RpcError {
+                    code: rocket_surgeon_protocol::jsonrpc::INTERNAL_ERROR,
+                    message: format!("model-info serialization failed: {e}"),
+                    data: None,
+                },
+            )
+        })?,
+    });
+
+    let prompt_data = match &env_resp.prompt {
+        Some(p) => serde_json::to_vec_pretty(p).unwrap_or_else(|_| b"null".to_vec()),
+        None => b"null".to_vec(),
+    };
+    arts.push(BundleArtifact {
+        name: "prompt.json".into(),
+        data: prompt_data,
+    });
+
+    Ok(arts)
+}
+
+#[allow(clippy::too_many_lines)]
 pub fn handle_export(
     session: &Session,
     request: &Request,
     trace_log: &TraceLog,
     tensor_store: &mut TensorStore,
+    orchestrator: &mut crate::orchestrator_handle::OrchestratorHandle,
+    model_handle: u64,
+    perfetto_path: Option<&std::path::Path>,
 ) -> Response {
     let req: ExportRequest = match parse_params(request) {
         Ok(r) => r,
@@ -1208,6 +1273,25 @@ pub fn handle_export(
             }
         }
     }
+
+    match collect_env_artifacts(orchestrator, model_handle, &request.id) {
+        Ok(env_arts) => artifacts.extend(env_arts),
+        Err(resp) => return resp,
+    }
+
+    if let Some(pf_path) = perfetto_path
+        && let Ok(data) = std::fs::read(pf_path)
+    {
+        artifacts.push(BundleArtifact {
+            name: "trace.perfetto-trace".into(),
+            data,
+        });
+    }
+
+    artifacts.push(BundleArtifact {
+        name: "bookmarks.json".into(),
+        data: b"[]".to_vec(),
+    });
 
     let artifact_count = artifacts.len() as u32;
     match assemble_bundle(path, &artifacts) {

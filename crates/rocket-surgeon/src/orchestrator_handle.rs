@@ -3,9 +3,10 @@ use std::process::{Child, Command, Stdio};
 
 use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
-    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostInspectRequest,
-    HostKvInterveneRequest, HostKvReadRequest, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, internal,
+    HostAttachRequest, HostAttachResponse, HostDetachRequest, HostExportEnvRequest,
+    HostExportEnvResponse, HostInspectRequest, HostKvInterveneRequest, HostKvReadRequest,
+    HostStepRequest, HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse,
+    HostViewRequest, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -188,6 +189,32 @@ impl OrchestratorHandle {
             .result
             .ok_or_else(|| anyhow::anyhow!("orchestrator update_probes: missing result"))?;
         let resp: HostUpdateProbesResponse = serde_json::from_value(result)?;
+        Ok(resp)
+    }
+
+    pub fn export_env(
+        &mut self,
+        req: &HostExportEnvRequest,
+    ) -> anyhow::Result<HostExportEnvResponse> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_EXPORT_ENV, params);
+
+        self.send(&request)?;
+        let response = self.recv()?;
+
+        if let Some(err) = response.error {
+            anyhow::bail!(
+                "orchestrator export_env failed (code {}): {}",
+                err.code,
+                err.message
+            );
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("orchestrator export_env: missing result"))?;
+        let resp: HostExportEnvResponse = serde_json::from_value(result)?;
         Ok(resp)
     }
 
