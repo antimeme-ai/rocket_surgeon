@@ -86,7 +86,7 @@ Feature: TickPosition phase and token_position fields
   # ── Forward compatibility ─────────────────────────────────────────
 
   Scenario: TickPosition without phase deserializes with decode default
-    Given a JSON TickPosition from protocol 0.1.0 without "phase" or "token_position"
+    Given a JSON TickPosition from protocol 0.3.0 without "phase" or "token_position"
     When the client deserializes the JSON as TickPosition
     Then the phase is "decode"
     And the token_position is null

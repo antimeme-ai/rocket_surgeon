@@ -6,7 +6,7 @@ Feature: Built-in interpretability views
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 
@@ -100,7 +100,7 @@ Feature: Built-in interpretability views
   Scenario: Available views are reported in capabilities at initialize
     When the client sends "initialize" with:
       """json
-      {"client_name": "test", "protocol_version": "0.1.0"}
+      {"client_name": "test", "protocol_version": "0.3.0"}
       """
     Then the response data field "capabilities" contains "built_in_views" as an array
     And the "built_in_views" array contains "residual_stream_norm"

@@ -10,7 +10,7 @@ Feature: MoE tick granularity — router and expert-level stepping
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And the server capability "supports_moe" is true
     And a model "mixtral-8x7b" is attached with model_family "mixtral"
     And the session is in "stopped" state
@@ -168,7 +168,7 @@ Feature: MoE tick granularity — router and expert-level stepping
     And the response "data.ticks_executed" is 1
 
   Scenario: Dense model step with MoE granularity returns CAPABILITY_NOT_SUPPORTED
-    Given the session is initialized with protocol_version "0.1.0"
+    Given the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached with model_family "llama"
     And the server capability "supports_moe" is false
     When the client sends "rocket/step" with:

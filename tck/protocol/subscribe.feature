@@ -6,7 +6,7 @@ Feature: Event subscription and notification delivery
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 

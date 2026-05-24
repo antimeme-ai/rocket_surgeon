@@ -18,7 +18,7 @@ Feature: Shared memory data plane for tensor transfer
       """json
       {
         "client_name": "tck-runner",
-        "protocol_version": "0.1.0"
+        "protocol_version": "0.3.0"
       }
       """
     Then the capabilities field "shared_memory_supported" is true

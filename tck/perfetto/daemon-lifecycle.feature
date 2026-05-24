@@ -7,7 +7,7 @@ Feature: Perfetto trace integration with daemon lifecycle
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
 
   # ── Trace creation on attach ────────────────────────────────────
 

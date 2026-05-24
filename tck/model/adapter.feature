@@ -9,7 +9,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
 
   # ── Registration ──────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ Feature: Session bundle — export and restore full session state
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 5 at layer 3
 
@@ -69,7 +69,7 @@ Feature: Session bundle — export and restore full session state
       }
       """
     Then the response status is "stopped"
-    And the bundle at "/tmp/tck-bundle-version.json" contains field "protocol_version" equal to "0.1.0"
+    And the bundle at "/tmp/tck-bundle-version.json" contains field "protocol_version" equal to "0.3.0"
 
   # ── Restore ────────────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ Feature: Session bundle — export and restore full session state
     And the error "data.error_code" is "INVALID_PARAMS"
     And the error "data.severity" is "recoverable"
     And the error "data.context.reason" is "version_incompatible"
-    And the error "data.context.expected_version" is "0.1.0"
+    And the error "data.context.expected_version" is "0.3.0"
     And the error "data.context.bundle_version" is "0.0.1"
     And the error "data.suggestion" is a non-empty string
 

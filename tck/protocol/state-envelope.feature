@@ -13,7 +13,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response has a "state" object
     And the response "state" has field "session_id" of type string
     When the client sends "attach" with:
@@ -42,14 +42,14 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.session_id" matches UUID format "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 
   Scenario: session_id is stable across responses in a session
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     And the response "state.session_id" is saved as "sid_init"
     And the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -77,7 +77,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.model_id" is null
 
   Scenario: model_id is populated after attach
@@ -180,7 +180,7 @@ Feature: Response envelope contract — SessionState in every response
     Given the session is in "uninitialized" state
     When the client sends "initialize" with:
       | client_name      | tck-harness |
-      | protocol_version | 0.1.0       |
+      | protocol_version | 0.3.0       |
     Then the response "state.status" is "initialized"
     And the response "state.available_actions" is the array ["attach"]
 

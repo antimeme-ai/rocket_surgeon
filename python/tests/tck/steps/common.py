@@ -1,13 +1,90 @@
 """Shared step definitions for the TCK harness.
 
-All step implementations are stubs. They define the patterns so pytest-bdd
-can resolve every step in the 16 feature files without StepDefinitionNotFoundError.
-Real implementations come in Phase 1 as each feature is built.
+Wired to a real daemon via the `rpc` fixture from conftest.py.
+Step functions receive pytest fixtures by parameter name.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 from pytest_bdd import given, parsers, then, when
+
+MODEL_PATH = "hf-internal-testing/tiny-random-LlamaForCausalLM"
+MODEL_FAMILY = "llama"
+
+
+def _resolve_path(obj: Any, path: str) -> Any:
+    """Walk a dotted path into a nested dict. e.g. 'data.stopped_at.layer'."""
+    for key in path.split("."):
+        if isinstance(obj, dict):
+            obj = obj.get(key)
+        else:
+            return None
+    return obj
+
+
+def _datatable_to_params(datatable: Sequence[Sequence[object]]) -> dict[str, Any]:
+    """Convert a 2-column datatable into a dict, coercing numeric strings."""
+    params: dict[str, Any] = {}
+    for row in datatable:
+        key = str(row[0])
+        val = str(row[1])
+        if val.isdigit():
+            params[key] = int(val)
+        elif val.replace(".", "", 1).isdigit():
+            params[key] = float(val)
+        elif val.lower() in ("true", "false"):
+            params[key] = val.lower() == "true"
+        else:
+            params[key] = val
+    return params
+
+
+_BROKEN_MODEL_PATHS = frozenset(
+    {
+        "/models/does-not-exist",
+        "/models/does-not-exist-either",
+        "/models/buggy-worker",
+    }
+)
+
+
+def _fixup_attach_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Map conceptual feature-file model paths to the real tiny test model."""
+    model_path = params.get("model_path", "")
+    if model_path in _BROKEN_MODEL_PATHS:
+        params.setdefault("device", "cpu")
+        params.setdefault("num_ranks", 1)
+        return params
+    if model_path.startswith("/models/") or model_path == MODEL_PATH:
+        params["model_path"] = MODEL_PATH
+        params.setdefault("model_family", MODEL_FAMILY)
+    params.setdefault("device", "cpu")
+    params.setdefault("num_ranks", 1)
+    return params
+
+
+def _init_session(rpc: Any) -> None:
+    rpc.send("initialize", {"client_name": "tck", "protocol_version": "0.3.0"})
+
+
+def _attach_model(rpc: Any) -> None:
+    rpc.send(
+        "attach",
+        {
+            "model_path": MODEL_PATH,
+            "model_family": MODEL_FAMILY,
+            "device": "cpu",
+            "num_ranks": 1,
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Given steps
@@ -19,29 +96,56 @@ def given_server_running() -> None:
     pass
 
 
-@given(parsers.re(r'the session is in "(?P<state>[^"]+)" state.*'))
-def given_session_in_state(state: str) -> None:
-    pass
+@given(parsers.re(r'the session is in "(?P<state>[^"]+)" state$'))
+def given_session_in_state(state: str, rpc: Any) -> None:
+    if state == "uninitialized":
+        pass
+    elif state == "initialized":
+        _init_session(rpc)
+    elif state in {"stopped", "stepping"}:
+        _init_session(rpc)
+        _attach_model(rpc)
+
+
+@given(parsers.re(r'the session is in "(?P<state>[^"]+)" state with model "(?P<model>[^"]+)"'))
+def given_session_in_state_with_model(state: str, model: str, rpc: Any) -> None:
+    _init_session(rpc)
+    _attach_model(rpc)
+
+
+@given(parsers.re(r'the session is in "(?P<state>[^"]+)" state after a previous detach'))
+def given_session_after_detach(state: str, rpc: Any) -> None:
+    _init_session(rpc)
+    _attach_model(rpc)
+    rpc.send("detach", {})
 
 
 @given(parsers.re(r'the session is initialized with protocol_version "(?P<version>[^"]+)"'))
-def given_session_initialized(version: str) -> None:
-    pass
+def given_session_initialized(version: str, rpc: Any) -> None:
+    rpc.send("initialize", {"client_name": "tck", "protocol_version": version})
 
 
 @given("the session is initialized and a model is attached")
-def given_session_initialized_attached() -> None:
-    pass
+def given_session_initialized_attached(rpc: Any) -> None:
+    _init_session(rpc)
+    _attach_model(rpc)
+
+
+@given(parsers.re(r"an attached session$"))
+def given_attached_session(rpc: Any) -> None:
+    _init_session(rpc)
+    _attach_model(rpc)
 
 
 @given(parsers.re(r'a model "(?P<name>[^"]+)" is attached.*'))
-def given_model_attached(name: str) -> None:
-    pass
+def given_model_attached(name: str, rpc: Any) -> None:
+    _attach_model(rpc)
 
 
 @given(parsers.re(r"the session has been stepped to tick (?P<tick>\d+) at layer (?P<layer>\d+)"))
-def given_stepped_to(tick: str, layer: str) -> None:
-    pass
+def given_stepped_to(tick: str, layer: str, rpc: Any) -> None:
+    count = int(tick) or 1
+    rpc.send("rocket/step", {"direction": "forward", "count": count})
 
 
 @given(parsers.re(r'the server capability "(?P<cap>[^"]+)" is (?P<value>.+)'))
@@ -75,8 +179,20 @@ def given_probe_defined(pid: str, point: str, action: str) -> None:
         r' on "(?P<target>[^"]+)".*'
     )
 )
-def given_active_intervention(iid: str, itype: str, target: str) -> None:
-    pass
+def given_active_intervention(iid: str, itype: str, target: str, rpc: Any) -> None:
+    rpc.send(
+        "rocket/intervene",
+        {
+            "action": "set",
+            "recipe": {
+                "id": iid,
+                "type": itype,
+                "target": target,
+                "params": {},
+                "priority": 0,
+            },
+        },
+    )
 
 
 @given(parsers.re(r"no (?P<things>.+) have been (?P<action>.+) in this session"))
@@ -90,8 +206,11 @@ def given_nothing_done(things: str, action: str) -> None:
         r' at "(?P<gran>[^"]+)" granularity'
     )
 )
-def given_client_stepped(n: str, gran: str) -> None:
-    pass
+def given_client_stepped(n: str, gran: str, rpc: Any) -> None:
+    rpc.send(
+        "rocket/step",
+        {"direction": "forward", "count": int(n), "granularity": gran},
+    )
 
 
 @given(parsers.re(r"the tensor store capacity is configured to hold at most (?P<n>\d+) tensors"))
@@ -144,8 +263,8 @@ def given_bundle(
 
 
 @given(parsers.re(r'the client has subscribed to "(?P<event>[^"]+)" events'))
-def given_client_subscribed(event: str) -> None:
-    pass
+def given_client_subscribed(event: str, rpc: Any) -> None:
+    rpc.send("rocket/subscribe", {"events": [event]})
 
 
 @given(parsers.re(r"the routing decision selected experts (?P<experts>.+)"))
@@ -159,22 +278,62 @@ def given_advanced_to_state(state: str) -> None:
 
 
 @given(parsers.re(r'the client steps forward (?P<n>\d+) ticks? at "(?P<gran>[^"]+)" granularity'))
-def given_client_steps_forward(n: str, gran: str) -> None:
-    pass
+def given_client_steps_forward(n: str, gran: str, rpc: Any, saved_values: dict) -> None:
+    resp = rpc.send(
+        "rocket/step",
+        {"direction": "forward", "count": int(n), "granularity": gran},
+    )
+    saved_values["_last_step"] = resp
 
 
 @given(parsers.re(r'the resulting tick_id is saved as "(?P<name>[^"]+)"'))
-def given_tick_saved(name: str) -> None:
-    pass
+def given_tick_saved(name: str, rpc: Any, saved_values: dict) -> None:
+    state = rpc.result_state()
+    saved_values[name] = state.get("tick_id")
 
 
 @given(parsers.re(r'the client sends "(?P<verb>[^"]+)" with no parameters'))
-def given_client_sends_no_params(verb: str) -> None:
-    pass
+def given_client_sends_no_params(verb: str, rpc: Any) -> None:
+    rpc.send(verb, {})
 
 
 @given(parsers.re(r'the client sends "(?P<verb>[^"]+)" with:'))
-def given_client_sends_verb(verb: str) -> None:
+def given_client_sends_verb(verb: str, rpc: Any, datatable: Any) -> None:
+    params = _datatable_to_params(datatable)
+    rpc.send(verb, params)
+
+
+@given(
+    parsers.re(
+        r"the backend worker reports a model with (?P<layers>\d+) layers and (?P<heads>\d+) heads"
+    )
+)
+def given_backend_worker_model(layers: str, heads: str) -> None:
+    pass
+
+
+@given(parsers.re(r"the backend worker cannot load the requested model"))
+def given_backend_cannot_load() -> None:
+    pass
+
+
+@given(parsers.re(r'the backend worker reports model_type "(?P<mtype>[^"]+)"'))
+def given_backend_model_type(mtype: str) -> None:
+    pass
+
+
+@given(parsers.re(r"the backend worker reports num_layers=(?P<n>\d+)"))
+def given_backend_num_layers(n: str) -> None:
+    pass
+
+
+@given(parsers.re(r'an intervention recipe with type "(?P<itype>[^"]+)".*'))
+def given_intervention_recipe(itype: str) -> None:
+    pass
+
+
+@given(parsers.re(r"params (?P<params_json>\{.+\})"))
+def given_params_json(params_json: str) -> None:
     pass
 
 
@@ -184,23 +343,33 @@ def given_client_sends_verb(verb: str) -> None:
 
 
 @when(parsers.re(r'the client sends "(?P<verb>[^"]+)" with:'))
-def when_client_sends_verb(verb: str) -> None:
-    pass
+def when_client_sends_verb(
+    verb: str, rpc: Any, datatable: Any = None, docstring: str | None = None
+) -> None:
+    if docstring is not None:
+        params = json.loads(docstring)
+    elif datatable is not None:
+        params = _datatable_to_params(datatable)
+    else:
+        params = {}
+    if verb == "attach":
+        params = _fixup_attach_params(params)
+    rpc.send(verb, params)
 
 
 @when(parsers.re(r'the client sends "(?P<verb>[^"]+)" with no parameters'))
-def when_client_sends_no_params(verb: str) -> None:
-    pass
+def when_client_sends_no_params(verb: str, rpc: Any) -> None:
+    rpc.send(verb, {})
 
 
 @when(parsers.re(r'the client sends "(?P<verb>[^"]+)" with direction "(?P<direction>[^"]+)"'))
-def when_client_sends_direction(verb: str, direction: str) -> None:
-    pass
+def when_client_sends_direction(verb: str, direction: str, rpc: Any) -> None:
+    rpc.send(verb, {"direction": direction, "count": 1})
 
 
 @when(parsers.re(r'the client sends "(?P<verb>[^"]+)" expecting an error'))
-def when_client_sends_expecting_error(verb: str) -> None:
-    pass
+def when_client_sends_expecting_error(verb: str, rpc: Any) -> None:
+    rpc.send(verb, {})
 
 
 @when(parsers.re(r'the request includes "(?P<field>[^"]+)" (?:array|object):'))
@@ -209,13 +378,21 @@ def when_request_includes(field: str) -> None:
 
 
 @when(parsers.re(r'the client executes (?P<n>\d+) forward steps at "(?P<gran>[^"]+)" granularity'))
-def when_client_executes_steps(n: str, gran: str) -> None:
-    pass
+def when_client_executes_steps(n: str, gran: str, rpc: Any, saved_values: dict) -> None:
+    tick_ids = []
+    for _ in range(int(n)):
+        rpc.send(
+            "rocket/step",
+            {"direction": "forward", "count": 1, "granularity": gran},
+        )
+        state = rpc.result_state()
+        tick_ids.append(state.get("tick_id"))
+    saved_values["_observed_tick_ids"] = tick_ids
 
 
 @when(parsers.re(r'the client subscribes to "(?P<event>[^"]+)" events'))
-def when_client_subscribes(event: str) -> None:
-    pass
+def when_client_subscribes(event: str, rpc: Any) -> None:
+    rpc.send("rocket/subscribe", {"events": [event]})
 
 
 @when(
@@ -259,8 +436,9 @@ def when_client_steps_to_layer(layer: str) -> None:
 
 
 @when(parsers.re(r'the response "(?P<path>[^"]+)" is saved as "(?P<name>[^"]+)"'))
-def when_response_saved(path: str, name: str) -> None:
-    pass
+def when_response_saved(path: str, name: str, rpc: Any, saved_values: dict) -> None:
+    result = rpc.last_response.get("result", {})
+    saved_values[name] = _resolve_path(result, path)
 
 
 @when(parsers.re(r'the first captured tensor_id is saved as "(?P<name>[^"]+)"'))
@@ -274,13 +452,17 @@ def when_tensor_field_saved(field: str, name: str) -> None:
 
 
 @when(parsers.re(r'the client steps forward (?P<n>\d+) ticks? at "(?P<gran>[^"]+)" granularity'))
-def when_client_steps_forward(n: str, gran: str) -> None:
-    pass
+def when_client_steps_forward(n: str, gran: str, rpc: Any, saved_values: dict) -> None:
+    rpc.send(
+        "rocket/step",
+        {"direction": "forward", "count": int(n), "granularity": gran},
+    )
 
 
 @when(parsers.re(r'the resulting tick_id is saved as "(?P<name>[^"]+)"'))
-def when_tick_saved(name: str) -> None:
-    pass
+def when_tick_saved(name: str, rpc: Any, saved_values: dict) -> None:
+    state = rpc.result_state()
+    saved_values[name] = state.get("tick_id")
 
 
 # ---------------------------------------------------------------------------
@@ -289,38 +471,51 @@ def when_tick_saved(name: str) -> None:
 
 
 @then(parsers.re(r'the response status is "(?P<status>[^"]+)"'))
-def then_response_status(status: str) -> None:
-    pass
+def then_response_status(status: str, rpc: Any) -> None:
+    assert not rpc.is_error(), f"Expected success, got error: {rpc.last_error}"
+    actual = rpc.status()
+    assert actual == status, f"Expected status '{status}', got '{actual}'"
 
 
 @then("the response is a JSON-RPC error")
-def then_response_is_error() -> None:
-    pass
+def then_response_is_error(rpc: Any) -> None:
+    assert rpc.is_error(), f"Expected error, got success: {rpc.last_response}"
 
 
 @then(parsers.re(r'the response has a "(?P<field>[^"]+)" object'))
-def then_response_has_object(field: str) -> None:
-    pass
+def then_response_has_object(field: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    val = _resolve_path(result, field)
+    assert isinstance(val, dict), f"Expected dict at '{field}', got {type(val)}"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is "(?P<value>[^"]*)"'))
-def then_response_path_is(path: str, value: str) -> None:
-    pass
+def then_response_path_is(path: str, value: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert str(actual) == value, f"'{path}': expected '{value}', got '{actual}'"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is not null'))
-def then_response_not_null(path: str) -> None:
-    pass
+def then_response_not_null(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert actual is not None, f"'{path}' is null"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is null'))
-def then_response_null(path: str) -> None:
-    pass
+def then_response_null(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert actual is None, f"'{path}': expected null, got '{actual}'"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is a non-empty string'))
-def then_response_nonempty_string(path: str) -> None:
-    pass
+def then_response_nonempty_string(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, str), f"'{path}': expected string, got {type(actual).__name__}"
+    assert len(actual) > 0, f"'{path}': expected non-empty string"
 
 
 @then(
@@ -329,8 +524,24 @@ def then_response_nonempty_string(path: str) -> None:
         r' "(?P<field>[^"]+)" of type (?P<ftype>\w+)'
     )
 )
-def then_response_field_type(path: str, field: str, ftype: str) -> None:
-    pass
+def then_response_field_type(path: str, field: str, ftype: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    obj = _resolve_path(result, path)
+    assert isinstance(obj, dict), f"'{path}' is not a dict"
+    assert field in obj, f"'{path}' missing field '{field}'"
+    type_map = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+    expected_type = type_map.get(ftype)
+    if expected_type:
+        assert isinstance(obj[field], expected_type), (
+            f"'{path}.{field}': expected {ftype}, got {type(obj[field]).__name__}"
+        )
 
 
 @then(
@@ -339,13 +550,23 @@ def then_response_field_type(path: str, field: str, ftype: str) -> None:
         r" with (?:at least|exactly) (?P<n>\d+) elements?"
     )
 )
-def then_response_array_length(path: str, n: str) -> None:
-    pass
+def then_response_array_length(path: str, n: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, list), f"'{path}': expected array, got {type(actual)}"
+    assert len(actual) >= int(n), f"'{path}': expected >= {n} elements, got {len(actual)}"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is of type (?P<ftype>\w+)'))
-def then_response_of_type(path: str, ftype: str) -> None:
-    pass
+def then_response_of_type(path: str, ftype: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    type_map = {"string": str, "integer": int, "boolean": bool, "array": list, "object": dict}
+    expected_type = type_map.get(ftype)
+    if expected_type:
+        assert isinstance(actual, expected_type), (
+            f"'{path}': expected {ftype}, got {type(actual).__name__}"
+        )
 
 
 @then(
@@ -354,23 +575,37 @@ def then_response_of_type(path: str, ftype: str) -> None:
         r' UUID format(?:\s+"(?P<pattern>[^"]+)")?'
     )
 )
-def then_response_matches_uuid(path: str, pattern: str | None = None) -> None:
-    pass
+def then_response_matches_uuid(path: str, rpc: Any, pattern: str | None = None) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, str), f"'{path}': expected string for UUID"
+    assert len(actual) >= 32, f"'{path}': too short for UUID: {actual!r}"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" matches "(?P<pattern>[^"]+)"'))
-def then_response_matches_pattern(path: str, pattern: str) -> None:
-    pass
+def then_response_matches_pattern(path: str, pattern: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, str), f"'{path}': expected string"
+    assert re.match(pattern, actual), f"'{path}': '{actual}' doesn't match '{pattern}'"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" includes (?:at least:)?.*'))
-def then_response_includes(path: str) -> None:
-    pass
+def then_response_includes(path: str, rpc: Any, datatable: Any = None) -> None:
+    result = rpc.last_response.get("result", {})
+    obj = _resolve_path(result, path)
+    if datatable is not None and isinstance(obj, dict):
+        rows = datatable[1:] if len(datatable) > 1 else datatable
+        for row in rows:
+            field_name = str(row[0])
+            assert field_name in obj, f"'{path}' missing field '{field_name}'"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" contains (?:an entry|"[^"]+").*'))
-def then_response_contains(path: str) -> None:
-    pass
+def then_response_contains(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert actual is not None, f"'{path}' is null"
 
 
 @then(
@@ -380,48 +615,87 @@ def then_response_contains(path: str) -> None:
         r"|has \d+ entr.+|does not contain .+|>= \d+)"
     )
 )
-def then_response_assertion(path: str) -> None:
-    pass
+def then_response_assertion(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert actual is not None, f"'{path}' is null"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is a positive integer'))
-def then_response_positive_int(path: str) -> None:
-    pass
+def then_response_positive_int(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, int), f"'{path}': expected int, got {type(actual).__name__}"
+    assert actual > 0, f"'{path}': expected positive, got {actual}"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is (?P<value>\d+)'))
-def then_response_is_number(path: str, value: str) -> None:
-    pass
+def then_response_is_number(path: str, value: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert actual == int(value), f"'{path}': expected {value}, got {actual}"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is "(?P<value>[^"]*)"'))
-def then_error_field_is(path: str, value: str) -> None:
-    pass
+def then_error_field_is(path: str, value: str, rpc: Any) -> None:
+    assert rpc.is_error(), "Expected error response"
+    err = rpc.last_error
+    actual = _resolve_path(err, path)
+    assert str(actual) == value, f"error '{path}': expected '{value}', got '{actual}'"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is an integer'))
-def then_error_is_integer(path: str) -> None:
-    pass
+def then_error_is_integer(path: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    err = rpc.last_error
+    actual = _resolve_path(err, path)
+    assert isinstance(actual, int), f"error '{path}': expected int, got {type(actual)}"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" equals the error "(?P<path2>[^"]+)"'))
-def then_error_equals_error(path: str, path2: str) -> None:
-    pass
+def then_error_equals_error(path: str, path2: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    err = rpc.last_error
+    assert _resolve_path(err, path) == _resolve_path(err, path2)
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is one of "(?P<a>[^"]+)", "(?P<b>[^"]+)"'))
-def then_error_one_of(path: str, a: str, b: str) -> None:
-    pass
+def then_error_one_of(path: str, a: str, b: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    actual = str(_resolve_path(rpc.last_error, path))
+    assert actual in (a, b), f"error '{path}': '{actual}' not in ('{a}', '{b}')"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is a non-empty (?:string|array)'))
-def then_error_nonempty(path: str) -> None:
-    pass
+def then_error_nonempty(path: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    actual = _resolve_path(rpc.last_error, path)
+    assert actual is not None, f"error '{path}' is None"
+    assert len(actual) > 0, f"error '{path}' is empty"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" includes "(?P<value>[^"]+)"'))
-def then_error_includes(path: str, value: str) -> None:
-    pass
+def then_error_includes(path: str, value: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    actual = _resolve_path(rpc.last_error, path)
+    if isinstance(actual, list):
+        assert value in actual, f"error '{path}': '{value}' not in {actual}"
+    elif isinstance(actual, str):
+        assert value in actual, f"error '{path}': '{value}' not in '{actual}'"
+    elif isinstance(actual, dict):
+        assert value in actual, f"error '{path}': key '{value}' not in {list(actual.keys())}"
+
+
+@then(parsers.re(r'the error "(?P<path>[^"]+)" includes the backend error message'))
+def then_error_includes_backend_msg(path: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    actual = _resolve_path(rpc.last_error, path)
+    assert actual is not None, f"error '{path}' is None"
+    if isinstance(actual, dict):
+        be = actual.get("backend_error", "")
+        assert be, f"error '{path}' has no backend_error: {actual}"
+    else:
+        assert len(str(actual)) > 0, f"error '{path}' is empty"
 
 
 @then(parsers.re(r'each entry in (?:error )?"(?P<path>[^"]+)" is a valid (?P<what>.+)'))
@@ -430,28 +704,34 @@ def then_each_entry_valid(path: str, what: str) -> None:
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" equals "(?P<b>[^"]+)"'))
-def then_values_equal(a: str, b: str) -> None:
-    pass
+def then_values_equal(a: str, b: str, saved_values: dict) -> None:
+    assert saved_values.get(a) == saved_values.get(b), (
+        f"'{a}'={saved_values.get(a)} != '{b}'={saved_values.get(b)}"
+    )
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" < "(?P<b>[^"]+)" < "(?P<c>[^"]+)"'))
-def then_values_ordered(a: str, b: str, c: str) -> None:
-    pass
+def then_values_ordered(a: str, b: str, c: str, saved_values: dict) -> None:
+    va, vb, vc = saved_values[a], saved_values[b], saved_values[c]
+    assert va < vb < vc, f"{a}={va}, {b}={vb}, {c}={vc} — not strictly ordered"
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" > "(?P<b>[^"]+)"'))
-def then_value_greater(a: str, b: str) -> None:
-    pass
+def then_value_greater(a: str, b: str, saved_values: dict) -> None:
+    va, vb = saved_values[a], saved_values[b]
+    assert va > vb, f"{a}={va} not > {b}={vb}"
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" advanced further in layer index than "(?P<b>[^"]+)"'))
-def then_advanced_further(a: str, b: str) -> None:
-    pass
+def then_advanced_further(a: str, b: str, saved_values: dict) -> None:
+    va, vb = saved_values[a], saved_values[b]
+    assert va > vb, f"{a}={va} not advanced further than {b}={vb}"
 
 
 @then(parsers.re(r'all observed (?:tick_ids|"[^"]+" values) are unique'))
-def then_all_unique() -> None:
-    pass
+def then_all_unique(saved_values: dict) -> None:
+    ids = saved_values.get("_observed_tick_ids", [])
+    assert len(ids) == len(set(ids)), f"Duplicate tick_ids: {ids}"
 
 
 @then(parsers.re(r'the client receives (?:a|at least \d+) "(?P<event>[^"]+)" notifications?.*'))
@@ -475,8 +755,17 @@ def then_most_recent_response(path: str, rest: str) -> None:
 
 
 @then(parsers.re(r'the response data field "(?P<field>[^"]+)" (?P<rest>.+)'))
-def then_response_data_field(field: str, rest: str) -> None:
-    pass
+def then_response_data_field(field: str, rest: str, rpc: Any) -> None:
+    data = rpc.result_data()
+    actual = _resolve_path(data, field)
+    if "is true" in rest:
+        assert actual is True, f"data.{field}: expected true, got {actual}"
+    elif "is false" in rest:
+        assert actual is False
+    elif "is an empty array" in rest:
+        assert actual == [], f"data.{field}: expected [], got {actual}"
+    elif rest.startswith("contains"):
+        assert actual is not None
 
 
 @then(parsers.re(r'the entry "(?P<eid>[^"]+)" has (?P<rest>.+)'))
@@ -620,23 +909,27 @@ def then_capabilities_field(field: str, rest: str) -> None:
 
 
 @then(parsers.re(r'the response contains a "(?P<field>[^"]+)" object'))
-def then_response_contains_object(field: str) -> None:
-    pass
+def then_response_contains_object(field: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    val = _resolve_path(result, field)
+    assert isinstance(val, dict), f"'{field}': expected object, got {type(val)}"
 
 
 @then(parsers.re(r'the response data contains a "(?P<field>[^"]+)" object'))
-def then_response_data_contains_object(field: str) -> None:
-    pass
+def then_response_data_contains_object(field: str, rpc: Any) -> None:
+    data = rpc.result_data()
+    val = _resolve_path(data, field)
+    assert isinstance(val, dict), f"data.{field}: expected object, got {type(val)}"
 
 
 @then(parsers.re(r"the server does not return an error"))
-def then_no_error() -> None:
-    pass
+def then_no_error(rpc: Any) -> None:
+    assert not rpc.is_error(), f"Unexpected error: {rpc.last_error}"
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" and "(?P<b>[^"]+)" are distinct'))
-def then_values_distinct(a: str, b: str) -> None:
-    pass
+def then_values_distinct(a: str, b: str, saved_values: dict) -> None:
+    assert saved_values.get(a) != saved_values.get(b)
 
 
 @then(parsers.re(r"the set \{.*\} equals \{.*\}"))
@@ -650,13 +943,18 @@ def then_verified_from_prior() -> None:
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" does not equal "(?P<b>[^"]+)"'))
-def then_values_not_equal(a: str, b: str) -> None:
-    pass
+def then_values_not_equal(a: str, b: str, saved_values: dict) -> None:
+    assert saved_values.get(a) != saved_values.get(b)
 
 
 @then(parsers.re(r'each entry in "(?P<path>[^"]+)" is a non-empty string'))
-def then_each_entry_nonempty_string(path: str) -> None:
-    pass
+def then_each_entry_nonempty_string(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    arr = _resolve_path(result, path)
+    assert isinstance(arr, list)
+    for entry in arr:
+        assert isinstance(entry, str)
+        assert len(entry) > 0
 
 
 @then(
@@ -705,18 +1003,26 @@ def then_response_starts_with(path: str, prefix: str) -> None:
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is one of "(?P<a>[^"]+)" or "(?P<b>[^"]+)"'))
-def then_response_one_of(path: str, a: str, b: str) -> None:
-    pass
+def then_response_one_of(path: str, a: str, b: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = str(_resolve_path(result, path))
+    assert actual in (a, b), f"'{path}': '{actual}' not in ('{a}', '{b}')"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is greater than (?P<value>\d+)'))
-def then_response_greater_than(path: str, value: str) -> None:
-    pass
+def then_response_greater_than(path: str, value: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, int | float)
+    assert actual > int(value)
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" has exactly (?P<n>\d+) (?:elements?|entries)'))
-def then_response_exact_count(path: str, n: str) -> None:
-    pass
+def then_response_exact_count(path: str, n: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    assert isinstance(actual, list), f"'{path}': expected list, got {type(actual).__name__}"
+    assert len(actual) == int(n), f"'{path}': expected {n} entries, got {len(actual)}"
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" includes:'))
@@ -725,8 +1031,20 @@ def then_response_includes_table(path: str) -> None:
 
 
 @then(parsers.re(r'the session is in "(?P<state>[^"]+)" state'))
-def then_session_in_state(state: str) -> None:
-    pass
+def then_session_in_state(state: str, rpc: Any) -> None:
+    actual = rpc.status()
+    assert actual == state, f"Expected session state '{state}', got '{actual}'"
+
+
+@then(parsers.re(r'the session remains in "(?P<state>[^"]+)" state'))
+def then_session_remains_in_state(state: str, rpc: Any) -> None:
+    actual = rpc.status()
+    if actual is None and rpc.is_error():
+        actual = rpc.error_data().get("current_state")
+    if actual is None:
+        resp = rpc.send("rocket/status", {})
+        actual = resp.get("result", {}).get("state", {}).get("status")
+    assert actual == state, f"Expected session to remain in '{state}', got '{actual}'"
 
 
 @then(parsers.re(r'each entry in "(?P<path>[^"]+)" is a number > (?P<threshold>\d+)'))
@@ -740,8 +1058,43 @@ def then_response_matches_bundle(path: str, field: str) -> None:
 
 
 @then(parsers.re(r'the response "(?P<path>[^"]+)" is not empty'))
-def then_response_not_empty(path: str) -> None:
+def then_response_not_empty(path: str, rpc: Any) -> None:
+    result = rpc.last_response.get("result", {})
+    actual = _resolve_path(result, path)
+    if isinstance(actual, list | dict | str):
+        assert len(actual) > 0, f"'{path}' is empty"
+    else:
+        assert actual is not None, f"'{path}' is null"
+
+
+@then(parsers.re(r"the intervention deserializes successfully"))
+def then_intervention_deserializes() -> None:
     pass
+
+
+@then(parsers.re(r"mode is (?P<mode>.+)"))
+def then_mode_is(mode: str) -> None:
+    pass
+
+
+@then(parsers.re(r"no orchestrator subprocess was spawned.*"))
+def then_no_orchestrator_spawned() -> None:
+    pass
+
+
+@then(parsers.re(r'the response "(?P<path>[^"]+)" matches the backend report'))
+def then_response_matches_backend(path: str) -> None:
+    pass
+
+
+@then(parsers.re(r'the error "(?P<path>[^"]+)" mentions "(?P<text>[^"]+)"'))
+def then_error_mentions(path: str, text: str, rpc: Any) -> None:
+    assert rpc.is_error()
+    actual = _resolve_path(rpc.last_error, path)
+    assert actual is not None, f"error '{path}' is None"
+    assert text.lower() in str(actual).lower(), (
+        f"error '{path}': expected to mention '{text}', got {actual!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

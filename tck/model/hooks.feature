@@ -9,7 +9,7 @@ Feature: Hook registration and firing on model components
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the session has been stepped to tick 0 at layer 0
 
@@ -187,7 +187,7 @@ Feature: Hook registration and firing on model components
   # ── Compiled model error ──────────────────────────────────────────
 
   Scenario: Hook on compiled model returns COMPILED_MODEL error
-    Given the session is initialized with protocol_version "0.1.0"
+    Given the session is initialized with protocol_version "0.3.0"
     When the client sends "attach" with:
       | model_path     | /models/llama-7b-compiled |
       | model_family   | llama                     |

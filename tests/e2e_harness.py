@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import select
-import site
 import subprocess
 import sysconfig
 import time
@@ -238,15 +237,21 @@ def spawn_daemon(env_extras: dict[str, str] | None = None) -> subprocess.Popen:
     Returns the Popen handle with stdin/stdout pipes.
     *env_extras* is merged into the base environment (PYTHONPATH, lib paths).
     """
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
     env = os.environ.copy()
-    # Worker uses PyO3 auto-initialize: the embedded interpreter derives
-    # PYTHONHOME from libpython's location (the uv-managed Python), not from
-    # the venv. Extend PYTHONPATH with the venv site-packages so torch and
-    # other venv-installed packages are visible.
-    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), *site.getsitepackages()])
-    env["DYLD_LIBRARY_PATH"] = python_libdir
-    env["LD_LIBRARY_PATH"] = python_libdir
+    # Worker uses PyO3 auto-initialize linked to the uv-managed Python 3.11.
+    # Point PYTHONPATH at the .venv site-packages (also 3.11) — NOT the host
+    # interpreter's site-packages, which may be a different Python version.
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python3.11"
+    venv_site = REPO_ROOT / ".venv" / "lib" / "python3.11" / "site-packages"
+    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), str(venv_site)])
+    # Derive libpython dir from the venv's Python so we don't hardcode paths
+    # or accidentally use the host interpreter's (potentially different version).
+    venv_libdir = subprocess.check_output(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
+        text=True,
+    ).strip()
+    env["DYLD_LIBRARY_PATH"] = venv_libdir
+    env["LD_LIBRARY_PATH"] = venv_libdir
     if env_extras:
         env.update(env_extras)
 

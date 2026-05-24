@@ -10,7 +10,7 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
 
   Background:
     Given a rocket_surgeon server is running
-    And the session is initialized with protocol_version "0.1.0"
+    And the session is initialized with protocol_version "0.3.0"
     And a model "llama-7b" is attached
     And the client has stepped forward at least 1 tick at "component" granularity
     And the session is in "stopped" state
