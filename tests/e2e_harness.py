@@ -92,16 +92,21 @@ def _wait_readable(stream, remaining: float) -> None:
 def recv_message(proc: subprocess.Popen, timeout: float = TIMEOUT_SEC) -> dict:
     """Read a Content-Length framed JSON-RPC response from *proc.stdout*.
 
-    Uses ``select.select`` before every blocking read so the call never hangs
-    past *timeout* seconds, even on partial writes from the daemon.
+    The *timeout* governs how long we wait for the **first byte** of a new
+    message.  Once any header data arrives we commit to reading the entire
+    frame — applying a per-line timeout inside the header loop would leave
+    the stream desynchronized if a ``TimeoutError`` fires between the
+    ``Content-Length`` header and the blank separator.
     """
     deadline = time.monotonic() + timeout
 
-    # --- Read headers until blank line ---
+    # --- Wait for the first byte of the next message ---
+    remaining = deadline - time.monotonic()
+    _wait_readable(proc.stdout, remaining)
+
+    # --- Read headers until blank line (no per-line timeout) ---
     content_length = None
     while True:
-        remaining = deadline - time.monotonic()
-        _wait_readable(proc.stdout, remaining)
         line = proc.stdout.readline()
         if not line:
             msg = "Daemon stdout closed unexpectedly"
@@ -121,8 +126,6 @@ def recv_message(proc: subprocess.Popen, timeout: float = TIMEOUT_SEC) -> dict:
     # --- Read body ---
     body_bytes = b""
     while len(body_bytes) < content_length:
-        remaining = deadline - time.monotonic()
-        _wait_readable(proc.stdout, remaining)
         chunk = proc.stdout.read(content_length - len(body_bytes))
         if not chunk:
             msg = "Daemon stdout closed while reading body"

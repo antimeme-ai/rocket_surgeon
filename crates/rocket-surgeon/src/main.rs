@@ -841,35 +841,6 @@ fn main() {
             shm_consumer = None;
         }
 
-        if response.error.is_none()
-            && request.method == method::STEP
-            && let Some(ref hr) = step_host_response
-        {
-            let current_layer = hr.position.layer;
-            if session.auto_checkpoint_layers().contains(&current_layer)
-                && let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle)
-            {
-                let auto_id = format!("auto-{}", uuid::Uuid::new_v4());
-                let tick_id = session.state().tick_id.unwrap_or(0);
-                let host_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
-                    model_handle: mh,
-                    checkpoint_id: auto_id.clone(),
-                    tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
-                    tick_id,
-                    layer_idx: current_layer,
-                };
-                if let Err(e) = orch.checkpoint(&host_req) {
-                    tracing::debug!("auto-checkpoint failed: {e}");
-                } else {
-                    session.checkpoint_create_with_id(
-                        Some(rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation),
-                        Some(auto_id),
-                    );
-                    tracing::debug!(layer = current_layer, "auto-checkpoint captured");
-                }
-            }
-        }
-
         if last_stale_sweep.elapsed() >= Duration::from_secs(60) {
             let stale = rocket_surgeon_shm::cleanup::discover_stale_region_names();
             if !stale.is_empty() {
@@ -946,6 +917,35 @@ fn main() {
             }
 
             last_heartbeat = Instant::now();
+        }
+
+        if response.error.is_none()
+            && request.method == method::STEP
+            && let Some(ref hr) = step_host_response
+        {
+            let current_layer = hr.position.layer;
+            if session.auto_checkpoint_layers().contains(&current_layer)
+                && let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle)
+            {
+                let auto_id = format!("auto-{}", uuid::Uuid::new_v4());
+                let tick_id = session.state().tick_id.unwrap_or(0);
+                let host_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
+                    model_handle: mh,
+                    checkpoint_id: auto_id.clone(),
+                    tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
+                    tick_id,
+                    layer_idx: current_layer,
+                };
+                if let Err(e) = orch.checkpoint(&host_req) {
+                    tracing::debug!("auto-checkpoint failed: {e}");
+                } else {
+                    session.checkpoint_create_with_id(
+                        Some(rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation),
+                        Some(auto_id),
+                    );
+                    tracing::debug!(layer = current_layer, "auto-checkpoint captured");
+                }
+            }
         }
     }
 
