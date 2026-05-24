@@ -14,7 +14,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
   # ── Happy path ─────────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Replay from checkpoint returns ticks_replayed and stopped_at
     When the client sends "rocket/replay" with:
       | from_checkpoint | ckpt-origin |
@@ -28,7 +27,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
       | component | string  |
       | event     | string  |
 
-  @deferred
   @deferred
   Scenario: Replay with interventions applies them during replay
     When the client sends "rocket/replay" with:
@@ -49,7 +47,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
     And the response "data.divergences" is an array
 
   @deferred
-  @deferred
   Scenario: Replay with stop_at layer stops at specified layer
     When the client sends "rocket/replay" with:
       | from_checkpoint | ckpt-origin |
@@ -61,7 +58,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
     And the response "data.stopped_at.component" is "attn.o_proj"
 
   @deferred
-  @deferred
   Scenario: Replay with verify=true returns verified boolean in response
     When the client sends "rocket/replay" with:
       | from_checkpoint | ckpt-origin |
@@ -72,7 +68,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
 
   # ── Divergence detection ───────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Replay divergence detected populates divergences array
     Given the session has an activation checkpoint "ckpt-before-mut" at tick 3 layer 2
@@ -101,7 +96,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
       | max_relative_error | number |
       | message            | string |
 
-  @deferred
   @deferred
   Scenario: Replay divergence fires rocket/replay.divergence event
     Given the client has subscribed to "rocket/replay.divergence" events
@@ -133,7 +127,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
   # ── Tick identity ──────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Replayed ticks get fresh tick_ids with replay_of referencing original
     When the client sends "rocket/replay" with:
       | from_checkpoint | ckpt-origin |
@@ -144,7 +137,6 @@ Feature: Replay execution from checkpoint — with interventions, verification, 
 
   # ── Error paths ────────────────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Replay from nonexistent checkpoint returns CHECKPOINT_NOT_FOUND error
     When the client sends "rocket/replay" with:

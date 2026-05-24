@@ -13,7 +13,6 @@ Feature: TickPosition phase and token_position fields
   # ── Protocol version ──────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Server advertises protocol version 0.2.0
     When the client sends "initialize" with:
       | client_name      | tck-runner |
@@ -22,7 +21,6 @@ Feature: TickPosition phase and token_position fields
 
   # ── Phase field presence ──────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Step response includes phase field on stopped_at
     When the client sends "rocket/step" with:
@@ -33,7 +31,6 @@ Feature: TickPosition phase and token_position fields
     And the response "data.stopped_at.phase.type" is one of "prefill", "decode", or "prefill_chunked"
 
   @deferred
-  @deferred
   Scenario: Phase is decode during single-token generation
     Given the model has completed prefill
     When the client sends "rocket/step" with:
@@ -42,7 +39,6 @@ Feature: TickPosition phase and token_position fields
       | granularity | component |
     Then the response "data.stopped_at.phase.type" is "decode"
 
-  @deferred
   @deferred
   Scenario: Phase is prefill during initial forward pass
     Given a prompt has been submitted but prefill has not completed
@@ -55,7 +51,6 @@ Feature: TickPosition phase and token_position fields
   # ── token_position field ──────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: token_position is present after a step
     When the client sends "rocket/step" with:
       | direction   | forward   |
@@ -64,7 +59,6 @@ Feature: TickPosition phase and token_position fields
     Then the response "data.stopped_at" has field "token_position" of type integer
 
   @deferred
-  @deferred
   Scenario: token_position advances during decode
     Given the model has completed prefill for a prompt of length N
     When the client executes 3 forward steps at "layer" granularity
@@ -72,7 +66,6 @@ Feature: TickPosition phase and token_position fields
 
   # ── Phase enum serialization ──────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Decode phase serializes as tagged object
     When the client sends "rocket/step" with:
@@ -84,7 +77,6 @@ Feature: TickPosition phase and token_position fields
     And the response "data.stopped_at.phase" has no field "chunk_index"
     And the response "data.stopped_at.phase" has no field "total_chunks"
 
-  @deferred
   @deferred
   Scenario: PrefillChunked phase carries chunk metadata
     Given the model is configured for chunked prefill with chunk_size 512
@@ -102,7 +94,6 @@ Feature: TickPosition phase and token_position fields
   # ── Forward compatibility ─────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: TickPosition without phase deserializes with decode default
     Given a JSON TickPosition from protocol 0.3.0 without "phase" or "token_position"
     When the client deserializes the JSON as TickPosition
@@ -112,14 +103,12 @@ Feature: TickPosition phase and token_position fields
   # ── Event notifications ───────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: tick.stopped event includes phase and token_position
     Given the client has subscribed to events
     When a step completes and a "tick.stopped" event is emitted
     Then the event "position.phase" has field "type"
     And the event "position" has field "token_position"
 
-  @deferred
   @deferred
   Scenario: tick.heartbeat event includes phase on position
     Given the client has subscribed to events

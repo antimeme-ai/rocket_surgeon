@@ -13,7 +13,6 @@ import json
 import os
 import select
 import subprocess
-import sysconfig
 import time
 from pathlib import Path
 
@@ -207,7 +206,12 @@ def build_binaries() -> None:
     )
 
     print("[build] Building worker separately (PyO3 auto-initialize)...")
-    python_libdir = sysconfig.get_config_var("LIBDIR") or ""
+    venv_python = REPO_ROOT / ".venv" / "bin" / "python3.11"
+    python_libdir = subprocess.check_output(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
+        text=True,
+        timeout=10,
+    ).strip()
     env = os.environ.copy()
     env["DYLD_LIBRARY_PATH"] = python_libdir
     env["LD_LIBRARY_PATH"] = python_libdir
@@ -242,13 +246,16 @@ def spawn_daemon(env_extras: dict[str, str] | None = None) -> subprocess.Popen:
     # Point PYTHONPATH at the .venv site-packages (also 3.11) — NOT the host
     # interpreter's site-packages, which may be a different Python version.
     venv_python = REPO_ROOT / ".venv" / "bin" / "python3.11"
-    venv_site = REPO_ROOT / ".venv" / "lib" / "python3.11" / "site-packages"
-    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), str(venv_site)])
-    # Derive libpython dir from the venv's Python so we don't hardcode paths
-    # or accidentally use the host interpreter's (potentially different version).
+    venv_site = subprocess.check_output(
+        [str(venv_python), "-c", "import site; print(site.getsitepackages()[0])"],
+        text=True,
+        timeout=10,
+    ).strip()
+    env["PYTHONPATH"] = os.pathsep.join([str(PYTHON_DIR), venv_site])
     venv_libdir = subprocess.check_output(
         [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
         text=True,
+        timeout=10,
     ).strip()
     env["DYLD_LIBRARY_PATH"] = venv_libdir
     env["LD_LIBRARY_PATH"] = venv_libdir

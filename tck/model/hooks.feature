@@ -16,7 +16,6 @@ Feature: Hook registration and firing on model components
   # ── Basic capture ─────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Forward hook registered on a component captures output tensor
     When the client sends "rocket/probe" with:
       """json
@@ -45,7 +44,6 @@ Feature: Hook registration and firing on model components
   # ── Correct tick position ─────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Hook fires at correct tick position (layer, component, event)
     When the client sends "rocket/probe" with:
       """json
@@ -67,7 +65,6 @@ Feature: Hook registration and firing on model components
 
   # ── Registration order ────────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Multiple hooks on same component fire in registration order
     When the client sends "rocket/probe" with:
@@ -103,7 +100,6 @@ Feature: Hook registration and firing on model components
   # ── Hook removal ──────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Hook removal stops future captures
     When the client sends "rocket/probe" with:
       """json
@@ -134,7 +130,6 @@ Feature: Hook registration and firing on model components
   # ── Wildcard matching ─────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Hook on wildcard target fires for all matching components
     When the client sends "rocket/probe" with:
       """json
@@ -155,7 +150,6 @@ Feature: Hook registration and firing on model components
 
   # ── tensor_id contract ────────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Hook captures include tensor_id as BLAKE3 hash (64 hex chars)
     When the client sends "rocket/probe" with:
@@ -178,7 +172,6 @@ Feature: Hook registration and firing on model components
   # ── Non-matching suppression ──────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Hook does not fire on components that do not match the target pattern
     When the client sends "rocket/probe" with:
       """json
@@ -200,7 +193,6 @@ Feature: Hook registration and firing on model components
 
   # ── Compiled model error ──────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Hook on compiled model returns COMPILED_MODEL error
     Given the session is initialized with protocol_version "0.3.0"

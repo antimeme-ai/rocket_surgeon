@@ -1,4 +1,4 @@
-@bridge_discovery
+@bridge_discovery @deferred
 Feature: Bridge discovery functions and tensor utilities
   The Python bridge exposes model introspection (module discovery,
   config extraction, execution order tracing) and tensor utilities

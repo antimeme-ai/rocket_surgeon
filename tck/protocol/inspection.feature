@@ -13,7 +13,6 @@ Feature: Tensor inspection — rocket/inspect verb
   # ── Summary inspection ─────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Inspect with detail=summary returns TensorSummary
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -27,7 +26,6 @@ Feature: Tensor inspection — rocket/inspect verb
     And the first tensor "stats" includes "abs_max", "sparsity", "l2_norm", "histogram"
 
   @deferred
-  @deferred
   Scenario: Inspect defaults to summary when detail is omitted
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -39,7 +37,6 @@ Feature: Tensor inspection — rocket/inspect verb
   # ── Target matching ────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Inspect with target matching attn.o_proj returns tensor for that component
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -47,14 +44,12 @@ Feature: Tensor inspection — rocket/inspect verb
     Then the response "data.tensors" has exactly 1 element
 
   @deferred
-  @deferred
   Scenario: Inspect with wildcard target returns multiple tensors
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:*:output |
       | detail | summary            |
     Then the response "data.tensors" is an array with at least 2 elements
 
-  @deferred
   @deferred
   Scenario: Inspect nonexistent target returns INVALID_TARGET error
     When the client sends "rocket/inspect" with:
@@ -67,7 +62,6 @@ Feature: Tensor inspection — rocket/inspect verb
   # ── Slice inspection ───────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Inspect with detail=slice and valid slices returns slice_data
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -77,7 +71,6 @@ Feature: Tensor inspection — rocket/inspect verb
     And the response "data.slice_data" is a non-null base64-encoded string
     And the response "data.tensors" is an array with at least 1 element
 
-  @deferred
   @deferred
   Scenario: Inspect with slice out of bounds returns SLICE_OUT_OF_BOUNDS error
     When the client sends "rocket/inspect" with:
@@ -91,7 +84,6 @@ Feature: Tensor inspection — rocket/inspect verb
   # ── Built-in views ─────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Inspect with built-in view "residual_stream_norm" returns view_result
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -103,7 +95,6 @@ Feature: Tensor inspection — rocket/inspect verb
   # ── tensor_id contract ─────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: TensorSummary includes tensor_id as BLAKE3 hash (64 hex chars)
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -111,7 +102,6 @@ Feature: Tensor inspection — rocket/inspect verb
     Then the first tensor in "data.tensors" has field "tensor_id" of type string
     And the first tensor "tensor_id" matches the pattern "^[0-9a-f]{64}$"
 
-  @deferred
   @deferred
   Scenario: Same tensor content at two probe points yields same tensor_id
     Given the model has two probe points observing the same tensor content
@@ -127,7 +117,6 @@ Feature: Tensor inspection — rocket/inspect verb
 
   # ── Response envelope ──────────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Inspect response includes full SessionState in envelope
     When the client sends "rocket/inspect" with:

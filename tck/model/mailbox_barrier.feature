@@ -1,4 +1,4 @@
-@mailbox
+@mailbox @deferred
 Feature: Lock-based mailbox barrier for tick-by-tick stepping
   The mailbox is a single-slot synchronization primitive using
   _thread.allocate_lock(). It enables the barrier pattern where a

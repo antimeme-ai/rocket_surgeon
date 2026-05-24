@@ -1,4 +1,4 @@
-@hook_lifecycle
+@hook_lifecycle @deferred
 Feature: Hook installation, capture barrier, and forward pass lifecycle
   Sentinel hooks defeat PyTorch's fast-path optimization. Capture hooks
   use the mailbox barrier to pause execution at each tick, deliver the

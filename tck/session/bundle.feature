@@ -16,7 +16,6 @@ Feature: Session bundle — export and restore full session state
   # ── Export ─────────────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Bundle export creates a file containing session state
     When the client sends "rocket/bundle" with:
       """json

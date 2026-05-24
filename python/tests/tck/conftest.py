@@ -60,8 +60,12 @@ def daemon_proc() -> Generator[subprocess.Popen, None, None]:
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 @pytest.fixture
@@ -91,13 +95,16 @@ class RpcClient:
 
     def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self._req_id += 1
-        send_message(self._proc, make_request(method, params, self._req_id))
+        req_id = self._req_id
+        send_message(self._proc, make_request(method, params, req_id))
         while True:
             resp = recv_message(self._proc)
             if "id" not in resp and "method" in resp:
                 self.notifications.append(resp)
                 continue
             break
+        resp_id = resp.get("id")
+        assert resp_id == req_id, f"Response id mismatch: expected {req_id}, got {resp_id}"
         self.last_response = resp
         if "error" in resp:
             self.last_error = resp["error"]

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+import pytest
 from pytest_bdd import given, parsers, then, when
 
 MODEL_PATH = "hf-internal-testing/tiny-random-LlamaForCausalLM"
@@ -46,9 +47,10 @@ def _datatable_to_params(
             if resolved is not None:
                 params[key] = resolved
                 continue
-        if val.isdigit():
+        stripped = val.lstrip("-")
+        if stripped.isdigit():
             params[key] = int(val)
-        elif val.replace(".", "", 1).isdigit():
+        elif stripped.replace(".", "", 1).isdigit():
             params[key] = float(val)
         elif val.lower() in ("true", "false"):
             params[key] = val.lower() == "true"
@@ -337,6 +339,8 @@ def given_client_sends_no_params(verb: str, rpc: Any) -> None:
 @given(parsers.re(r'the client sends "(?P<verb>[^"]+)" with:'))
 def given_client_sends_verb(verb: str, rpc: Any, datatable: Any, saved_values: dict) -> None:
     params = _datatable_to_params(datatable, saved_values)
+    if verb == "attach":
+        params = _fixup_attach_params(params)
     rpc.send(verb, params)
 
 
@@ -652,7 +656,10 @@ def then_response_contains(path: str, rpc: Any) -> None:
 @then(
     parsers.re(
         r'the response "(?P<path>[^"]+)"'
-        r" (?:is a boolean|is an? .+|is the array .+"
+        r" (?:is a boolean"
+        r"|is a (?!non-empty string|positive integer)\w.+"
+        r"|is an (?!array with)\w.+"
+        r"|is the array .+"
         r"|has \d+ entr.+|does not contain .+|>= \d+)"
     )
 )
@@ -687,7 +694,7 @@ def then_error_field_is(path: str, value: str, rpc: Any) -> None:
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is an integer'))
 def then_error_is_integer(path: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     err = rpc.last_error
     actual = _resolve_path(err, path)
     assert isinstance(actual, int), f"error '{path}': expected int, got {type(actual)}"
@@ -695,21 +702,21 @@ def then_error_is_integer(path: str, rpc: Any) -> None:
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" equals the error "(?P<path2>[^"]+)"'))
 def then_error_equals_error(path: str, path2: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     err = rpc.last_error
     assert _resolve_path(err, path) == _resolve_path(err, path2)
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is one of "(?P<a>[^"]+)", "(?P<b>[^"]+)"'))
 def then_error_one_of(path: str, a: str, b: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     actual = str(_resolve_path(rpc.last_error, path))
     assert actual in (a, b), f"error '{path}': '{actual}' not in ('{a}', '{b}')"
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" is a non-empty (?:string|array)'))
 def then_error_nonempty(path: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     actual = _resolve_path(rpc.last_error, path)
     assert actual is not None, f"error '{path}' is None"
     assert len(actual) > 0, f"error '{path}' is empty"
@@ -717,19 +724,22 @@ def then_error_nonempty(path: str, rpc: Any) -> None:
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" includes "(?P<value>[^"]+)"'))
 def then_error_includes(path: str, value: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error response, got: {rpc.last_response}"
     actual = _resolve_path(rpc.last_error, path)
+    assert actual is not None, f"error '{path}' is None"
     if isinstance(actual, list):
         assert value in actual, f"error '{path}': '{value}' not in {actual}"
     elif isinstance(actual, str):
         assert value in actual, f"error '{path}': '{value}' not in '{actual}'"
     elif isinstance(actual, dict):
         assert value in actual, f"error '{path}': key '{value}' not in {list(actual.keys())}"
+    else:
+        pytest.fail(f"error '{path}': unexpected type {type(actual).__name__}")
 
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" includes the backend error message'))
 def then_error_includes_backend_msg(path: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     actual = _resolve_path(rpc.last_error, path)
     assert actual is not None, f"error '{path}' is None"
     if isinstance(actual, dict):
@@ -862,14 +872,15 @@ def then_most_recent_response(path: str, rest: str) -> None:
 def then_response_data_field(field: str, rest: str, rpc: Any) -> None:
     data = rpc.result_data()
     actual = _resolve_path(data, field)
-    if "is true" in rest:
+    rest_stripped = rest.strip()
+    if rest_stripped == "is true":
         assert actual is True, f"data.{field}: expected true, got {actual}"
-    elif "is false" in rest:
-        assert actual is False
-    elif "is an empty array" in rest:
+    elif rest_stripped == "is false":
+        assert actual is False, f"data.{field}: expected false, got {actual}"
+    elif rest_stripped == "is an empty array":
         assert actual == [], f"data.{field}: expected [], got {actual}"
-    elif rest.startswith("contains"):
-        assert actual is not None
+    elif rest_stripped.startswith("contains"):
+        assert actual is not None, f"data.{field}: expected not None"
 
 
 @then(parsers.re(r'the entry "(?P<eid>[^"]+)" has (?P<rest>.+)'))
@@ -1217,7 +1228,7 @@ def then_response_matches_backend(path: str) -> None:
 
 @then(parsers.re(r'the error "(?P<path>[^"]+)" mentions "(?P<text>[^"]+)"'))
 def then_error_mentions(path: str, text: str, rpc: Any) -> None:
-    assert rpc.is_error()
+    assert rpc.is_error(), f"Expected error, got: {rpc.last_response}"
     actual = _resolve_path(rpc.last_error, path)
     assert actual is not None, f"error '{path}' is None"
     assert text.lower() in str(actual).lower(), (

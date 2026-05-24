@@ -57,7 +57,7 @@ Feature: Built-in interpretability views
 
   @deferred
   Scenario: View before any step returns view-data-unavailable error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """
@@ -72,7 +72,7 @@ Feature: Built-in interpretability views
 
   @deferred
   Scenario: View without attached model returns model-not-attached error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """

@@ -25,7 +25,7 @@ Feature: Perfetto trace integration with daemon lifecycle
     When the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -38,7 +38,7 @@ Feature: Perfetto trace integration with daemon lifecycle
   Scenario: Detaching flushes and closes the trace file
     Given a model "gpt2" is attached
     When the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -53,7 +53,7 @@ Feature: Perfetto trace integration with daemon lifecycle
     When the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
     And the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """
@@ -66,7 +66,7 @@ Feature: Perfetto trace integration with daemon lifecycle
   Scenario: All open slices are terminated on detach
     Given a model "gpt2" is attached
     When the client sends "rocket/step" with direction "forward"
-    And the client sends "rocket/detach" with:
+    And the client sends "detach" with:
       """json
       {}
       """

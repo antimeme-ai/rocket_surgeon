@@ -18,7 +18,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
   # ── Content-addressable tensor_id ─────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Captured tensor gets a content-addressable tensor_id (BLAKE3 hash)
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -28,7 +27,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     And the first tensor in "data.tensors" has field "tensor_id" of type string
     And the first tensor "tensor_id" matches the pattern "^[0-9a-f]{64}$"
 
-  @deferred
   @deferred
   Scenario: Same tensor content at different probe points yields same tensor_id
     Given the model has two probe points observing the same tensor content
@@ -43,7 +41,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     Then "id_a" equals "id_b"
 
   @deferred
-  @deferred
   Scenario: Different tensor content yields different tensor_ids
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -57,7 +54,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
 
   # ── Tensor summary ────────────────────────────────────────────────
 
-  @deferred
   @deferred
   Scenario: Tensor summary includes shape, dtype, and all 8 stat fields
     When the client sends "rocket/inspect" with:
@@ -87,7 +83,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     And the first tensor "stats.histogram" is of type object
 
   @deferred
-  @deferred
   Scenario: Tensor stats satisfy basic invariants
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -104,7 +99,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
   # ── Tensor slice ──────────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: Tensor slice returns base64-encoded raw data
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -116,7 +110,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     And the response "data.slice_dtype" is a non-empty string
 
   @deferred
-  @deferred
   Scenario: Tensor slice out of bounds returns SLICE_OUT_OF_BOUNDS
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -126,7 +119,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     And the error "data.error_code" is "SLICE_OUT_OF_BOUNDS"
     And the error "data.severity" is "recoverable"
 
-  @deferred
   @deferred
   Scenario: Tensor slice with negative indices returns SLICE_OUT_OF_BOUNDS
     When the client sends "rocket/inspect" with:
@@ -140,7 +132,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
   # ── Tensor eviction ───────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario: After exceeding store capacity oldest tensors are evicted
     Given the tensor store capacity is configured to hold at most 4 tensors
     When the client captures 6 tensors by inspecting 6 distinct components
@@ -148,7 +139,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
     Then the tensor store contains at most 4 tensors
     And the tensor "oldest_id" has been evicted
 
-  @deferred
   @deferred
   Scenario: Evicted tensor_id returns TENSOR_NOT_FOUND
     Given the tensor store capacity is configured to hold at most 4 tensors
@@ -169,7 +159,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
   # ── dtype preservation ────────────────────────────────────────────
 
   @deferred
-  @deferred
   Scenario Outline: Tensor dtype preservation across supported dtypes
     Given a model "llama-7b" is attached with dtype "<dtype>"
     And the client has stepped forward at least 1 tick at "component" granularity
@@ -185,7 +174,6 @@ Feature: Tensor handle lifecycle — addressing, summaries, slicing, eviction
       | float32  |
       | bfloat16 |
 
-  @deferred
   @deferred
   Scenario: Tensor slice data preserves dtype encoding
     Given a model "llama-7b" is attached with dtype "float16"

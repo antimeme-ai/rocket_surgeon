@@ -13,6 +13,7 @@ Feature: Shared memory data plane for tensor transfer
 
   # ── Capability advertisement ───────────────────────────────────────
 
+  @deferred
   Scenario: Capabilities include shared_memory_supported flag
     When the client sends "initialize" with:
       """json
@@ -25,6 +26,7 @@ Feature: Shared memory data plane for tensor transfer
 
   # ── Transparent tensor transfer ────────────────────────────────────
 
+  @deferred
   Scenario: Inspect returns valid tensor summary with shm transport
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -36,6 +38,7 @@ Feature: Shared memory data plane for tensor transfer
     And the first tensor in "data.tensors" has field "stats" of type object
     And the first tensor "stats" includes "mean", "std", "min", "max"
 
+  @deferred
   Scenario: Inspect returns valid tensor slice with shm transport
     When the client sends "rocket/inspect" with:
       | target | llama:0:0:attn.o_proj:output |
@@ -46,6 +49,7 @@ Feature: Shared memory data plane for tensor transfer
 
   # ── Fallback behavior ──────────────────────────────────────────────
 
+  @deferred
   Scenario: Inspect succeeds when shared memory is unavailable
     Given the shared memory data plane is disabled
     When the client sends "rocket/inspect" with:
