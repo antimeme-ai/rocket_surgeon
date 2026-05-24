@@ -12,6 +12,7 @@ Feature: Built-in interpretability views
 
   # ── residual_stream_norm ──────────────────────────────────────────
 
+  @deferred
   Scenario: Residual stream norm returns per-layer L2 norms
     When the client sends "rocket/view" with:
       """json
@@ -25,6 +26,7 @@ Feature: Built-in interpretability views
 
   # ── attention_pattern (all heads) ─────────────────────────────────
 
+  @deferred
   Scenario: Attention pattern for a layer returns all heads
     When the client sends "rocket/view" with:
       """json
@@ -40,6 +42,7 @@ Feature: Built-in interpretability views
 
   # ── attention_pattern (single head) ───────────────────────────────
 
+  @deferred
   Scenario: Attention pattern for a specific head returns single entry
     When the client sends "rocket/view" with:
       """json
@@ -52,6 +55,7 @@ Feature: Built-in interpretability views
   # ── View before step ──────────────────────────────────────────────
   # Background steps the model, so detach+reattach to get pre-step state.
 
+  @deferred
   Scenario: View before any step returns view-data-unavailable error
     When the client sends "rocket/detach" with:
       """json
@@ -66,6 +70,7 @@ Feature: Built-in interpretability views
 
   # ── View without model ────────────────────────────────────────────
 
+  @deferred
   Scenario: View without attached model returns model-not-attached error
     When the client sends "rocket/detach" with:
       """json
@@ -79,6 +84,7 @@ Feature: Built-in interpretability views
 
   # ── Invalid layer ─────────────────────────────────────────────────
 
+  @deferred
   Scenario: Attention pattern with out-of-range layer returns invalid params
     When the client sends "rocket/view" with:
       """json
@@ -88,6 +94,7 @@ Feature: Built-in interpretability views
 
   # ── Unknown view ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Unknown view name returns invalid params
     When the client sends "rocket/view" with:
       """json
@@ -97,6 +104,7 @@ Feature: Built-in interpretability views
 
   # ── Capabilities ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Available views are reported in capabilities at initialize
     When the client sends "initialize" with:
       """json

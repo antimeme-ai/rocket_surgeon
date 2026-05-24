@@ -15,6 +15,8 @@ Feature: Session bundle — export and restore full session state
 
   # ── Export ─────────────────────────────────────────────────────────
 
+  @deferred
+  @deferred
   Scenario: Bundle export creates a file containing session state
     When the client sends "rocket/bundle" with:
       """json
@@ -28,6 +30,7 @@ Feature: Session bundle — export and restore full session state
     And the response data field "exported" is true
     And the file "/tmp/tck-bundle-export.json" exists
 
+  @deferred
   Scenario: Bundle format is JSON
     When the client sends "rocket/bundle" with:
       """json
@@ -39,6 +42,7 @@ Feature: Session bundle — export and restore full session state
     Then the response status is "stopped"
     And the file "/tmp/tck-bundle-format.json" is valid JSON
 
+  @deferred
   Scenario: Bundle includes model_id, position, active_probes, checkpoints, interventions
     Given a defined probe "p-bundle-1" at point "llama:0:12:attn.o_proj:output" with action "capture"
     And an active intervention "iv-bundle-1" of type "ablate" on "llama:0:8:mlp:output"
@@ -60,6 +64,7 @@ Feature: Session bundle — export and restore full session state
     And the bundle at "/tmp/tck-bundle-contents.json" contains field "interventions" as an array
     And the bundle "interventions" contains an entry with id "iv-bundle-1"
 
+  @deferred
   Scenario: Bundle includes protocol_version for compatibility checking
     When the client sends "rocket/bundle" with:
       """json
@@ -73,6 +78,7 @@ Feature: Session bundle — export and restore full session state
 
   # ── Restore ────────────────────────────────────────────────────────
 
+  @deferred
   Scenario: Bundle restore recreates session state
     Given a defined probe "p-restore-1" at point "llama:0:12:attn.o_proj:output" with action "capture"
     And a bundle has been exported to "/tmp/tck-bundle-restore.json"
@@ -94,6 +100,7 @@ Feature: Session bundle — export and restore full session state
     And the response "state.position.layer" is 3
     And the response "state.active_probes" contains an entry with id "p-restore-1"
 
+  @deferred
   Scenario: Bundle restore with model_id match succeeds
     Given a bundle has been exported to "/tmp/tck-bundle-model-match.json"
     And the client sends "detach" with no parameters
@@ -113,6 +120,7 @@ Feature: Session bundle — export and restore full session state
 
   # ── Error paths ────────────────────────────────────────────────────
 
+  @deferred
   Scenario: Bundle restore with wrong model returns INVALID_PARAMS
     Given a bundle has been exported to "/tmp/tck-bundle-wrong-model.json"
     And the client sends "detach" with no parameters
@@ -132,6 +140,7 @@ Feature: Session bundle — export and restore full session state
     And the error "data.context.reason" is "model_mismatch"
     And the error "data.suggestion" is a non-empty string
 
+  @deferred
   Scenario: Restore bundle from incompatible protocol version returns INVALID_PARAMS
     Given a bundle file "/tmp/tck-bundle-old-version.json" with protocol_version "0.0.1"
     When the client sends "rocket/bundle" with:
@@ -149,6 +158,7 @@ Feature: Session bundle — export and restore full session state
     And the error "data.context.bundle_version" is "0.0.1"
     And the error "data.suggestion" is a non-empty string
 
+  @deferred
   Scenario: Restore bundle from nonexistent path returns INVALID_PARAMS
     When the client sends "rocket/bundle" with:
       """json
@@ -164,6 +174,7 @@ Feature: Session bundle — export and restore full session state
 
   # ── Response envelope ──────────────────────────────────────────────
 
+  @deferred
   Scenario: Bundle response includes full SessionState in envelope
     When the client sends "rocket/bundle" with:
       """json

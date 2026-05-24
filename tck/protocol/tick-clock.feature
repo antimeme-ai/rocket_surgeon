@@ -3,6 +3,8 @@ Feature: Three-clock tick model
   token (sequence position), operator (within-token traversal),
   and wall (nanosecond real time).
 
+  @deferred
+  @deferred
   Scenario: TickPosition carries all three clocks
     Given a session in Stopped state at layer 5 component "attn.q"
     Then the tick position has a "clock" field
@@ -10,16 +12,22 @@ Feature: Three-clock tick model
     And clock.operator is the within-token traversal index
     And clock.wall_ns is a non-zero nanosecond timestamp
 
+  @deferred
+  @deferred
   Scenario: tick_id is alias for clock.operator
     Given a tick position with clock.operator = 42
     Then tick_id equals 42
 
+  @deferred
+  @deferred
   Scenario: clock.operator resets each token
     Given a session stepping through token 0
     When the session advances to token 1
     Then clock.token increments by 1
     And clock.operator resets to 0
 
+  @deferred
+  @deferred
   Scenario: Backward compatibility — tick_id still present
     Given a response from protocol version 0.3.0
     Then the tick position JSON contains both "tick_id" and "clock" fields

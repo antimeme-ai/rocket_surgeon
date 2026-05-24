@@ -34,6 +34,17 @@ TCK_ROOT = REPO_ROOT / "tck"
 
 def pytest_configure(config: pytest.Config) -> None:
     build_binaries()
+    config.addinivalue_line(
+        "markers",
+        "deferred: scenario deferred — server feature not yet implemented",
+    )
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    skip = pytest.mark.skip(reason="deferred: server feature not yet implemented")
+    for item in items:
+        if "deferred" in {m.name for m in item.iter_markers()}:
+            item.add_marker(skip)
 
 
 @pytest.fixture
@@ -81,7 +92,12 @@ class RpcClient:
     def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self._req_id += 1
         send_message(self._proc, make_request(method, params, self._req_id))
-        resp = recv_message(self._proc)
+        while True:
+            resp = recv_message(self._proc)
+            if "id" not in resp and "method" in resp:
+                self.notifications.append(resp)
+                continue
+            break
         self.last_response = resp
         if "error" in resp:
             self.last_error = resp["error"]

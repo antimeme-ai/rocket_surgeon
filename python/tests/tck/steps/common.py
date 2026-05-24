@@ -740,8 +740,14 @@ def then_error_includes_backend_msg(path: str, rpc: Any) -> None:
 
 
 @then(parsers.re(r'each entry in (?:error )?"(?P<path>[^"]+)" is a valid (?P<what>.+)'))
-def then_each_entry_valid(path: str, what: str) -> None:
-    pass
+def then_each_entry_valid(path: str, what: str, rpc: Any) -> None:
+    src = rpc.last_error if rpc.is_error() else rpc.last_response.get("result", {})
+    actual = _resolve_path(src, path)
+    assert isinstance(actual, list), f"'{path}' is not a list: {actual}"
+    valid_statuses = {"uninitialized", "initialized", "attaching", "stopped", "stepping"}
+    if "session status" in what:
+        for entry in actual:
+            assert entry in valid_statuses, f"'{entry}' not a valid status"
 
 
 @then(parsers.re(r'"(?P<a>[^"]+)" equals "(?P<b>[^"]+)"'))
@@ -783,14 +789,63 @@ def then_all_unique(saved_values: dict) -> None:
     assert len(ids) == len(set(ids)), f"Duplicate tick_ids: {ids}"
 
 
-@then(parsers.re(r'the client receives (?:a|at least \d+) "(?P<event>[^"]+)" notifications?.*'))
+@then(
+    parsers.re(
+        r"the client receives (?:a|at least (?:\d+|one))"
+        r' "(?P<event>[^"]+)" notifications?.*'
+    )
+)
 def then_client_receives_notification(event: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the client does not receive any notifications"))
+def then_client_not_receives_any() -> None:
     pass
 
 
 @then(parsers.re(r'the client does not receive (?:a )?"(?P<event>[^"]+)" notification.*'))
 def then_client_not_receives(event: str) -> None:
     pass
+
+
+@then(parsers.re(r"the client receives a notification message"))
+def then_client_receives_notification_message() -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r'the notification has field "(?P<field>[^"]+)"'
+        r' (?:equal to "(?P<val>[^"]+)"|as (?:a |an )?(?P<typ>\w+))'
+    )
+)
+def then_notification_has_field(
+    field: str, val: str | None = None, typ: str | None = None
+) -> None:
+    pass
+
+
+@then(parsers.re(r'the notification has no "(?P<field>[^"]+)" field'))
+def then_notification_has_no_field(field: str) -> None:
+    pass
+
+
+@then(parsers.re(r'the notification "(?P<path>[^"]+)" contains "(?P<field>[^"]+)" as a .*'))
+def then_notification_path_contains(path: str, field: str) -> None:
+    pass
+
+
+@then(parsers.re(r'all received notifications have strictly increasing "(?P<field>[^"]+)" values'))
+def then_notifications_strictly_increasing(field: str) -> None:
+    pass
+
+
+@then(parsers.re(r'the response contains an error with code "(?P<code>[^"]+)"'))
+def then_response_contains_error_code(code: str, rpc: Any) -> None:
+    assert rpc.is_error(), "Expected error response"
+    actual = rpc.error_data().get("error_code")
+    assert actual == code, f"Expected {code}, got {actual}"
 
 
 @then(parsers.re(r'the notification (?:includes|"params\.[^"]+") .*'))

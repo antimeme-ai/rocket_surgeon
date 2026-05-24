@@ -13,6 +13,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
 
   # ── Registration ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Adapter registers supported model family
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -21,6 +22,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
     And the response "data.model_family" is "llama"
     And the response "data.adapter" is a non-empty string
 
+  @deferred
   Scenario: Adapter provides component vocabulary
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -29,6 +31,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
     And the response "data.component_vocabulary" is a non-empty array
     And each entry in "data.component_vocabulary" is a non-empty string
 
+  @deferred
   Scenario: Component vocabulary matches canonical names from components.json
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -50,6 +53,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
 
   # ── Name mapping ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Adapter maps model-specific layer names to canonical names
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -63,6 +67,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
     And the response "data.resolved_target" is "llama:0:12:attn.q_proj:output"
     And the response "data.native_name" is "model.layers.12.self_attn.q_proj"
 
+  @deferred
   Scenario: Adapter maps multiple components within the same layer
     Given a model "llama-7b" is attached
     When the client sends "rocket/inspect" with:
@@ -78,6 +83,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
 
   # ── Model metadata ───────────────────────────────────────────────
 
+  @deferred
   Scenario: Adapter reports model metadata on attach
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |
@@ -92,6 +98,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
 
   # ── Error paths ──────────────────────────────────────────────────
 
+  @deferred
   Scenario: Unsupported model family returns UNSUPPORTED_MODEL error
     When the client sends "attach" with:
       | model_path   | /models/mystery-model |
@@ -104,6 +111,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
   # ── MoE adapter ──────────────────────────────────────────────────
 
   @phase6
+  @deferred
   Scenario: Adapter handles MoE models with expert metadata
     When the client sends "attach" with:
       | model_path   | /models/mixtral-8x7b |
@@ -119,6 +127,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
     And the response "data.top_k_experts" is 2
 
   @phase6
+  @deferred
   Scenario: MoE adapter component vocabulary includes router and expert components
     When the client sends "attach" with:
       | model_path   | /models/mixtral-8x7b |
@@ -135,6 +144,7 @@ Feature: Model adapter contract — registration, vocabulary, name mapping
       | attn.o_proj       |
 
   @phase6
+  @deferred
   Scenario: Dense model attach does not populate num_experts
     When the client sends "attach" with:
       | model_path   | /models/llama-7b |

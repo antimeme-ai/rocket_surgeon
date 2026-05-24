@@ -110,7 +110,7 @@ Feature: Event subscription and notification delivery
   # Background attaches+steps, so detach first to reach Initialized state.
 
   Scenario: Subscribe without attached model returns model-not-attached error
-    When the client sends "rocket/detach" with:
+    When the client sends "detach" with:
       """json
       {}
       """
