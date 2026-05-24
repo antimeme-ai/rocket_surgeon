@@ -300,6 +300,7 @@ mod tests {
             granularity: None,
             max_events: None,
             interventions: vec![],
+            input_ids: None,
         };
         let result = handle.step(&req);
         assert!(result.is_err());

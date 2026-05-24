@@ -155,6 +155,8 @@ pub struct StepRequest {
     pub envelope: EnvelopeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -855,6 +857,8 @@ pub struct HostStepRequest {
     pub max_events: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interventions: Vec<InterventionRecipe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ids: Option<Vec<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1171,6 +1175,7 @@ mod tests {
             granularity: None,
             max_events: None,
             interventions: vec![],
+            input_ids: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -1310,6 +1315,7 @@ mod tests {
             granularity: Some(TickGranularity::Layer),
             max_events: None,
             interventions: vec![],
+            input_ids: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
@@ -1322,6 +1328,40 @@ mod tests {
         let json = r#"{"model_handle":1,"count":1}"#;
         let req: HostStepRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.granularity, None);
+    }
+
+    #[test]
+    fn host_step_request_with_input_ids_round_trip() {
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+            granularity: None,
+            max_events: None,
+            interventions: vec![],
+            input_ids: Some(vec![50256, 464, 3797, 318]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("input_ids"));
+    }
+
+    #[test]
+    fn host_step_request_without_input_ids_omits_field() {
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+            granularity: None,
+            max_events: None,
+            interventions: vec![],
+            input_ids: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("input_ids"));
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_ids, None);
     }
 
     #[test]
