@@ -70,6 +70,25 @@ Feature: Session bundle export
       """
     Then the response data field "path" is "/tmp/default-tensors.tar.gz"
 
+  Scenario: Export produces all required artifacts
+    When the client sends "rocket/session.export" with:
+      """json
+      {
+        "path": "/tmp/full-bundle.tar.gz",
+        "include_tensors": false
+      }
+      """
+    Then the response status is "stopped"
+    And the file "/tmp/full-bundle.tar.gz" is a valid gzip-compressed tar archive
+    And the archive contains "manifest.json"
+    And the archive contains "interventions.json"
+    And the archive contains "protocol-trace.jsonl"
+    And the archive contains "env.json"
+    And the archive contains "model-info.json"
+    And the archive contains "prompt.json"
+    And the archive contains "bookmarks.json"
+    And the response data field "artifact_count" is at least 8
+
   # ── Interventions in bundle ──────────────────────────────────────
 
   Scenario: Export after registering interventions includes them in bundle
