@@ -18,8 +18,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_export, handle_inspect, handle_kv_intervene, handle_kv_read,
-    handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    dispatch, handle_attach, handle_checkpoint, handle_export, handle_inspect, handle_kv_intervene,
+    handle_kv_read, handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -777,6 +777,8 @@ fn main() {
                 model_handle.expect("model_handle required for export"),
                 perfetto.as_ref().map(perfetto_sink::PerfettoSink::path),
             )
+        } else if request.method == method::CHECKPOINT {
+            handle_checkpoint(&mut session, &request, &mut orchestrator, model_handle)
         } else {
             dispatch(&mut session, &request)
         };

@@ -668,13 +668,19 @@ impl Session {
     // position. Worker-side tensor capture is a separate tier reached over
     // `_host/checkpoint` — these methods are the daemon-side source of truth.
 
-    /// `rocket/checkpoint action=create` — register a checkpoint at the
-    /// current tick position. `tier` defaults to `activation`.
     pub fn checkpoint_create(
         &mut self,
         tier: Option<CreateCheckpointTier>,
     ) -> ResponseEnvelope<CheckpointResponse> {
-        let checkpoint_id = uuid::Uuid::new_v4().to_string();
+        self.checkpoint_create_with_id(tier, None)
+    }
+
+    pub fn checkpoint_create_with_id(
+        &mut self,
+        tier: Option<CreateCheckpointTier>,
+        explicit_id: Option<String>,
+    ) -> ResponseEnvelope<CheckpointResponse> {
+        let checkpoint_id = explicit_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let tier = match tier.unwrap_or(CreateCheckpointTier::Activation) {
             CreateCheckpointTier::Activation => CheckpointTier::Activation,
             CreateCheckpointTier::FullSnapshot => CheckpointTier::FullSnapshot,
