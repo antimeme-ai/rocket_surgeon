@@ -3,12 +3,18 @@
     "text": "When Mary and John went to the store, John gave a drink to",
     "io": "Mary",
     "s": "John",
-    "template": "ABB"
+    "template": "ABB",
+    "token_ids": [2215, 5335, 290, 1757, 1816, 284, 262, 3650, 11, 1757, 2921, 257, 4144, 284],
+    "io_token_id": 5335,
+    "s_token_id": 1757
   },
   {
     "text": "When Alice and Bob went to the park, Bob gave a ball to",
     "io": "Alice",
     "s": "Bob",
-    "template": "ABB"
+    "template": "ABB",
+    "token_ids": [2215, 14862, 290, 5811, 1816, 284, 262, 3952, 11, 5811, 2921, 257, 2613, 284],
+    "io_token_id": 14862,
+    "s_token_id": 5811
   }
 ]
