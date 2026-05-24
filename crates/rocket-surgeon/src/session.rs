@@ -249,6 +249,7 @@ pub struct Session {
     /// retains them across `rocket/step`; a later worker tier consults this
     /// to apply interventions during the forward pass. Cleared on detach.
     interventions: Vec<InterventionRecipe>,
+    auto_checkpoint_layers: Vec<u32>,
 }
 
 impl Session {
@@ -271,6 +272,7 @@ impl Session {
             event_filter: None,
             checkpoint_positions: HashMap::new(),
             interventions: Vec::new(),
+            auto_checkpoint_layers: Vec::new(),
         }
     }
 
@@ -586,6 +588,7 @@ impl Session {
         self.catalog.clear();
         self.defined_views.clear();
         self.interventions.clear();
+        self.auto_checkpoint_layers.clear();
         self.update_available_actions();
 
         Ok(self.envelope(DetachResponse {
@@ -1074,6 +1077,14 @@ impl Session {
     /// apply interventions during the forward pass.
     pub fn interventions(&self) -> &[InterventionRecipe] {
         &self.interventions
+    }
+
+    pub fn set_auto_checkpoint_layers(&mut self, layers: Vec<u32>) {
+        self.auto_checkpoint_layers = layers;
+    }
+
+    pub fn auto_checkpoint_layers(&self) -> &[u32] {
+        &self.auto_checkpoint_layers
     }
 
     /// `rocket/replay` — re-execute the forward pass from a checkpoint

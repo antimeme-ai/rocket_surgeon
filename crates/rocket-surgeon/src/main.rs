@@ -794,6 +794,8 @@ fn main() {
             }
             orchestrator = Some(orch);
             model_handle = Some(host_resp.model_handle);
+            let ckpt_layers = rocket_surgeon_protocol::checkpoint_layers(host_resp.num_layers);
+            session.set_auto_checkpoint_layers(ckpt_layers);
             shm_consumer = host_resp.shm_name.and_then(|name| {
                 match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
                     Ok(c) => {
@@ -837,6 +839,35 @@ fn main() {
             }
             detach_orchestrator(&mut orchestrator, &mut model_handle);
             shm_consumer = None;
+        }
+
+        if response.error.is_none()
+            && request.method == method::STEP
+            && let Some(ref hr) = step_host_response
+        {
+            let current_layer = hr.position.layer;
+            if session.auto_checkpoint_layers().contains(&current_layer)
+                && let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle)
+            {
+                let auto_id = format!("auto-{}", uuid::Uuid::new_v4());
+                let tick_id = session.state().tick_id.unwrap_or(0);
+                let host_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
+                    model_handle: mh,
+                    checkpoint_id: auto_id.clone(),
+                    tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
+                    tick_id,
+                    layer_idx: current_layer,
+                };
+                if let Err(e) = orch.checkpoint(&host_req) {
+                    tracing::debug!("auto-checkpoint failed: {e}");
+                } else {
+                    session.checkpoint_create_with_id(
+                        Some(rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation),
+                        Some(auto_id),
+                    );
+                    tracing::debug!(layer = current_layer, "auto-checkpoint captured");
+                }
+            }
         }
 
         if last_stale_sweep.elapsed() >= Duration::from_secs(60) {
