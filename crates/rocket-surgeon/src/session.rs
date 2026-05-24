@@ -210,6 +210,14 @@ fn default_catalog(
             });
         }
     }
+    catalog.push(ProbePointEntry {
+        family: family.to_owned(),
+        layer: 0,
+        canonical: "lm_head".to_owned(),
+        event: "output".to_owned(),
+        tensor_shape: vec![1, hidden],
+        aliases: vec!["lm_head".to_owned()],
+    });
     catalog
 }
 
