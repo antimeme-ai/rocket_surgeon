@@ -764,7 +764,17 @@ fn main() {
             events_enabled = false;
             handle_unsubscribe(&session, &request)
         } else if request.method == method::SESSION_EXPORT {
-            handle_export(&session, &request, &trace_log, &mut tensor_store)
+            handle_export(
+                &session,
+                &request,
+                &trace_log,
+                &mut tensor_store,
+                orchestrator
+                    .as_mut()
+                    .expect("orchestrator required for export"),
+                model_handle.expect("model_handle required for export"),
+                perfetto.as_ref().map(perfetto_sink::PerfettoSink::path),
+            )
         } else {
             dispatch(&mut session, &request)
         };

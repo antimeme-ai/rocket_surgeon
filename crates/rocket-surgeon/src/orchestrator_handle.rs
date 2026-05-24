@@ -192,7 +192,6 @@ impl OrchestratorHandle {
         Ok(resp)
     }
 
-    #[allow(dead_code)] // used by handle_export in dispatch.rs (next commit)
     pub fn export_env(
         &mut self,
         req: &HostExportEnvRequest,
