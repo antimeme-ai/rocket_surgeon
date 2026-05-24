@@ -1,6 +1,7 @@
 mod adapter;
 mod bridge;
 mod capture;
+pub mod checkpoint;
 mod dispatch;
 mod kv;
 mod step_driver;

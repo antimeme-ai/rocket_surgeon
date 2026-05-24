@@ -383,6 +383,93 @@ pub fn split_fused_output<'py>(
     Ok(list.iter().collect())
 }
 
+pub fn register_arena_cuda(ptr: usize, size: usize) -> anyhow::Result<bool> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        let result: bool = ckpt
+            .getattr("register_cuda_pinned")?
+            .call1((ptr, size))?
+            .extract()?;
+        Ok(result)
+    })
+}
+
+pub fn unregister_arena_cuda(ptr: usize) -> anyhow::Result<bool> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        let result: bool = ckpt
+            .getattr("unregister_cuda_pinned")?
+            .call1((ptr,))?
+            .extract()?;
+        Ok(result)
+    })
+}
+
+pub fn capture_activation(
+    py: Python<'_>,
+    last_outputs: &pyo3::PyObject,
+    component_path: &str,
+    call_index: u32,
+    dst_ptr: usize,
+    dst_len: usize,
+) -> anyhow::Result<(String, Vec<i64>)> {
+    let ckpt = py.import("rocket_surgeon.checkpoint")?;
+    let result = ckpt.getattr("capture_activation")?.call1((
+        last_outputs.bind(py),
+        component_path,
+        call_index,
+        dst_ptr,
+        dst_len,
+    ))?;
+    let tuple = result
+        .downcast::<PyTuple>()
+        .map_err(|e| anyhow::anyhow!("expected tuple: {e}"))?;
+    let dtype: String = tuple.get_item(0)?.extract()?;
+    let shape: Vec<i64> = tuple.get_item(1)?.extract()?;
+    Ok((dtype, shape))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn restore_activation(
+    py: Python<'_>,
+    last_outputs: &pyo3::PyObject,
+    component_path: &str,
+    call_index: u32,
+    src_ptr: usize,
+    src_len: usize,
+    dtype: &str,
+    shape: &[i64],
+) -> anyhow::Result<()> {
+    let ckpt = py.import("rocket_surgeon.checkpoint")?;
+    let shape_list = PyList::new(py, shape)?;
+    ckpt.getattr("restore_activation")?.call1((
+        last_outputs.bind(py),
+        component_path,
+        call_index,
+        src_ptr,
+        src_len,
+        dtype,
+        shape_list,
+    ))?;
+    Ok(())
+}
+
+pub fn capture_rng_state() -> anyhow::Result<Vec<u8>> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        let result: Vec<u8> = ckpt.getattr("capture_rng_state")?.call0()?.extract()?;
+        Ok(result)
+    })
+}
+
+pub fn restore_rng_state(state: &[u8]) -> anyhow::Result<()> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        ckpt.getattr("restore_rng_state")?.call1((state,))?;
+        Ok(())
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_interventions_at_point<'py>(
     py: Python<'py>,

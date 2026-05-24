@@ -11,11 +11,12 @@ use rocket_surgeon_protocol::jsonrpc::{
 };
 use rocket_surgeon_protocol::messages::internal;
 use rocket_surgeon_protocol::messages::{
-    CapturedTensor, HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest,
-    HostDetachResponse, HostExportEnvRequest, HostExportEnvResponse, HostInspectRequest,
-    HostInspectResponse, HostKvInterveneRequest, HostKvReadRequest, HostStepRequest,
-    HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest,
-    HostViewResponse, ProbeFiredEvent,
+    CapturedTensor, CreateCheckpointTier, HostCheckpointRequest, HostCheckpointResponse,
+    HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest, HostDetachResponse,
+    HostExportEnvRequest, HostExportEnvResponse, HostInspectRequest, HostInspectResponse,
+    HostKvInterveneRequest, HostKvReadRequest, HostStepRequest, HostStepResponse,
+    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, HostViewResponse,
+    ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -43,6 +44,7 @@ pub struct WorkerState {
     pub container_paths: Vec<String>,
     pub model_handle: Option<u64>,
     pub rank: u32,
+    pub num_layers: u32,
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
     pub last_outputs: Option<pyo3::PyObject>,
@@ -51,6 +53,7 @@ pub struct WorkerState {
         rocket_surgeon_probes::grammar::ProbePoint,
     )>,
     pub shm_ring: Option<rocket_surgeon_shm::ring::DoomRingProducer>,
+    pub checkpoint_arena: Option<crate::checkpoint::CheckpointArena>,
     /// KV-cache eviction / pin bookkeeping (WU-G). See `crate::kv`.
     pub kv_cache: crate::kv::KvCacheState,
 }
@@ -64,11 +67,13 @@ impl WorkerState {
             container_paths: Vec::new(),
             model_handle: None,
             rank: 0,
+            num_layers: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
             last_outputs: None,
             active_probes: Vec::new(),
             shm_ring: None,
+            checkpoint_arena: None,
             kv_cache: crate::kv::KvCacheState::new(),
         }
     }
@@ -94,6 +99,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_KV_READ => handle_host_kv_read(state, request),
         internal::HOST_KV_INTERVENE => handle_host_kv_intervene(state, request),
         internal::HOST_EXPORT_ENV => handle_host_export_env(request),
+        internal::HOST_CHECKPOINT => handle_host_checkpoint(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -213,6 +219,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         .collect();
     state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
+    state.num_layers = info.num_layers;
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
     state.tick_state = TickState::new(req.rank);
@@ -244,6 +251,60 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         }
     };
     state.shm_ring = shm_ring;
+
+    // Checkpoint arena: mmap + optional CUDA pinning
+    let dtype_size: usize = match req.dtype {
+        Some(
+            rocket_surgeon_protocol::types::DType::Float16
+            | rocket_surgeon_protocol::types::DType::Bfloat16,
+        ) => 2,
+        _ => 4,
+    };
+    let max_seq_len: usize = std::env::var("RS_MAX_SEQ_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048);
+    let sqrt_layers = crate::checkpoint::checkpoint_layers(info.num_layers);
+    let slots_per_checkpoint = sqrt_layers.len() + 1; // +1 for RNG sentinel
+    let num_checkpoint_slots = slots_per_checkpoint * 2 + 2; // 2 checkpoints + headroom
+    let slot_data_size = info.hidden_dim as usize * max_seq_len * dtype_size;
+    let slot_size =
+        crate::checkpoint::SLOT_HEADER_SIZE + crate::checkpoint::align_up(slot_data_size, 64);
+
+    let (final_slot_size, final_num_slots) = match std::env::var("RS_CHECKPOINT_ARENA_MB") {
+        Ok(mb_str) => {
+            if let Ok(mb) = mb_str.parse::<usize>() {
+                let total = mb * 1024 * 1024;
+                let ns = total / slot_size;
+                tracing::info!("RS_CHECKPOINT_ARENA_MB={mb} -> {ns} slots of {slot_size} bytes");
+                (slot_size, ns.max(2))
+            } else {
+                (slot_size, num_checkpoint_slots)
+            }
+        }
+        Err(_) => (slot_size, num_checkpoint_slots),
+    };
+
+    match crate::checkpoint::CheckpointArena::new(final_slot_size, final_num_slots) {
+        Ok(arena) => {
+            let (ptr, len) = arena.base_ptr();
+            match bridge::register_arena_cuda(ptr as usize, len) {
+                Ok(true) => tracing::info!(
+                    bytes = len,
+                    slots = final_num_slots,
+                    "checkpoint arena CUDA-pinned"
+                ),
+                Ok(false) => tracing::info!(
+                    bytes = len,
+                    slots = final_num_slots,
+                    "checkpoint arena allocated (no CUDA)"
+                ),
+                Err(e) => tracing::warn!("cudaHostRegister failed: {e}"),
+            }
+            state.checkpoint_arena = Some(arena);
+        }
+        Err(e) => tracing::warn!("checkpoint arena creation failed: {e}"),
+    }
 
     let resp = HostAttachResponse {
         model_handle: info.handle,
@@ -305,6 +366,14 @@ fn handle_host_detach(state: &mut WorkerState, request: &Request) -> Response {
         }
         rocket_surgeon_shm::cleanup::deregister_region_name(&name);
     }
+
+    if let Some(ref arena) = state.checkpoint_arena {
+        let (ptr, _) = arena.base_ptr();
+        if let Err(e) = bridge::unregister_arena_cuda(ptr as usize) {
+            tracing::warn!("cudaHostUnregister failed: {e}");
+        }
+    }
+    state.checkpoint_arena = None;
 
     match bridge::unload_model(req.model_handle) {
         Ok(()) => {}
@@ -900,6 +969,326 @@ fn try_shm_publish(
     }
 }
 
+fn layer_index_from_path(path: &str) -> Option<u32> {
+    let parts: Vec<&str> = path.split('.').collect();
+    parts
+        .iter()
+        .position(|&s| s == "layers")
+        .and_then(|i| parts.get(i + 1))
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+fn build_layer_container_map(container_paths: &[String]) -> HashMap<u32, String> {
+    let mut map: HashMap<u32, String> = HashMap::new();
+    for path in container_paths {
+        if let Some(layer_idx) = layer_index_from_path(path) {
+            map.entry(layer_idx)
+                .and_modify(|existing| {
+                    if path.len() < existing.len() {
+                        existing.clone_from(path);
+                    }
+                })
+                .or_insert_with(|| path.clone());
+        }
+    }
+    map
+}
+
+fn is_safe_checkpoint_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && !id.contains('\0')
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
+    let req: HostCheckpointRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let ckpt_id = match &req {
+        HostCheckpointRequest::Create { checkpoint_id, .. }
+        | HostCheckpointRequest::Restore { checkpoint_id, .. } => checkpoint_id.as_str(),
+    };
+    if !is_safe_checkpoint_id(ckpt_id) {
+        return Response::error(
+            request.id.clone(),
+            RpcError {
+                code: INVALID_PARAMS,
+                message: format!("invalid checkpoint_id: {ckpt_id:?}"),
+                data: None,
+            },
+        );
+    }
+
+    let Some(handle) = state.model_handle else {
+        return internal_error(request.id.clone(), "No model loaded".to_owned());
+    };
+
+    let Some(ref arena) = state.checkpoint_arena else {
+        return internal_error(request.id.clone(), "No checkpoint arena".to_owned());
+    };
+
+    match req {
+        HostCheckpointRequest::Create {
+            model_handle,
+            checkpoint_id,
+            tier,
+            tick_id: _,
+            layer_idx: _,
+        } => {
+            if model_handle != handle {
+                return internal_error(
+                    request.id.clone(),
+                    format!("model handle mismatch: expected {handle}, got {model_handle}"),
+                );
+            }
+
+            let Some(ref last_outputs) = state.last_outputs else {
+                return internal_error(
+                    request.id.clone(),
+                    "No captured activations — execute at least one step first".to_owned(),
+                );
+            };
+
+            let layer_containers = build_layer_container_map(&state.container_paths);
+
+            let num_layers = state.num_layers;
+
+            let layers = crate::checkpoint::checkpoint_layers(num_layers);
+            let snap = arena.snapshot();
+            let mut total_bytes: u64 = 0;
+
+            let result = Python::with_gil(|py| -> anyhow::Result<()> {
+                for &layer in &layers {
+                    let container_path = layer_containers.get(&layer).ok_or_else(|| {
+                        anyhow::anyhow!("no container path for checkpoint layer {layer}")
+                    })?;
+
+                    let (slot_ptr, _) = arena.alloc_slot(&checkpoint_id, layer)?;
+                    // SAFETY: slot_ptr from alloc_slot, advancing past header stays within slot.
+                    let data_ptr = unsafe { slot_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE) };
+                    let data_len = arena.slot_size() - crate::checkpoint::SLOT_HEADER_SIZE;
+
+                    let (dtype_str, shape) = bridge::capture_activation(
+                        py,
+                        last_outputs,
+                        container_path,
+                        0,
+                        data_ptr as usize,
+                        data_len,
+                    )?;
+
+                    let dtype = crate::checkpoint::DtypeTag::from_torch_str(&dtype_str)
+                        .unwrap_or(crate::checkpoint::DtypeTag::Float32);
+                    let mut shape_arr = [0u64; 6];
+                    for (i, &s) in shape.iter().enumerate().take(6) {
+                        shape_arr[i] = s as u64;
+                    }
+                    let elem_size: u64 = match dtype {
+                        crate::checkpoint::DtypeTag::Float16
+                        | crate::checkpoint::DtypeTag::Bfloat16 => 2,
+                        crate::checkpoint::DtypeTag::Float32 => 4,
+                        crate::checkpoint::DtypeTag::Float64 => 8,
+                    };
+                    anyhow::ensure!(
+                        shape.iter().all(|&d| d >= 0),
+                        "negative dimension in shape {shape:?} for layer {layer}"
+                    );
+                    let byte_len = shape.iter().copied().product::<i64>() as u64 * elem_size;
+                    let header = crate::checkpoint::SlotHeader {
+                        magic: crate::checkpoint::SLOT_MAGIC,
+                        dtype,
+                        ndim: shape.len().min(6) as u8,
+                        shape: shape_arr,
+                        byte_len,
+                    };
+                    // SAFETY: slot_ptr is from alloc_slot, within arena mmap region.
+                    unsafe {
+                        arena.update_header(slot_ptr, &header);
+                    }
+                    total_bytes += byte_len;
+                }
+                Ok(())
+            });
+
+            if let Err(e) = result {
+                arena.rollback(snap, &checkpoint_id);
+                return internal_error(
+                    request.id.clone(),
+                    format!("checkpoint create failed: {e}"),
+                );
+            }
+
+            match bridge::capture_rng_state() {
+                Ok(rng_bytes) => {
+                    match arena.alloc_slot(&checkpoint_id, u32::MAX) {
+                        Ok((rng_ptr, _)) => {
+                            let header = crate::checkpoint::SlotHeader {
+                                magic: crate::checkpoint::SLOT_MAGIC,
+                                dtype: crate::checkpoint::DtypeTag::Float32,
+                                ndim: 1,
+                                shape: [rng_bytes.len() as u64, 0, 0, 0, 0, 0],
+                                byte_len: rng_bytes.len() as u64,
+                            };
+                            // SAFETY: rng_ptr from alloc_slot, within arena mmap region.
+                            unsafe {
+                                arena.update_header(rng_ptr, &header);
+                                std::ptr::copy_nonoverlapping(
+                                    rng_bytes.as_ptr(),
+                                    rng_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE),
+                                    rng_bytes.len(),
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!("RNG slot alloc failed, skipping: {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!("RNG state capture failed: {e}"),
+            }
+
+            let utilization =
+                1.0 - (arena.available() as f64 / f64::from(arena.num_slots() as u32));
+            if utilization > 0.8
+                && let Some(oldest) = arena.oldest_checkpoint()
+                && oldest.starts_with("auto-")
+                && oldest != checkpoint_id
+            {
+                let spill_dir = std::env::temp_dir().join("rocket-surgeon-spill");
+                if let Err(e) = std::fs::create_dir_all(&spill_dir) {
+                    tracing::warn!("failed to create spill dir: {e}");
+                }
+                match crate::checkpoint::spill_checkpoint(arena, &oldest, &spill_dir) {
+                    Ok(_) => tracing::info!(id = %oldest, "spilled auto-checkpoint"),
+                    Err(e) => tracing::warn!(id = %oldest, "spill failed: {e}"),
+                }
+            }
+
+            let resp_tier = match tier {
+                CreateCheckpointTier::Activation => {
+                    rocket_surgeon_protocol::types::CheckpointTier::Activation
+                }
+                CreateCheckpointTier::FullSnapshot => {
+                    rocket_surgeon_protocol::types::CheckpointTier::FullSnapshot
+                }
+            };
+
+            let resp = HostCheckpointResponse {
+                checkpoint_id,
+                tier: resp_tier,
+                restored_to: None,
+                bytes_captured: Some(total_bytes),
+            };
+
+            match serde_json::to_value(resp) {
+                Ok(value) => Response::success(request.id.clone(), value),
+                Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+            }
+        }
+        HostCheckpointRequest::Restore {
+            model_handle,
+            checkpoint_id,
+        } => {
+            if model_handle != handle {
+                return internal_error(
+                    request.id.clone(),
+                    format!("model handle mismatch: expected {handle}, got {model_handle}"),
+                );
+            }
+
+            let slot_infos = arena.slot_info_for_checkpoint(&checkpoint_id);
+            if slot_infos.is_empty() {
+                return internal_error(
+                    request.id.clone(),
+                    format!("checkpoint {checkpoint_id} not found in arena"),
+                );
+            }
+
+            let Some(ref last_outputs) = state.last_outputs else {
+                return internal_error(request.id.clone(), "No captured activations".to_owned());
+            };
+
+            let layer_containers = build_layer_container_map(&state.container_paths);
+
+            // Restore RNG state first (sentinel slot at layer u32::MAX)
+            if let Some((rng_ptr, rng_hdr)) = arena.get_slot(&checkpoint_id, u32::MAX) {
+                let rng_len = rng_hdr.byte_len as usize;
+                let mut rng_bytes = vec![0u8; rng_len];
+                // SAFETY: rng_ptr from get_slot, within arena mmap region.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        rng_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE),
+                        rng_bytes.as_mut_ptr(),
+                        rng_len,
+                    );
+                }
+                if let Err(e) = bridge::restore_rng_state(&rng_bytes) {
+                    tracing::warn!("RNG state restore failed: {e}");
+                }
+            }
+
+            // Restore activation slots
+            let result = Python::with_gil(|py| -> anyhow::Result<()> {
+                for (layer_idx, _, header) in &slot_infos {
+                    if *layer_idx == u32::MAX {
+                        continue;
+                    }
+                    let container_path = layer_containers.get(layer_idx).ok_or_else(|| {
+                        anyhow::anyhow!("no container path for layer {layer_idx}")
+                    })?;
+
+                    let Some((slot_ptr, _)) = arena.get_slot(&checkpoint_id, *layer_idx) else {
+                        continue;
+                    };
+                    // SAFETY: slot_ptr from get_slot, within arena mmap region.
+                    let data_ptr =
+                        unsafe { slot_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE) } as usize;
+                    let shape: Vec<i64> = header
+                        .shape
+                        .iter()
+                        .take(header.ndim as usize)
+                        .map(|&s| s as i64)
+                        .collect();
+
+                    bridge::restore_activation(
+                        py,
+                        last_outputs,
+                        container_path,
+                        0,
+                        data_ptr,
+                        header.byte_len as usize,
+                        header.dtype.to_torch_str(),
+                        &shape,
+                    )?;
+                }
+                Ok(())
+            });
+
+            if let Err(e) = result {
+                return internal_error(
+                    request.id.clone(),
+                    format!("checkpoint restore failed: {e}"),
+                );
+            }
+
+            let resp = HostCheckpointResponse {
+                checkpoint_id,
+                tier: rocket_surgeon_protocol::types::CheckpointTier::Activation,
+                restored_to: None,
+                bytes_captured: None,
+            };
+
+            match serde_json::to_value(resp) {
+                Ok(value) => Response::success(request.id.clone(), value),
+                Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+            }
+        }
+    }
+}
+
 fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
     let req: HostViewRequest = match parse_params(request) {
         Ok(r) => r,
@@ -1384,5 +1773,128 @@ mod tests {
                 .message
                 .contains("model handle mismatch")
         );
+    }
+
+    // --- Checkpoint dispatch -----------------------------------------------
+
+    #[test]
+    fn dispatch_host_checkpoint_invalid_params_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_CHECKPOINT,
+            serde_json::json!({"wrong_field": 42}),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn dispatch_host_checkpoint_no_model_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_CHECKPOINT,
+            serde_json::json!({
+                "action": "create",
+                "model_handle": 1,
+                "checkpoint_id": "test-ckpt",
+                "tier": "activation",
+                "tick_id": 5,
+                "layer_idx": 3
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No model loaded")
+        );
+    }
+
+    #[test]
+    fn dispatch_host_checkpoint_no_arena_returns_error() {
+        let mut state = make_state();
+        state.model_handle = Some(1);
+        let req = make_request(
+            internal::HOST_CHECKPOINT,
+            serde_json::json!({
+                "action": "create",
+                "model_handle": 1,
+                "checkpoint_id": "test-ckpt",
+                "tier": "activation",
+                "tick_id": 5,
+                "layer_idx": 3
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No checkpoint arena")
+        );
+    }
+
+    #[test]
+    fn dispatch_host_checkpoint_restore_not_found_returns_error() {
+        let mut state = make_state();
+        state.model_handle = Some(1);
+        state.checkpoint_arena = Some(crate::checkpoint::CheckpointArena::new(128, 4).unwrap());
+        let req = make_request(
+            internal::HOST_CHECKPOINT,
+            serde_json::json!({
+                "action": "restore",
+                "model_handle": 1,
+                "checkpoint_id": "nonexistent"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("not found in arena")
+        );
+    }
+
+    #[test]
+    fn layer_container_map_picks_shortest_path() {
+        let paths = vec![
+            "model.layers.0".to_owned(),
+            "model.layers.0.self_attn".to_owned(),
+            "model.layers.0.mlp".to_owned(),
+            "model.layers.1".to_owned(),
+            "model.layers.1.self_attn".to_owned(),
+        ];
+        let map = build_layer_container_map(&paths);
+        assert_eq!(map.get(&0).unwrap(), "model.layers.0");
+        assert_eq!(map.get(&1).unwrap(), "model.layers.1");
+        assert!(!map.contains_key(&2));
+    }
+
+    #[test]
+    fn layer_index_from_path_extracts_number() {
+        assert_eq!(layer_index_from_path("model.layers.5"), Some(5));
+        assert_eq!(layer_index_from_path("model.layers.0.self_attn"), Some(0));
+        assert_eq!(layer_index_from_path("embed_tokens"), None);
+        assert_eq!(layer_index_from_path("model.42.bias"), None);
+    }
+
+    #[test]
+    fn checkpoint_id_sanitization() {
+        assert!(is_safe_checkpoint_id("auto-tick-5"));
+        assert!(is_safe_checkpoint_id("ckpt-1"));
+        assert!(!is_safe_checkpoint_id("../../etc/passwd"));
+        assert!(!is_safe_checkpoint_id("foo/bar"));
+        assert!(!is_safe_checkpoint_id("foo\\bar"));
+        assert!(!is_safe_checkpoint_id(""));
+        assert!(!is_safe_checkpoint_id("bad\0id"));
     }
 }

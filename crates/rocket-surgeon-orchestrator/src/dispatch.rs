@@ -29,7 +29,8 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
         | internal::HOST_VIEW
         | internal::HOST_KV_READ
         | internal::HOST_KV_INTERVENE
-        | internal::HOST_EXPORT_ENV => forward_to_worker(state, request),
+        | internal::HOST_EXPORT_ENV
+        | internal::HOST_CHECKPOINT => forward_to_worker(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -410,6 +411,32 @@ mod tests {
                 "layers": [0],
                 "positions": [0],
                 "op": "zero"
+            }),
+        );
+        let resp = dispatch(&mut state, &req);
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("No worker running")
+        );
+    }
+
+    #[test]
+    fn host_checkpoint_without_worker_returns_error() {
+        let mut state = make_state();
+        let req = make_request(
+            internal::HOST_CHECKPOINT,
+            serde_json::json!({
+                "Create": {
+                    "model_handle": 1,
+                    "checkpoint_id": "test-ckpt",
+                    "tier": "Activation",
+                    "tick_id": 0,
+                    "layer_idx": 0
+                }
             }),
         );
         let resp = dispatch(&mut state, &req);

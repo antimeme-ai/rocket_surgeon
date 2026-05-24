@@ -3,18 +3,20 @@ use rocket_surgeon_probes::registry::{ProbeRegistry, RegistryError};
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData};
 use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, CheckpointRequest, DiscoverRequest, EventType, ExportRequest, ExportResponse,
-    HostAttachResponse, HostExportEnvRequest, HostKvInterveneResponse, HostKvReadResponse,
-    HostViewResponse, InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse,
-    KvInterveneRequest, KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest,
-    ProbeResponse, ReplayRequest, StepRequest, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, UnsubscribeResponse, ViewDefineRequest, ViewRequest, ViewResponse, method,
+    AttachRequest, CheckpointRequest, CreateCheckpointTier, DiscoverRequest, EventType,
+    ExportRequest, ExportResponse, HostAttachResponse, HostCheckpointRequest, HostExportEnvRequest,
+    HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
+    InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
+    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest, StepRequest,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
     DType, InterventionRecipe, Phase, StepDirection, TickEvent, TickPosition,
 };
 
 use crate::bundle::{BundleArtifact, assemble_bundle};
+use crate::orchestrator_handle::OrchestratorHandle;
 use crate::session::{Session, SessionError};
 use crate::tensor_store::TensorStore;
 use crate::trace_log::TraceLog;
@@ -270,7 +272,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::VIEW => handle_view(session, request, None),
         method::DISCOVER => handle_discover(session, request),
         method::VIEW_DEFINE => handle_view_define(session, request),
-        method::CHECKPOINT => handle_checkpoint(session, request),
+        method::CHECKPOINT => handle_checkpoint(session, request, &mut None, None),
         method::KV_READ => handle_kv_read(session, request, None),
         method::KV_INTERVENE => handle_kv_intervene(session, request, None),
         method::INTERVENE => handle_intervene(session, request),
@@ -288,10 +290,14 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
 
 /// `rocket/checkpoint` — create / list / restore / delete / bookmark.
 ///
-/// Pure daemon-side bookkeeping: the `CheckpointRef` registry lives in
-/// session state. `create`/`restore` move the logical tick position;
-/// worker-side tensor capture is a separate tier over `_host/checkpoint`.
-fn handle_checkpoint(session: &mut Session, request: &Request) -> Response {
+/// Session-side bookkeeping plus optional forwarding to the worker via
+/// `_host/checkpoint` for activation-tier capture/restore.
+pub fn handle_checkpoint(
+    session: &mut Session,
+    request: &Request,
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+) -> Response {
     let req: CheckpointRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => return invalid_params_response(request.id.clone(), &e),
@@ -302,9 +308,40 @@ fn handle_checkpoint(session: &mut Session, request: &Request) -> Response {
     }
 
     let result = match req {
-        CheckpointRequest::Create { tier } => Ok(session.checkpoint_create(tier)),
+        CheckpointRequest::Create { tier } => {
+            if let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle) {
+                let checkpoint_id = uuid::Uuid::new_v4().to_string();
+                let tick_id = session.state().tick_id.unwrap_or(0);
+                let layer = session.state().position.as_ref().map_or(0, |p| p.layer);
+                let create_tier = tier.unwrap_or(CreateCheckpointTier::Activation);
+                let host_req = HostCheckpointRequest::Create {
+                    model_handle: mh,
+                    checkpoint_id: checkpoint_id.clone(),
+                    tier: create_tier,
+                    tick_id,
+                    layer_idx: layer,
+                };
+                if let Err(e) = orch.checkpoint(&host_req) {
+                    tracing::warn!("worker checkpoint create failed: {e}");
+                }
+                Ok(session.checkpoint_create_with_id(tier, Some(checkpoint_id)))
+            } else {
+                Ok(session.checkpoint_create(tier))
+            }
+        }
         CheckpointRequest::List {} => Ok(session.checkpoint_list()),
-        CheckpointRequest::Restore { checkpoint_id } => session.checkpoint_restore(&checkpoint_id),
+        CheckpointRequest::Restore { checkpoint_id } => {
+            if let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle) {
+                let host_req = HostCheckpointRequest::Restore {
+                    model_handle: mh,
+                    checkpoint_id: checkpoint_id.clone(),
+                };
+                if let Err(e) = orch.checkpoint(&host_req) {
+                    tracing::warn!("worker checkpoint restore failed: {e}");
+                }
+            }
+            session.checkpoint_restore(&checkpoint_id)
+        }
         CheckpointRequest::Delete { checkpoint_id } => session.checkpoint_delete(&checkpoint_id),
         CheckpointRequest::Bookmark { tick_id, name } => {
             Ok(session.checkpoint_bookmark(tick_id, &name))

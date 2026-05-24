@@ -18,8 +18,8 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_export, handle_inspect, handle_kv_intervene, handle_kv_read,
-    handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    dispatch, handle_attach, handle_checkpoint, handle_export, handle_inspect, handle_kv_intervene,
+    handle_kv_read, handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -777,6 +777,8 @@ fn main() {
                 model_handle.expect("model_handle required for export"),
                 perfetto.as_ref().map(perfetto_sink::PerfettoSink::path),
             )
+        } else if request.method == method::CHECKPOINT {
+            handle_checkpoint(&mut session, &request, &mut orchestrator, model_handle)
         } else {
             dispatch(&mut session, &request)
         };
@@ -792,6 +794,8 @@ fn main() {
             }
             orchestrator = Some(orch);
             model_handle = Some(host_resp.model_handle);
+            let ckpt_layers = rocket_surgeon_protocol::checkpoint_layers(host_resp.num_layers);
+            session.set_auto_checkpoint_layers(ckpt_layers);
             shm_consumer = host_resp.shm_name.and_then(|name| {
                 match rocket_surgeon_shm::ring::DoomRingConsumer::open(&name) {
                     Ok(c) => {
@@ -913,6 +917,35 @@ fn main() {
             }
 
             last_heartbeat = Instant::now();
+        }
+
+        if response.error.is_none()
+            && request.method == method::STEP
+            && let Some(ref hr) = step_host_response
+        {
+            let current_layer = hr.position.layer;
+            if session.auto_checkpoint_layers().contains(&current_layer)
+                && let (Some(orch), Some(mh)) = (orchestrator.as_mut(), model_handle)
+            {
+                let auto_id = format!("auto-{}", uuid::Uuid::new_v4());
+                let tick_id = session.state().tick_id.unwrap_or(0);
+                let host_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
+                    model_handle: mh,
+                    checkpoint_id: auto_id.clone(),
+                    tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
+                    tick_id,
+                    layer_idx: current_layer,
+                };
+                if let Err(e) = orch.checkpoint(&host_req) {
+                    tracing::debug!("auto-checkpoint failed: {e}");
+                } else {
+                    session.checkpoint_create_with_id(
+                        Some(rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation),
+                        Some(auto_id),
+                    );
+                    tracing::debug!(layer = current_layer, "auto-checkpoint captured");
+                }
+            }
         }
     }
 

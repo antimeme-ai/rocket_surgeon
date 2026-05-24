@@ -68,6 +68,7 @@ base64 = "0.22"
 
 # Hashing
 blake3 = "1"
+crc32fast = "1"
 
 # Numeric
 half = { version = "2", features = ["num-traits"] }
