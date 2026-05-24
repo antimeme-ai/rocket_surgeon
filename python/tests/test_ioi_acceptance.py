@@ -1,13 +1,12 @@
-"""IOI Acceptance Test -- Indirect Object Identification circuit intervention.
+"""IOI Acceptance Test -- logit difference measurement.
 
-Validates the full intervention stack on GPT-2-small: register ablate
-interventions on known name-mover heads (Wang et al. 2023), step through
-the forward pass, and verify the interventions fire correctly.
+Validates that ablating name-mover heads (Wang et al. 2023) reduces the
+indirect object logit difference by at least 50% on GPT-2-small.
 
-This is a protocol-level acceptance test: it proves the daemon can register
-targeted interventions, route them through the worker to the Python engine,
-and report which recipes fired. Logit-level validation (measuring actual
-logit diff reduction) requires inspect capabilities not yet in the protocol.
+Two-pass approach:
+  1. Clean baseline: step to completion, inspect lm_head logits
+  2. Ablated: register ablations on name-mover heads, step, inspect
+  3. Assert >= 50% reduction in (logit_IO - logit_S)
 
 Usage:
     PYTHONPATH=python python tests/test_ioi_acceptance.py
@@ -15,12 +14,23 @@ Usage:
 
 from __future__ import annotations
 
+import base64
+import json
+import struct
 import sys
 from pathlib import Path
+from typing import Any
+
+try:
+    from transformers import AutoTokenizer
+
+    HAS_TOKENIZER = True
+except ImportError:
+    HAS_TOKENIZER = False
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests"))
-from e2e_harness import (  # noqa: E402
+from e2e_harness import (  # type: ignore[import-not-found]  # noqa: E402
     assert_jsonrpc,
     build_binaries,
     make_request,
@@ -30,10 +40,106 @@ from e2e_harness import (  # noqa: E402
 )
 
 CANDIDATE_NAME_MOVERS = [(9, 9), (9, 6), (10, 0)]
+FIXTURES = REPO_ROOT / "python" / "tests" / "fixtures" / "ioi_prompts.json"
+
+
+def decode_f32_logits(b64_data: str, shape: list[int]) -> list[list[float]]:
+    """Decode base64 little-endian f32 tensor to [seq_len][vocab_size]."""
+    raw = base64.b64decode(b64_data)
+    total = 1
+    for s in shape:
+        total *= s
+    floats = struct.unpack(f"<{total}f", raw)
+    seq_len = shape[-2] if len(shape) >= 2 else 1
+    vocab_size = shape[-1]
+    result: list[list[float]] = []
+    for i in range(seq_len):
+        start = i * vocab_size
+        row = list(floats[start : start + vocab_size])
+        result.append(row)
+    return result
+
+
+def step_to_completion(
+    proc: object, req_id: int, token_ids: list[int]
+) -> tuple[int, dict[str, Any]]:
+    """Step forward pass to completion. Returns (new_req_id, response)."""
+    req_id += 1
+    send_message(
+        proc,
+        make_request(
+            "rocket/step",
+            {
+                "direction": "forward",
+                "count": 1,
+                "run_to": "completion",
+                "tokens": token_ids,
+            },
+            req_id,
+        ),
+    )
+    resp = recv_message(proc)
+    assert_jsonrpc(resp, req_id)
+    assert resp.get("error") is None, f"step failed: {resp.get('error')}"
+    return req_id, resp
+
+
+def inspect_lm_head(proc: object, req_id: int) -> tuple[int, str, list[int]]:
+    """Inspect lm_head output. Returns (req_id, base64_data, shape)."""
+    req_id += 1
+    send_message(
+        proc,
+        make_request(
+            "rocket/inspect",
+            {
+                "target": "gpt2:0:0:lm_head:output",
+                "detail": "slice",
+            },
+            req_id,
+        ),
+    )
+    resp = recv_message(proc)
+    assert_jsonrpc(resp, req_id)
+    assert resp.get("error") is None, f"inspect failed: {resp.get('error')}"
+    data = resp["result"]["data"]
+    slice_data = data["slice_data"]
+    shape = data["tensors"][0]["shape"]
+    return req_id, slice_data, shape
+
+
+def verify_token_ids(prompt: dict[str, Any]) -> None:
+    """Cross-check fixture token IDs against HF tokenizer if available."""
+    if not HAS_TOKENIZER:
+        print("[ioi] Skipping tokenizer verification (transformers not available)")
+        return
+
+    tok = AutoTokenizer.from_pretrained("gpt2")
+    expected = tok.encode(prompt["text"])
+    assert prompt["token_ids"] == expected, (
+        f"Fixture token_ids mismatch: {prompt['token_ids']} vs {expected}"
+    )
+    io_tokens = tok.encode(" " + prompt["io"])
+    s_tokens = tok.encode(" " + prompt["s"])
+    assert io_tokens[0] == prompt["io_token_id"], (
+        f"io_token_id mismatch: {prompt['io_token_id']} vs {io_tokens[0]}"
+    )
+    assert s_tokens[0] == prompt["s_token_id"], (
+        f"s_token_id mismatch: {prompt['s_token_id']} vs {s_tokens[0]}"
+    )
+    print("[ioi] Token IDs verified against HF tokenizer")
 
 
 def run_test() -> None:  # noqa: PLR0915
     build_binaries()
+
+    prompts = json.loads(FIXTURES.read_text())
+    prompt = prompts[0]
+    token_ids: list[int] = prompt["token_ids"]
+    io_token_id: int = prompt["io_token_id"]
+    s_token_id: int = prompt["s_token_id"]
+
+    verify_token_ids(prompt)
+
     proc = spawn_daemon()
     req_id = 0
 
@@ -45,7 +151,7 @@ def run_test() -> None:  # noqa: PLR0915
             proc,
             make_request(
                 "initialize",
-                {"client_name": "ioi-acceptance", "protocol_version": "0.3.0"},
+                {"client_name": "ioi-logit", "protocol_version": "0.3.0"},
                 req_id,
             ),
         )
@@ -54,7 +160,7 @@ def run_test() -> None:  # noqa: PLR0915
         assert resp.get("error") is None
         print("  PASS")
 
-        # Attach GPT-2-small
+        # Attach GPT-2
         print("\n[ioi] Step 2: attach gpt2")
         req_id += 1
         send_message(
@@ -75,8 +181,50 @@ def run_test() -> None:  # noqa: PLR0915
         assert resp.get("error") is None, f"attach failed: {resp.get('error')}"
         print("  PASS")
 
-        # Register ablate interventions on name-mover heads
-        print("\n[ioi] Step 3: register ablate interventions on name-mover heads")
+        # === CLEAN BASELINE PASS ===
+        print("\n[ioi] Step 3: clean forward pass")
+        req_id, _ = step_to_completion(proc, req_id, token_ids)
+        print("  stepped to completion")
+
+        print("\n[ioi] Step 4: inspect lm_head (clean)")
+        req_id, b64_data, shape = inspect_lm_head(proc, req_id)
+        logits = decode_f32_logits(b64_data, shape)
+        last_pos = logits[-1]
+        clean_io = last_pos[io_token_id]
+        clean_s = last_pos[s_token_id]
+        clean_diff = clean_io - clean_s
+        print(f"  logit_IO={clean_io:.4f}, logit_S={clean_s:.4f}, diff={clean_diff:.4f}")
+        print("  PASS")
+
+        # === DETACH + RE-ATTACH ===
+        print("\n[ioi] Step 5: detach + re-attach")
+        req_id += 1
+        send_message(proc, make_request("detach", {}, req_id))
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, req_id)
+        assert resp.get("error") is None
+
+        req_id += 1
+        send_message(
+            proc,
+            make_request(
+                "attach",
+                {
+                    "model_path": "gpt2",
+                    "model_family": "gpt2",
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
+                req_id,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, req_id)
+        assert resp.get("error") is None
+        print("  PASS")
+
+        # === ABLATED PASS ===
+        print("\n[ioi] Step 6: register ablate interventions")
         for layer, head in CANDIDATE_NAME_MOVERS:
             req_id += 1
             send_message(
@@ -98,86 +246,47 @@ def run_test() -> None:  # noqa: PLR0915
             )
             resp = recv_message(proc)
             assert_jsonrpc(resp, req_id)
-            assert resp.get("error") is None, f"intervene failed: {resp.get('error')}"
-
-        # Verify all interventions registered
-        active = resp["result"]["data"]["active_interventions"]
-        assert len(active) == len(CANDIDATE_NAME_MOVERS), (
-            f"expected {len(CANDIDATE_NAME_MOVERS)} interventions, got {len(active)}"
-        )
-        print(f"  {len(active)} interventions registered")
-        print("  PASS")
-
-        # Step forward through a chunk of the forward pass
-        print("\n[ioi] Step 4: step forward (20 ticks)")
-        req_id += 1
-        send_message(
-            proc,
-            make_request(
-                "rocket/step",
-                {"direction": "forward", "count": 20},
-                req_id,
-            ),
-        )
-        resp = recv_message(proc)
-        assert_jsonrpc(resp, req_id)
-        assert resp.get("error") is None, f"step failed: {resp.get('error')}"
-
-        data = resp["result"]["data"]
-        fired = data.get("fired_interventions", [])
-        stopped_at = data["stopped_at"]
-        print(f"  stopped at tick {stopped_at['tick_id']}, layer {stopped_at['layer']}")
-        print(f"  {len(fired)} interventions fired")
-
-        if stopped_at["layer"] >= 9:
-            assert len(fired) > 0, "expected interventions to fire at layer >= 9"
-            expected_ids = {f"ablate-nm-{layer}.{head}" for layer, head in CANDIDATE_NAME_MOVERS}
-            for f_id in fired:
-                assert f_id in expected_ids, f"unexpected fired intervention: {f_id}"
-            print("  PASS: name-mover ablations fired correctly")
-        else:
-            assert len(fired) == 0, (
-                f"interventions should not fire before layer 9, but got {fired}"
-            )
-            print("  PASS: haven't reached name-mover layers yet (layer < 9)")
-
-        # List interventions (verify persistence across steps)
-        print("\n[ioi] Step 5: verify interventions persist")
-        req_id += 1
-        send_message(
-            proc,
-            make_request(
-                "rocket/intervene",
-                {"action": "list"},
-                req_id,
-            ),
-        )
-        resp = recv_message(proc)
-        assert_jsonrpc(resp, req_id)
-        assert resp.get("error") is None
-        active = resp["result"]["data"]["active_interventions"]
-        assert len(active) == len(CANDIDATE_NAME_MOVERS)
-        print(f"  {len(active)} interventions still active after stepping")
-        print("  PASS")
-
-        # Clear and verify
-        print("\n[ioi] Step 6: clear all interventions")
-        for layer, head in CANDIDATE_NAME_MOVERS:
-            req_id += 1
-            send_message(
-                proc,
-                make_request(
-                    "rocket/intervene",
-                    {"action": "clear", "intervention_id": f"ablate-nm-{layer}.{head}"},
-                    req_id,
-                ),
-            )
-            resp = recv_message(proc)
-            assert_jsonrpc(resp, req_id)
             assert resp.get("error") is None
+        print(f"  {len(CANDIDATE_NAME_MOVERS)} interventions registered")
+        print("  PASS")
 
-        active = resp["result"]["data"]["active_interventions"]
-        assert len(active) == 0, f"expected 0 interventions after clear, got {len(active)}"
+        print("\n[ioi] Step 7: ablated forward pass")
+        req_id, _ = step_to_completion(proc, req_id, token_ids)
+        print("  stepped to completion")
+
+        print("\n[ioi] Step 8: inspect lm_head (ablated)")
+        req_id, b64_data, shape = inspect_lm_head(proc, req_id)
+        logits = decode_f32_logits(b64_data, shape)
+        last_pos = logits[-1]
+        ablated_io = last_pos[io_token_id]
+        ablated_s = last_pos[s_token_id]
+        ablated_diff = ablated_io - ablated_s
+        print(f"  logit_IO={ablated_io:.4f}, logit_S={ablated_s:.4f}, diff={ablated_diff:.4f}")
+        print("  PASS")
+
+        # === LOGIT DIFF REDUCTION ===
+        print("\n[ioi] Step 9: verify logit diff reduction")
+        reduction = (clean_diff - ablated_diff) / clean_diff
+        print(f"  clean_diff={clean_diff:.4f}")
+        print(f"  ablated_diff={ablated_diff:.4f}")
+        print(f"  reduction={reduction:.2%}")
+        assert reduction >= 0.50, f"Expected >= 50% logit diff reduction, got {reduction:.2%}"
+        print("  PASS: logit diff reduced by >= 50%")
+
+        # === EXPORT BUNDLE ===
+        print("\n[ioi] Step 10: export session bundle")
+        req_id += 1
+        send_message(
+            proc,
+            make_request(
+                "rocket/export",
+                {"output_dir": "/tmp/ioi-bundle", "include_tensors": False},
+                req_id,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, req_id)
+        assert resp.get("error") is None, f"export failed: {resp.get('error')}"
         print("  PASS")
 
     finally:
@@ -187,4 +296,4 @@ def run_test() -> None:  # noqa: PLR0915
 
 if __name__ == "__main__":
     run_test()
-    print("\nIOI acceptance test passed!")
+    print("\nIOI logit measurement test passed!")
