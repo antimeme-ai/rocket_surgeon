@@ -152,6 +152,7 @@ fn try_orchestrator_step(
                     granularity: None,
                     envelope: rocket_surgeon_protocol::types::EnvelopeMode::default(),
                     run_to: None,
+                    tokens: None,
                 })
             },
             |p| serde_json::from_value(p.clone()),
@@ -167,6 +168,7 @@ fn try_orchestrator_step(
         granularity,
         max_events: None,
         interventions: interventions.to_vec(),
+        input_ids: step_req.tokens,
     };
     match orch.step(&host_req) {
         Ok(hr) => Some(hr),

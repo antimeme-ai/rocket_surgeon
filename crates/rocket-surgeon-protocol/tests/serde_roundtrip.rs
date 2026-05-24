@@ -530,6 +530,7 @@ fn step_request_run_to_roundtrip() {
         granularity: None,
         envelope: EnvelopeMode::default(),
         run_to: Some("llama:*:12:attn.o_proj:output".to_owned()),
+        tokens: None,
     };
     roundtrip(&req);
     let json = serde_json::to_value(&req).unwrap();
@@ -544,6 +545,7 @@ fn step_request_run_to_completion() {
         granularity: None,
         envelope: EnvelopeMode::default(),
         run_to: Some("completion".to_owned()),
+        tokens: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["run_to"], "completion");
@@ -567,6 +569,7 @@ fn step_request_run_to_omitted_from_json_when_none() {
         granularity: None,
         envelope: EnvelopeMode::default(),
         run_to: None,
+        tokens: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert!(json.get("run_to").is_none());
@@ -1022,6 +1025,7 @@ fn step_request_roundtrip() {
         granularity: Some(TickGranularity::Component),
         envelope: EnvelopeMode::default(),
         run_to: None,
+        tokens: None,
     };
     roundtrip(&req);
 }
