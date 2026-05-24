@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 pub const SLOT_MAGIC: u32 = 0x434B_5054; // "CKPT"
 pub const SLOT_HEADER_SIZE: usize = 64;
 
@@ -83,6 +86,239 @@ impl SlotHeader {
     }
 }
 
+pub fn align_up(val: usize, align: usize) -> usize {
+    (val + align - 1) & !(align - 1)
+}
+
+struct SlotDescriptor {
+    offset: usize,
+    checkpoint_id: String,
+    layer_idx: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct ArenaSnapshot {
+    free_count: usize,
+}
+
+pub struct CheckpointArena {
+    ptr: *mut u8,
+    capacity: usize,
+    slot_size: usize,
+    num_slots: usize,
+    inner: RefCell<ArenaInner>,
+}
+
+struct ArenaInner {
+    free_list: Vec<usize>,
+    slots: Vec<SlotDescriptor>,
+    index: HashMap<(String, u32), usize>,
+    checkpoint_slots: HashMap<String, Vec<usize>>,
+}
+
+// SAFETY: The arena is single-threaded (worker dispatch loop is serial).
+// The mmap'd region is accessed only through &self methods that use
+// RefCell for interior mutability of bookkeeping.
+unsafe impl Send for CheckpointArena {}
+
+impl CheckpointArena {
+    pub fn new(slot_size: usize, num_slots: usize) -> anyhow::Result<Self> {
+        assert!(slot_size >= SLOT_HEADER_SIZE);
+        let capacity = slot_size * num_slots;
+        if capacity == 0 {
+            anyhow::bail!("arena capacity must be non-zero");
+        }
+
+        #[cfg(target_os = "linux")]
+        let flags = libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_POPULATE;
+        #[cfg(not(target_os = "linux"))]
+        let flags = libc::MAP_ANONYMOUS | libc::MAP_PRIVATE;
+
+        // SAFETY: mmap with MAP_ANONYMOUS creates a fresh zero-filled mapping.
+        // No file descriptor needed (-1). We check MAP_FAILED before use.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                capacity,
+                libc::PROT_READ | libc::PROT_WRITE,
+                flags,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            anyhow::bail!(
+                "mmap failed for checkpoint arena ({capacity} bytes): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        let free_list: Vec<usize> = (0..num_slots).rev().collect();
+
+        Ok(Self {
+            ptr: ptr.cast::<u8>(),
+            capacity,
+            slot_size,
+            num_slots,
+            inner: RefCell::new(ArenaInner {
+                free_list,
+                slots: Vec::new(),
+                index: HashMap::new(),
+                checkpoint_slots: HashMap::new(),
+            }),
+        })
+    }
+
+    pub fn slot_size(&self) -> usize {
+        self.slot_size
+    }
+
+    pub fn num_slots(&self) -> usize {
+        self.num_slots
+    }
+
+    pub fn available(&self) -> usize {
+        self.inner.borrow().free_list.len()
+    }
+
+    pub fn base_ptr(&self) -> (*mut u8, usize) {
+        (self.ptr, self.capacity)
+    }
+
+    pub fn alloc_slot(
+        &self,
+        checkpoint_id: &str,
+        layer_idx: u32,
+    ) -> anyhow::Result<(*mut u8, SlotHeader)> {
+        let mut inner = self.inner.borrow_mut();
+        let slot_idx = inner
+            .free_list
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint arena exhausted"))?;
+        let offset = slot_idx * self.slot_size;
+
+        let header = SlotHeader {
+            magic: SLOT_MAGIC,
+            dtype: DtypeTag::Float32,
+            ndim: 0,
+            shape: [0; 6],
+            byte_len: (self.slot_size - SLOT_HEADER_SIZE) as u64,
+        };
+
+        // SAFETY: offset is slot_idx * slot_size, both bounded by capacity.
+        // ptr was returned by mmap and is valid for capacity bytes.
+        let slot_ptr = unsafe { self.ptr.add(offset) };
+        let mut hdr_buf = [0u8; SLOT_HEADER_SIZE];
+        header.write_to(&mut hdr_buf);
+        // SAFETY: slot_ptr points to a valid slot within the mmap region.
+        unsafe {
+            std::ptr::copy_nonoverlapping(hdr_buf.as_ptr(), slot_ptr, SLOT_HEADER_SIZE);
+        }
+
+        let desc_idx = inner.slots.len();
+        inner.slots.push(SlotDescriptor {
+            offset,
+            checkpoint_id: checkpoint_id.to_owned(),
+            layer_idx,
+        });
+        inner
+            .index
+            .insert((checkpoint_id.to_owned(), layer_idx), desc_idx);
+        inner
+            .checkpoint_slots
+            .entry(checkpoint_id.to_owned())
+            .or_default()
+            .push(slot_idx);
+
+        Ok((slot_ptr, header))
+    }
+
+    pub fn get_slot(&self, checkpoint_id: &str, layer_idx: u32) -> Option<(*const u8, SlotHeader)> {
+        let inner = self.inner.borrow();
+        let &desc_idx = inner.index.get(&(checkpoint_id.to_owned(), layer_idx))?;
+        let desc = &inner.slots[desc_idx];
+        // SAFETY: desc.offset was computed from a valid slot index during alloc.
+        let slot_ptr = unsafe { self.ptr.add(desc.offset) };
+        let mut hdr_buf = [0u8; SLOT_HEADER_SIZE];
+        // SAFETY: slot_ptr is within the mmap region, SLOT_HEADER_SIZE fits in any slot.
+        unsafe {
+            std::ptr::copy_nonoverlapping(slot_ptr, hdr_buf.as_mut_ptr(), SLOT_HEADER_SIZE);
+        }
+        let header = SlotHeader::read_from(&hdr_buf);
+        Some((slot_ptr, header))
+    }
+
+    /// # Safety
+    ///
+    /// `slot_ptr` must point to a valid slot within this arena's mmap region.
+    #[allow(clippy::unused_self)]
+    pub unsafe fn update_header(&self, slot_ptr: *mut u8, header: &SlotHeader) {
+        let mut hdr_buf = [0u8; SLOT_HEADER_SIZE];
+        header.write_to(&mut hdr_buf);
+        // SAFETY: caller guarantees slot_ptr is within the arena.
+        unsafe {
+            std::ptr::copy_nonoverlapping(hdr_buf.as_ptr(), slot_ptr, SLOT_HEADER_SIZE);
+        }
+    }
+
+    pub fn free_checkpoint(&self, checkpoint_id: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(slot_indices) = inner.checkpoint_slots.remove(checkpoint_id) {
+            for &slot_idx in &slot_indices {
+                inner.free_list.push(slot_idx);
+            }
+        }
+        inner.index.retain(|k, _| k.0 != checkpoint_id);
+    }
+
+    pub fn snapshot(&self) -> ArenaSnapshot {
+        ArenaSnapshot {
+            free_count: self.inner.borrow().free_list.len(),
+        }
+    }
+
+    pub fn rollback(&self, snap: ArenaSnapshot, checkpoint_id: &str) {
+        self.free_checkpoint(checkpoint_id);
+        debug_assert!(self.inner.borrow().free_list.len() >= snap.free_count);
+    }
+
+    pub fn oldest_checkpoint(&self) -> Option<String> {
+        let inner = self.inner.borrow();
+        inner.checkpoint_slots.keys().next().cloned()
+    }
+
+    pub fn slot_info_for_checkpoint(&self, checkpoint_id: &str) -> Vec<(u32, usize, SlotHeader)> {
+        let inner = self.inner.borrow();
+        inner
+            .slots
+            .iter()
+            .filter(|d| d.checkpoint_id == checkpoint_id)
+            .map(|d| {
+                // SAFETY: d.offset was computed from a valid slot index during alloc.
+                let slot_ptr = unsafe { self.ptr.add(d.offset) };
+                let mut hdr_buf = [0u8; SLOT_HEADER_SIZE];
+                // SAFETY: slot_ptr is within the mmap region.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(slot_ptr, hdr_buf.as_mut_ptr(), SLOT_HEADER_SIZE);
+                }
+                let header = SlotHeader::read_from(&hdr_buf);
+                (d.layer_idx, d.offset, header)
+            })
+            .collect()
+    }
+}
+
+impl Drop for CheckpointArena {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.capacity > 0 {
+            // SAFETY: ptr and capacity were set in new() from a successful mmap call.
+            unsafe {
+                libc::munmap(self.ptr.cast(), self.capacity);
+            }
+        }
+    }
+}
+
 pub fn checkpoint_layers(num_layers: u32) -> Vec<u32> {
     if num_layers <= 1 {
         return Vec::new();
@@ -135,6 +371,97 @@ mod tests {
             assert_eq!(DtypeTag::from_u8(tag as u8), Some(tag));
         }
         assert_eq!(DtypeTag::from_u8(99), None);
+    }
+
+    #[test]
+    fn arena_new_and_available() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        assert_eq!(arena.available(), 4);
+        assert_eq!(arena.slot_size(), 128);
+        assert_eq!(arena.num_slots(), 4);
+    }
+
+    #[test]
+    fn arena_alloc_and_free() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        assert_eq!(arena.available(), 4);
+
+        let (ptr, _) = arena.alloc_slot("ckpt-1", 5).unwrap();
+        assert!(!ptr.is_null());
+        assert_eq!(arena.available(), 3);
+
+        let (ptr2, _) = arena.alloc_slot("ckpt-1", 10).unwrap();
+        assert!(!ptr2.is_null());
+        assert_eq!(arena.available(), 2);
+
+        arena.free_checkpoint("ckpt-1");
+        assert_eq!(arena.available(), 4);
+    }
+
+    #[test]
+    fn arena_alloc_exhaustion() {
+        let arena = CheckpointArena::new(128, 2).unwrap();
+        arena.alloc_slot("a", 0).unwrap();
+        arena.alloc_slot("a", 1).unwrap();
+        assert!(arena.alloc_slot("a", 2).is_err());
+    }
+
+    #[test]
+    fn arena_get_slot_returns_written_data() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        let (ptr, _) = arena.alloc_slot("ckpt-1", 5).unwrap();
+        // SAFETY: ptr points to a valid slot, writing 64 bytes after header is within slot_size.
+        unsafe {
+            let data_ptr = ptr.add(SLOT_HEADER_SIZE);
+            std::ptr::write_bytes(data_ptr, 0xAB, 64);
+        }
+        let (rptr, header) = arena.get_slot("ckpt-1", 5).unwrap();
+        assert_eq!(header.magic, SLOT_MAGIC);
+        // SAFETY: rptr points to a valid slot, reading after header is safe.
+        unsafe {
+            let data_ptr = rptr.add(SLOT_HEADER_SIZE);
+            assert_eq!(*data_ptr, 0xAB);
+        }
+    }
+
+    #[test]
+    fn arena_get_slot_missing_returns_none() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        assert!(arena.get_slot("nope", 0).is_none());
+    }
+
+    #[test]
+    fn arena_checkpoint_slots_tracks_ownership() {
+        let arena = CheckpointArena::new(128, 8).unwrap();
+        arena.alloc_slot("a", 0).unwrap();
+        arena.alloc_slot("a", 1).unwrap();
+        arena.alloc_slot("b", 0).unwrap();
+        assert_eq!(arena.available(), 5);
+
+        arena.free_checkpoint("a");
+        assert_eq!(arena.available(), 7);
+        assert!(arena.get_slot("a", 0).is_none());
+        assert!(arena.get_slot("b", 0).is_some());
+    }
+
+    #[test]
+    fn arena_transactional_rollback() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        let snap = arena.snapshot();
+        arena.alloc_slot("ckpt-1", 0).unwrap();
+        arena.alloc_slot("ckpt-1", 1).unwrap();
+        assert_eq!(arena.available(), 2);
+        arena.rollback(snap, "ckpt-1");
+        assert_eq!(arena.available(), 4);
+        assert!(arena.get_slot("ckpt-1", 0).is_none());
+    }
+
+    #[test]
+    fn arena_ptr_returns_base_address() {
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        let (ptr, len) = arena.base_ptr();
+        assert!(!ptr.is_null());
+        assert_eq!(len, 128 * 4);
     }
 
     #[test]
