@@ -109,7 +109,7 @@ def run_test() -> None:  # noqa: PLR0915
             data = resp["result"]["data"]
             assert data["path"] == bundle_path
             assert data["size_bytes"] > 0
-            assert data["artifact_count"] >= 2
+            assert data["artifact_count"] >= 8
             print(f"  {data['artifact_count']} artifacts, {data['size_bytes']} bytes")
             print("  PASS")
 
@@ -118,8 +118,18 @@ def run_test() -> None:  # noqa: PLR0915
             assert Path(bundle_path).is_file(), f"bundle file not found: {bundle_path}"
             with tarfile.open(bundle_path, "r:gz") as tar:
                 names = tar.getnames()
-                assert "manifest.json" in names, f"missing manifest.json in {names}"
-                assert "interventions.json" in names, f"missing interventions.json in {names}"
+
+                required = [
+                    "manifest.json",
+                    "interventions.json",
+                    "protocol-trace.jsonl",
+                    "env.json",
+                    "model-info.json",
+                    "prompt.json",
+                    "bookmarks.json",
+                ]
+                for artifact in required:
+                    assert artifact in names, f"missing {artifact} in {names}"
 
                 manifest_member = tar.getmember("manifest.json")
                 manifest_file = tar.extractfile(manifest_member)
@@ -130,6 +140,25 @@ def run_test() -> None:  # noqa: PLR0915
                 assert "protocol_version" in manifest
                 assert manifest["protocol_version"] == "0.1.0"
 
+                env_file = tar.extractfile(tar.getmember("env.json"))
+                assert env_file is not None
+                env_data = json.loads(env_file.read())
+                assert "torch_version" in env_data
+                assert "python_version" in env_data
+
+                model_file = tar.extractfile(tar.getmember("model-info.json"))
+                assert model_file is not None
+                model_data = json.loads(model_file.read())
+                assert "model_family" in model_data
+                assert "num_layers" in model_data
+                assert model_data["num_layers"] > 0
+
+                bookmarks_file = tar.extractfile(tar.getmember("bookmarks.json"))
+                assert bookmarks_file is not None
+                bookmarks_data = json.loads(bookmarks_file.read())
+                assert bookmarks_data == []
+
+            print(f"  {len(required)} required artifacts present")
             print("  PASS")
 
         finally:
