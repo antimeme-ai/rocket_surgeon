@@ -319,6 +319,218 @@ impl Drop for CheckpointArena {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NVMe spill / load
+// ---------------------------------------------------------------------------
+
+use std::io::{Read, Write};
+use std::path::Path;
+
+const SPILL_MAGIC: &[u8; 8] = b"CKPTSPIL";
+const SPILL_VERSION: u32 = 1;
+const SPILL_INDEX_ENTRY_SIZE: usize = 80;
+
+struct SpillIndexEntry {
+    layer_idx: u32,
+    dtype: DtypeTag,
+    ndim: u8,
+    shape: [u64; 6],
+    data_offset: u64,
+    data_len: u64,
+    crc32: u32,
+}
+
+impl SpillIndexEntry {
+    fn write_to(&self, buf: &mut [u8; SPILL_INDEX_ENTRY_SIZE]) {
+        buf[0..4].copy_from_slice(&self.layer_idx.to_le_bytes());
+        buf[4] = self.dtype as u8;
+        buf[5] = self.ndim;
+        buf[6..8].copy_from_slice(&[0u8; 2]);
+        for (i, &dim) in self.shape.iter().enumerate() {
+            let off = 8 + i * 8;
+            buf[off..off + 8].copy_from_slice(&dim.to_le_bytes());
+        }
+        buf[56..64].copy_from_slice(&self.data_offset.to_le_bytes());
+        buf[64..72].copy_from_slice(&self.data_len.to_le_bytes());
+        buf[72..76].copy_from_slice(&self.crc32.to_le_bytes());
+        buf[76..80].copy_from_slice(&[0u8; 4]);
+    }
+
+    fn read_from(buf: &[u8; SPILL_INDEX_ENTRY_SIZE]) -> Self {
+        let layer_idx = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let dtype = DtypeTag::from_u8(buf[4]).unwrap_or(DtypeTag::Float32);
+        let ndim = buf[5];
+        let mut shape = [0u64; 6];
+        for (i, dim) in shape.iter_mut().enumerate() {
+            let off = 8 + i * 8;
+            *dim = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        }
+        let data_offset = u64::from_le_bytes(buf[56..64].try_into().unwrap());
+        let data_len = u64::from_le_bytes(buf[64..72].try_into().unwrap());
+        let crc32 = u32::from_le_bytes(buf[72..76].try_into().unwrap());
+        Self {
+            layer_idx,
+            dtype,
+            ndim,
+            shape,
+            data_offset,
+            data_len,
+            crc32,
+        }
+    }
+}
+
+pub fn spill_checkpoint(
+    arena: &CheckpointArena,
+    checkpoint_id: &str,
+    dir: &Path,
+) -> anyhow::Result<String> {
+    let slot_infos = arena.slot_info_for_checkpoint(checkpoint_id);
+    if slot_infos.is_empty() {
+        anyhow::bail!("checkpoint {checkpoint_id} not found in arena");
+    }
+
+    let header_size = 8 + 4 + 4 + slot_infos.len() * SPILL_INDEX_ENTRY_SIZE;
+    let mut data_offset = align_up(header_size, 64) as u64;
+    let mut index_entries = Vec::with_capacity(slot_infos.len());
+    let mut slot_data: Vec<Vec<u8>> = Vec::new();
+
+    for &(layer_idx, offset, ref hdr) in &slot_infos {
+        let data_len = hdr
+            .byte_len
+            .min((arena.slot_size - SLOT_HEADER_SIZE) as u64);
+        let mut data = vec![0u8; data_len as usize];
+        // SAFETY: offset is a valid slot offset within the arena mmap region.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                arena.ptr.add(offset + SLOT_HEADER_SIZE),
+                data.as_mut_ptr(),
+                data_len as usize,
+            );
+        }
+        let crc = crc32fast::hash(&data);
+        index_entries.push(SpillIndexEntry {
+            layer_idx,
+            dtype: hdr.dtype,
+            ndim: hdr.ndim,
+            shape: hdr.shape,
+            data_offset,
+            data_len,
+            crc32: crc,
+        });
+        slot_data.push(data);
+        data_offset += align_up(data_len as usize, 64) as u64;
+    }
+
+    let path = dir.join(format!("{checkpoint_id}.ckpt"));
+    let mut file = std::fs::File::create(&path)?;
+
+    file.write_all(SPILL_MAGIC)?;
+    file.write_all(&SPILL_VERSION.to_le_bytes())?;
+    file.write_all(&(index_entries.len() as u32).to_le_bytes())?;
+
+    for entry in &index_entries {
+        let mut buf = [0u8; SPILL_INDEX_ENTRY_SIZE];
+        entry.write_to(&mut buf);
+        file.write_all(&buf)?;
+    }
+
+    let current_pos = 8 + 4 + 4 + index_entries.len() * SPILL_INDEX_ENTRY_SIZE;
+    let padding = align_up(current_pos, 64) - current_pos;
+    if padding > 0 {
+        file.write_all(&vec![0u8; padding])?;
+    }
+
+    for data in &slot_data {
+        file.write_all(data)?;
+        let pad = align_up(data.len(), 64) - data.len();
+        if pad > 0 {
+            file.write_all(&vec![0u8; pad])?;
+        }
+    }
+
+    file.flush()?;
+    arena.free_checkpoint(checkpoint_id);
+
+    Ok(checkpoint_id.to_owned())
+}
+
+pub fn load_spilled_checkpoint(
+    arena: &CheckpointArena,
+    path: &Path,
+    checkpoint_id: &str,
+) -> anyhow::Result<()> {
+    let mut file = std::fs::File::open(path)?;
+
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)?;
+    if &magic != SPILL_MAGIC {
+        anyhow::bail!("invalid spill file magic");
+    }
+
+    let mut version_buf = [0u8; 4];
+    file.read_exact(&mut version_buf)?;
+    let version = u32::from_le_bytes(version_buf);
+    if version != SPILL_VERSION {
+        anyhow::bail!("unsupported spill version {version}");
+    }
+
+    let mut count_buf = [0u8; 4];
+    file.read_exact(&mut count_buf)?;
+    let num_slots = u32::from_le_bytes(count_buf) as usize;
+
+    let mut entries = Vec::with_capacity(num_slots);
+    for _ in 0..num_slots {
+        let mut buf = [0u8; SPILL_INDEX_ENTRY_SIZE];
+        file.read_exact(&mut buf)?;
+        entries.push(SpillIndexEntry::read_from(&buf));
+    }
+
+    let file_bytes = std::fs::read(path)?;
+
+    for entry in &entries {
+        let start = entry.data_offset as usize;
+        let end = start + entry.data_len as usize;
+        if end > file_bytes.len() {
+            anyhow::bail!(
+                "spill file truncated: need {} bytes, got {}",
+                end,
+                file_bytes.len()
+            );
+        }
+        let data = &file_bytes[start..end];
+        let actual_crc = crc32fast::hash(data);
+        if actual_crc != entry.crc32 {
+            anyhow::bail!(
+                "CRC32 mismatch for layer {}: expected {:#010x}, got {:#010x}",
+                entry.layer_idx,
+                entry.crc32,
+                actual_crc
+            );
+        }
+
+        let (slot_ptr, _) = arena.alloc_slot(checkpoint_id, entry.layer_idx)?;
+        let header = SlotHeader {
+            magic: SLOT_MAGIC,
+            dtype: entry.dtype,
+            ndim: entry.ndim,
+            shape: entry.shape,
+            byte_len: entry.data_len,
+        };
+        // SAFETY: slot_ptr was just returned by alloc_slot and is valid.
+        unsafe {
+            arena.update_header(slot_ptr, &header);
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                slot_ptr.add(SLOT_HEADER_SIZE),
+                data.len(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub fn checkpoint_layers(num_layers: u32) -> Vec<u32> {
     if num_layers <= 1 {
         return Vec::new();
@@ -462,6 +674,113 @@ mod tests {
         let (ptr, len) = arena.base_ptr();
         assert!(!ptr.is_null());
         assert_eq!(len, 128 * 4);
+    }
+
+    #[test]
+    fn spill_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("rs-ckpt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let arena = CheckpointArena::new(128, 8).unwrap();
+
+        let (ptr0, _) = arena.alloc_slot("ckpt-1", 5).unwrap();
+        // SAFETY: ptr0 is valid, writing 64 bytes after header within slot_size.
+        unsafe {
+            std::ptr::write_bytes(ptr0.add(SLOT_HEADER_SIZE), 0xAA, 64);
+            arena.update_header(
+                ptr0,
+                &SlotHeader {
+                    magic: SLOT_MAGIC,
+                    dtype: DtypeTag::Float16,
+                    ndim: 2,
+                    shape: [1, 64, 0, 0, 0, 0],
+                    byte_len: 64,
+                },
+            );
+        }
+
+        let (ptr1, _) = arena.alloc_slot("ckpt-1", 10).unwrap();
+        // SAFETY: ptr1 is valid, same reasoning.
+        unsafe {
+            std::ptr::write_bytes(ptr1.add(SLOT_HEADER_SIZE), 0xBB, 64);
+            arena.update_header(
+                ptr1,
+                &SlotHeader {
+                    magic: SLOT_MAGIC,
+                    dtype: DtypeTag::Bfloat16,
+                    ndim: 3,
+                    shape: [1, 8, 8, 0, 0, 0],
+                    byte_len: 64,
+                },
+            );
+        }
+
+        assert_eq!(arena.available(), 6);
+
+        let spill_id = spill_checkpoint(&arena, "ckpt-1", &dir).unwrap();
+        assert_eq!(spill_id, "ckpt-1");
+        assert_eq!(arena.available(), 8);
+
+        let path = dir.join("ckpt-1.ckpt");
+        assert!(path.exists());
+
+        load_spilled_checkpoint(&arena, &path, "ckpt-1-restored").unwrap();
+        assert_eq!(arena.available(), 6);
+
+        let (rptr0, hdr0) = arena.get_slot("ckpt-1-restored", 5).unwrap();
+        assert_eq!(hdr0.dtype, DtypeTag::Float16);
+        assert_eq!(hdr0.ndim, 2);
+        // SAFETY: rptr0 is a valid slot pointer.
+        unsafe {
+            assert_eq!(*rptr0.add(SLOT_HEADER_SIZE), 0xAA);
+        }
+
+        let (rptr1, hdr1) = arena.get_slot("ckpt-1-restored", 10).unwrap();
+        assert_eq!(hdr1.dtype, DtypeTag::Bfloat16);
+        assert_eq!(hdr1.ndim, 3);
+        // SAFETY: rptr1 is a valid slot pointer.
+        unsafe {
+            assert_eq!(*rptr1.add(SLOT_HEADER_SIZE), 0xBB);
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn spill_file_detects_corruption() {
+        let dir = std::env::temp_dir().join(format!("rs-ckpt-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let arena = CheckpointArena::new(128, 4).unwrap();
+        let (ptr, _) = arena.alloc_slot("bad", 0).unwrap();
+        // SAFETY: ptr is valid.
+        unsafe {
+            std::ptr::write_bytes(ptr.add(SLOT_HEADER_SIZE), 0xFF, 64);
+            arena.update_header(
+                ptr,
+                &SlotHeader {
+                    magic: SLOT_MAGIC,
+                    dtype: DtypeTag::Float32,
+                    ndim: 1,
+                    shape: [16, 0, 0, 0, 0, 0],
+                    byte_len: 64,
+                },
+            );
+        }
+
+        spill_checkpoint(&arena, "bad", &dir).unwrap();
+
+        let path = dir.join("bad.ckpt");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let result = load_spilled_checkpoint(&arena, &path, "bad-restored");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("CRC32"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
