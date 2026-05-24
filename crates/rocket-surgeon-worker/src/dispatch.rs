@@ -392,7 +392,12 @@ fn evaluate_probes(
     (events, truncated)
 }
 
-fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> anyhow::Result<()> {
+fn ensure_forward_pass(
+    py: Python<'_>,
+    state: &mut WorkerState,
+    handle: u64,
+    input_ids: Option<&[u64]>,
+) -> anyhow::Result<()> {
     if state.forward_pass.is_some() {
         return Ok(());
     }
@@ -442,7 +447,7 @@ fn ensure_forward_pass(py: Python<'_>, state: &mut WorkerState, handle: u64) -> 
         },
     )?;
 
-    bridge::run_forward(py, handle, done_callback.as_any())?;
+    bridge::run_forward(py, handle, input_ids, done_callback.as_any())?;
 
     state.forward_pass = Some(ForwardPassState {
         result_mailbox: result_mb,
@@ -564,7 +569,7 @@ fn run_step_loop(
     let plan = step_driver::plan_step(req.count, req.granularity);
     let resuming = state.forward_pass.is_some();
 
-    ensure_forward_pass(py, state, handle)?;
+    ensure_forward_pass(py, state, handle, req.input_ids.as_deref())?;
 
     let fwd = state
         .forward_pass

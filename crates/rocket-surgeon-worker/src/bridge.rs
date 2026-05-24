@@ -332,15 +332,24 @@ pub fn install_capture_hooks<'py>(
 pub fn run_forward(
     py: Python<'_>,
     handle: u64,
+    input_ids: Option<&[u64]>,
     done_callback: &Bound<'_, pyo3::PyAny>,
 ) -> anyhow::Result<()> {
     let bridge = py.import("rocket_surgeon.bridge")?;
     let torch = py.import("torch")?;
-    let zeros = torch.getattr("zeros")?.call1(((1, 2),))?;
-    let input_ids = zeros.call_method1("to", (torch.getattr("long")?,))?;
+
+    let py_input = if let Some(ids) = input_ids {
+        let py_list = PyList::new(py, ids.iter().map(|&id| id as i64))?;
+        let tensor = torch.getattr("tensor")?.call1((vec![py_list],))?;
+        tensor.call_method1("to", (torch.getattr("long")?,))?
+    } else {
+        let zeros = torch.getattr("zeros")?.call1(((1, 2),))?;
+        zeros.call_method1("to", (torch.getattr("long")?,))?
+    };
+
     bridge
         .getattr("run_forward")?
-        .call1((handle, input_ids, done_callback))?;
+        .call1((handle, py_input, done_callback))?;
     Ok(())
 }
 
