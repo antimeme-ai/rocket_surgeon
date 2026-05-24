@@ -1031,6 +1031,35 @@ fn step_request_roundtrip() {
 }
 
 #[test]
+fn step_request_with_tokens_roundtrip() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 1,
+        granularity: None,
+        envelope: EnvelopeMode::default(),
+        run_to: None,
+        tokens: Some(vec![50256, 464, 3797, 318]),
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("tokens").is_some());
+    roundtrip(&req);
+}
+
+#[test]
+fn step_request_without_tokens_omits_field() {
+    let req = StepRequest {
+        direction: StepDirection::Forward,
+        count: 1,
+        granularity: None,
+        envelope: EnvelopeMode::default(),
+        run_to: None,
+        tokens: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("tokens").is_none());
+}
+
+#[test]
 fn step_response_roundtrip() {
     let resp = StepResponse {
         ticks_executed: 5,

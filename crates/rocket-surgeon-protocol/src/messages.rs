@@ -1331,6 +1331,40 @@ mod tests {
     }
 
     #[test]
+    fn host_step_request_with_input_ids_round_trip() {
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+            granularity: None,
+            max_events: None,
+            interventions: vec![],
+            input_ids: Some(vec![50256, 464, 3797, 318]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert!(json.contains("input_ids"));
+    }
+
+    #[test]
+    fn host_step_request_without_input_ids_omits_field() {
+        let req = HostStepRequest {
+            model_handle: 1,
+            count: 1,
+            direction: StepDirection::Forward,
+            granularity: None,
+            max_events: None,
+            interventions: vec![],
+            input_ids: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("input_ids"));
+        let parsed: HostStepRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.input_ids, None);
+    }
+
+    #[test]
     fn internal_inspect_constant() {
         assert_eq!(internal::HOST_INSPECT, "_host/inspect");
     }
