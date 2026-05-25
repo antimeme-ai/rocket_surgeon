@@ -20,10 +20,10 @@ def test_different_tensors_reports_divergence():
 
 
 def test_slightly_perturbed_within_tolerance():
-    a = torch.randn(32, 128)
+    a = torch.ones(32, 128) + torch.randn(32, 128) * 0.1
     noise = torch.randn_like(a) * 1e-5
     b = a + noise
-    result = compare_activations(a, b, cosine_threshold=0.999, mre_threshold=0.05)
+    result = compare_activations(a, b, cosine_threshold=0.999, mre_threshold=0.01)
     assert result is None
 
 
