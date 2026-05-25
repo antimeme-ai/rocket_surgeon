@@ -11,7 +11,7 @@ use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
     ActionName, Capabilities, CheckpointRef, CheckpointTier, EnvelopeMode, InterventionRecipe,
     Phase, PositionEnvelope, ResponseEnvelope, SessionState, Status, StepDirection, TensorSummary,
-    TickEvent, WorldlineState,
+    TickEvent, WorldlineSegment, WorldlineState,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -857,10 +857,6 @@ impl Session {
     ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/step")?;
 
-        if req.direction == rocket_surgeon_protocol::types::StepDirection::Backward {
-            return Err(self.capability_not_supported_error("supports_reverse_step"));
-        }
-
         self.state.tick_id = Some(host_position.tick_id);
         self.state.position = Some(host_position.clone());
         self.update_available_actions();
@@ -1086,6 +1082,32 @@ impl Session {
 
     pub fn auto_checkpoint_layers(&self) -> &[u32] {
         &self.auto_checkpoint_layers
+    }
+
+    #[allow(dead_code)]
+    pub fn worldline(&self) -> &WorldlineState {
+        &self.state.worldline
+    }
+
+    pub fn advance_worldline_segment(&mut self, branch_tick: u64) {
+        let new_id = self.state.worldline.segments.len() as u32;
+        self.state.worldline.segments.push(WorldlineSegment {
+            id: new_id,
+            parent_segment: Some(self.state.worldline.current_segment),
+            branch_tick: Some(branch_tick),
+            tick_range: (0, 0),
+        });
+        self.state.worldline.current_segment = new_id;
+    }
+
+    pub fn find_checkpoint_before(&self, target_tick: u64) -> Option<&str> {
+        let mut best: Option<(&str, u64)> = None;
+        for (id, pos) in &self.checkpoint_positions {
+            if pos.tick_id < target_tick && (best.is_none() || pos.tick_id > best.unwrap().1) {
+                best = Some((id.as_str(), pos.tick_id));
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// `rocket/replay` — re-execute the forward pass from a checkpoint
@@ -1730,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn step_backward_returns_capability_not_supported() {
+    fn step_backward_succeeds_with_host_position() {
         let mut session = stopped_session();
         let req = StepRequest {
             direction: StepDirection::Backward,
@@ -1752,11 +1774,8 @@ mod tests {
             token_position: None,
             clock: None,
         };
-        let err = session.step(&req, &pos, false, vec![]).unwrap_err();
-        assert_eq!(
-            err.error_data().error_code,
-            ErrorCode::CapabilityNotSupported
-        );
+        let result = session.step(&req, &pos, false, vec![]);
+        assert!(result.is_ok());
     }
 
     #[test]

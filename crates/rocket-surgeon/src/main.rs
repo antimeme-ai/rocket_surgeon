@@ -211,6 +211,43 @@ fn try_orchestrator_replay(
     }
 }
 
+fn try_backward_step(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    session: &mut Session,
+    model_handle: Option<u64>,
+) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
+    let target_tick = session.state().tick_id.unwrap_or(0).saturating_sub(1);
+    let ckpt_id = session.find_checkpoint_before(target_tick + 1)?.to_owned();
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+
+    let host_req = HostReplayRequest {
+        model_handle: mh,
+        checkpoint_id: ckpt_id,
+        stop_at: None,
+        interventions: session.interventions().to_vec(),
+        verify: false,
+        deterministic: false,
+        cosine_threshold: 0.999,
+        mre_threshold: 0.05,
+    };
+    match orch.replay(&host_req) {
+        Ok(hr) => {
+            session.advance_worldline_segment(target_tick);
+            Some(rocket_surgeon_protocol::messages::HostStepResponse {
+                position: hr.stopped_at,
+                forward_complete: false,
+                fired_interventions: Vec::new(),
+                events: Vec::new(),
+                events_truncated: false,
+            })
+        }
+        Err(e) => {
+            warn!("backward step replay failed: {e}");
+            None
+        }
+    }
+}
+
 /// Try to inspect via the orchestrator.
 /// Returns the `HostInspectResponse` on success, a forwarded error `Response` if
 /// the orchestrator returned an RPC error, or `None` if no orchestrator is available.
@@ -739,13 +776,25 @@ fn main() {
                 ),
             }
         } else if request.method == method::STEP {
-            step_host_response = try_orchestrator_step(
-                &mut orchestrator,
-                model_handle,
-                &request,
-                &granularity_scopes,
-                session.interventions(),
-            );
+            let is_backward = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("direction"))
+                .and_then(|d| d.as_str())
+                == Some("backward");
+
+            if is_backward {
+                step_host_response =
+                    try_backward_step(&mut orchestrator, &mut session, model_handle);
+            } else {
+                step_host_response = try_orchestrator_step(
+                    &mut orchestrator,
+                    model_handle,
+                    &request,
+                    &granularity_scopes,
+                    session.interventions(),
+                );
+            }
             handle_step(&mut session, &request, step_host_response.as_ref())
         } else if request.method == method::INSPECT {
             match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {

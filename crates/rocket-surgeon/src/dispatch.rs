@@ -1591,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_step_backward_returns_capability_error() {
+    fn dispatch_step_backward_succeeds_without_orchestrator() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
         test_attach_dispatch(&mut session);
@@ -1605,7 +1605,7 @@ mod tests {
             }),
         );
         let resp = dispatch(&mut session, &req);
-        assert!(resp.error.is_some());
+        assert!(resp.error.is_none());
     }
 
     #[test]
