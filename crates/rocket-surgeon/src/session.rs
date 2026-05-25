@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rocket_surgeon_protocol::errors::{ErrorCode, ErrorData, Severity};
 use rocket_surgeon_protocol::messages::{
     AttachRequest, AttachResponse, CheckpointResponse, CreateCheckpointTier, DetachResponse,
-    DiscoverMatch, DiscoverResponse, Divergence, InitializeRequest, InitializeResponse,
+    DiscoverMatch, DiscoverResponse, HostReplayResponse, InitializeRequest, InitializeResponse,
     InspectResponse, MemoryUsage, ReplayRequest, ReplayResponse, StatusResponse, StepRequest,
     StepResponse, SubscribeFilter, ViewDefineResponse,
 };
@@ -1101,7 +1101,11 @@ impl Session {
     ///
     /// Honours `req.envelope`, so the return type is [`serde_json::Value`] —
     /// mirrors [`Self::step`].
-    pub fn replay(&mut self, req: &ReplayRequest) -> Result<serde_json::Value, SessionError> {
+    pub fn replay(
+        &mut self,
+        req: &ReplayRequest,
+        host_response: Option<&HostReplayResponse>,
+    ) -> Result<serde_json::Value, SessionError> {
         self.require_stopped("rocket/replay")?;
 
         let Some(cref) = self
@@ -1113,66 +1117,71 @@ impl Session {
             return Err(self.checkpoint_not_found_error(&req.from_checkpoint));
         };
 
-        // Origin: the full position captured at checkpoint create, with the
-        // same forward-only fallback `checkpoint_restore` uses for bookmarks.
-        let origin = self
-            .checkpoint_positions
-            .get(&req.from_checkpoint)
-            .cloned()
-            .unwrap_or_else(|| TickPosition {
-                tick_id: cref.tick_id,
+        let (ticks_replayed, stopped_at, divergences, verified) = if let Some(hr) = host_response {
+            (
+                hr.ticks_replayed,
+                hr.stopped_at.clone(),
+                hr.divergences.clone(),
+                hr.verified,
+            )
+        } else {
+            // Fallback: metadata-only replay (no orchestrator)
+            let origin = self
+                .checkpoint_positions
+                .get(&req.from_checkpoint)
+                .cloned()
+                .unwrap_or_else(|| TickPosition {
+                    tick_id: cref.tick_id,
+                    direction: StepDirection::Forward,
+                    rank: None,
+                    layer: cref.layer_idx,
+                    component: String::new(),
+                    event: TickEvent::Output,
+                    replay_of: None,
+                    phase: Phase::default(),
+                    token_position: None,
+                    clock: None,
+                });
+
+            let current_tick = self.state.tick_id.unwrap_or(origin.tick_id);
+            let current = self.state.position.clone();
+            let ticks = current_tick.saturating_sub(origin.tick_id).max(1);
+
+            let sa = TickPosition {
+                tick_id: current_tick + ticks,
                 direction: StepDirection::Forward,
-                rank: None,
-                layer: cref.layer_idx,
-                component: String::new(),
+                rank: current.as_ref().and_then(|p| p.rank),
+                layer: req.stop_at.as_ref().map_or_else(
+                    || current.as_ref().map_or(origin.layer, |p| p.layer),
+                    |s| s.layer,
+                ),
+                component: req.stop_at.as_ref().map_or_else(
+                    || {
+                        current
+                            .as_ref()
+                            .map_or(String::new(), |p| p.component.clone())
+                    },
+                    |s| s.component.clone(),
+                ),
                 event: TickEvent::Output,
-                replay_of: None,
-                phase: Phase::default(),
-                token_position: None,
-                clock: None,
-            });
-
-        // The original run's endpoint — what this replay re-derives.
-        let current_tick = self.state.tick_id.unwrap_or(origin.tick_id);
-        let current = self.state.position.clone();
-        let ticks_replayed = current_tick.saturating_sub(origin.tick_id).max(1);
-
-        let stopped_at = TickPosition {
-            // Fresh, monotonic tick beyond the original run.
-            tick_id: current_tick + ticks_replayed,
-            direction: StepDirection::Forward,
-            rank: current.as_ref().and_then(|p| p.rank),
-            layer: req.stop_at.as_ref().map_or_else(
-                || current.as_ref().map_or(origin.layer, |p| p.layer),
-                |s| s.layer,
-            ),
-            component: req.stop_at.as_ref().map_or_else(
-                || {
-                    current
-                        .as_ref()
-                        .map_or(String::new(), |p| p.component.clone())
-                },
-                |s| s.component.clone(),
-            ),
-            event: TickEvent::Output,
-            // The original tick this replay corresponds to.
-            replay_of: Some(current_tick),
-            phase: current.as_ref().map_or_else(Phase::default, |p| p.phase),
-            token_position: current.as_ref().and_then(|p| p.token_position),
-            clock: current.as_ref().and_then(|p| p.clock),
+                replay_of: Some(current_tick),
+                phase: current.as_ref().map_or_else(Phase::default, |p| p.phase),
+                token_position: current.as_ref().and_then(|p| p.token_position),
+                clock: current.as_ref().and_then(|p| p.clock),
+            };
+            let t = u32::try_from(ticks).unwrap_or(u32::MAX);
+            (t, sa, Vec::new(), true)
         };
 
         self.state.tick_id = Some(stopped_at.tick_id);
         self.state.position = Some(stopped_at.clone());
+        self.update_available_actions();
 
-        // Tier 1 re-derives no activations, so nothing can diverge;
-        // `verified` <=> no divergences.
-        let divergences: Vec<Divergence> = Vec::new();
         let data = ReplayResponse {
-            ticks_replayed: u32::try_from(ticks_replayed).unwrap_or(u32::MAX),
+            ticks_replayed,
             stopped_at,
-            verified: divergences.is_empty(),
             divergences,
+            verified,
         };
         Ok(self.envelope_with_mode(req.envelope, data))
     }
@@ -2362,7 +2371,7 @@ mod tests {
     #[test]
     fn replay_from_checkpoint_returns_ticks_and_stopped_at() {
         let (mut session, id) = session_with_checkpoint();
-        let value = session.replay(&replay_req(&id, None)).unwrap();
+        let value = session.replay(&replay_req(&id, None), None).unwrap();
         assert!(value["data"]["ticks_replayed"].as_u64().unwrap() > 0);
         assert!(value["data"]["stopped_at"]["tick_id"].is_number());
     }
@@ -2370,7 +2379,7 @@ mod tests {
     #[test]
     fn replay_mints_fresh_tick_with_replay_of() {
         let (mut session, id) = session_with_checkpoint();
-        let value = session.replay(&replay_req(&id, None)).unwrap();
+        let value = session.replay(&replay_req(&id, None), None).unwrap();
         let stopped = &value["data"]["stopped_at"];
         assert!(
             stopped["tick_id"].as_u64().unwrap() > 10,
@@ -2390,7 +2399,7 @@ mod tests {
             layer: 5,
             component: "attn.o_proj".to_owned(),
         };
-        let value = session.replay(&replay_req(&id, Some(stop))).unwrap();
+        let value = session.replay(&replay_req(&id, Some(stop)), None).unwrap();
         assert_eq!(value["data"]["stopped_at"]["layer"], 5);
         assert_eq!(value["data"]["stopped_at"]["component"], "attn.o_proj");
     }
@@ -2398,7 +2407,7 @@ mod tests {
     #[test]
     fn replay_verify_returns_verified_and_divergences() {
         let (mut session, id) = session_with_checkpoint();
-        let value = session.replay(&replay_req(&id, None)).unwrap();
+        let value = session.replay(&replay_req(&id, None), None).unwrap();
         assert!(value["data"]["verified"].is_boolean());
         assert!(value["data"]["divergences"].is_array());
     }
@@ -2407,7 +2416,7 @@ mod tests {
     fn replay_from_missing_checkpoint_returns_not_found() {
         let (mut session, _id) = session_with_checkpoint();
         let err = session
-            .replay(&replay_req("nonexistent", None))
+            .replay(&replay_req("nonexistent", None), None)
             .unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::CheckpointNotFound);
     }
@@ -2416,7 +2425,7 @@ mod tests {
     fn replay_without_stop_at_uses_current_position() {
         let (mut session, id) = session_with_checkpoint();
         let current = session.state().position.clone().unwrap();
-        let value = session.replay(&replay_req(&id, None)).unwrap();
+        let value = session.replay(&replay_req(&id, None), None).unwrap();
         let stopped = &value["data"]["stopped_at"];
         // No stop_at: the replay re-lands at the original run's position.
         assert_eq!(stopped["layer"].as_u64().unwrap(), u64::from(current.layer));
@@ -2436,14 +2445,14 @@ mod tests {
             .unwrap()
             .checkpoint_id
             .unwrap();
-        let value = session.replay(&replay_req(&id, None)).unwrap();
+        let value = session.replay(&replay_req(&id, None), None).unwrap();
         assert_eq!(value["data"]["ticks_replayed"].as_u64().unwrap(), 1);
     }
 
     #[test]
     fn replay_when_not_stopped_returns_error() {
         let mut session = initialized_session();
-        let err = session.replay(&replay_req("any", None)).unwrap_err();
+        let err = session.replay(&replay_req("any", None), None).unwrap_err();
         assert_eq!(err.error_data().error_code, ErrorCode::ModelNotAttached);
     }
 }

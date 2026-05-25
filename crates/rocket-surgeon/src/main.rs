@@ -19,7 +19,8 @@ use tracing::{error, info, warn};
 
 use crate::dispatch::{
     dispatch, handle_attach, handle_checkpoint, handle_export, handle_inspect, handle_kv_intervene,
-    handle_kv_read, handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    handle_kv_read, handle_probe, handle_replay, handle_step, handle_subscribe, handle_unsubscribe,
+    handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -31,8 +32,9 @@ use crate::trace_log::{Direction, TraceLog};
 use rocket_surgeon_probes::registry::ProbeRegistry;
 use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, ProbeRequest, TickHeartbeatEvent,
-    TickStoppedEvent, event, method,
+    AttachRequest, HostAttachRequest, HostReplayRequest, HostReplayResponse,
+    HostUpdateProbesRequest, ProbeRequest, ReplayRequest, TickHeartbeatEvent, TickStoppedEvent,
+    event, method,
 };
 use rocket_surgeon_protocol::types::GranularityScope;
 
@@ -174,6 +176,36 @@ fn try_orchestrator_step(
         Ok(hr) => Some(hr),
         Err(e) => {
             warn!("orchestrator step failed: {e}");
+            None
+        }
+    }
+}
+
+fn try_orchestrator_replay(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Option<HostReplayResponse> {
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+    let req: ReplayRequest = request
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p.clone()).ok())?;
+
+    let host_req = HostReplayRequest {
+        model_handle: mh,
+        checkpoint_id: req.from_checkpoint.clone(),
+        stop_at: req.stop_at.clone(),
+        interventions: req.interventions.clone().unwrap_or_default(),
+        verify: req.verify,
+        deterministic: req.deterministic.unwrap_or(false),
+        cosine_threshold: req.cosine_threshold.unwrap_or(0.999),
+        mre_threshold: req.mre_threshold.unwrap_or(0.05),
+    };
+    match orch.replay(&host_req) {
+        Ok(resp) => Some(resp),
+        Err(e) => {
+            warn!("orchestrator replay failed: {e}");
             None
         }
     }
@@ -779,6 +811,9 @@ fn main() {
             )
         } else if request.method == method::CHECKPOINT {
             handle_checkpoint(&mut session, &request, &mut orchestrator, model_handle)
+        } else if request.method == method::REPLAY {
+            let host_resp = try_orchestrator_replay(&mut orchestrator, model_handle, &request);
+            handle_replay(&mut session, &request, host_resp.as_ref())
         } else {
             dispatch(&mut session, &request)
         };

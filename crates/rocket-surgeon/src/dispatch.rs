@@ -5,10 +5,10 @@ use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Res
 use rocket_surgeon_protocol::messages::{
     AttachRequest, CheckpointRequest, CreateCheckpointTier, DiscoverRequest, EventType,
     ExportRequest, ExportResponse, HostAttachResponse, HostCheckpointRequest, HostExportEnvRequest,
-    HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
-    InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
-    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest, StepRequest,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    HostKvInterveneResponse, HostKvReadResponse, HostReplayResponse, HostViewResponse,
+    InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest,
+    KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest,
+    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
     ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
@@ -276,7 +276,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::KV_READ => handle_kv_read(session, request, None),
         method::KV_INTERVENE => handle_kv_intervene(session, request, None),
         method::INTERVENE => handle_intervene(session, request),
-        method::REPLAY => handle_replay(session, request),
+        method::REPLAY => handle_replay(session, request, None),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -1062,16 +1062,17 @@ pub fn handle_view_define(session: &mut Session, request: &Request) -> Response 
 /// (BEAD-0018, TCK `replay.feature`).
 ///
 /// Daemon orchestration tier: delegates to [`Session::replay`], which
-/// validates the checkpoint and synthesizes the replay result (honouring
-/// `stop_at` and the response `envelope`). Worker re-execution, intervention
-/// application, and divergence detection are a later tier.
-pub fn handle_replay(session: &mut Session, request: &Request) -> Response {
+pub fn handle_replay(
+    session: &mut Session,
+    request: &Request,
+    host_response: Option<&HostReplayResponse>,
+) -> Response {
     let req: ReplayRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
-    match session.replay(&req) {
+    match session.replay(&req, host_response) {
         Ok(value) => serialize_envelope(request.id.clone(), value),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }

@@ -5,8 +5,9 @@ use rocket_surgeon_protocol::jsonrpc::{Request, RequestId, Response};
 use rocket_surgeon_protocol::messages::{
     HostAttachRequest, HostAttachResponse, HostCheckpointRequest, HostCheckpointResponse,
     HostDetachRequest, HostExportEnvRequest, HostExportEnvResponse, HostInspectRequest,
-    HostKvInterveneRequest, HostKvReadRequest, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, internal,
+    HostKvInterveneRequest, HostKvReadRequest, HostReplayRequest, HostReplayResponse,
+    HostStepRequest, HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse,
+    HostViewRequest, internal,
 };
 use rocket_surgeon_transport::framing::{read_message, write_message};
 use tracing::{debug, warn};
@@ -241,6 +242,29 @@ impl OrchestratorHandle {
             .result
             .ok_or_else(|| anyhow::anyhow!("orchestrator checkpoint: missing result"))?;
         let resp: HostCheckpointResponse = serde_json::from_value(result)?;
+        Ok(resp)
+    }
+
+    pub fn replay(&mut self, req: &HostReplayRequest) -> anyhow::Result<HostReplayResponse> {
+        let id = self.next_id();
+        let params = serde_json::to_value(req)?;
+        let request = Request::new(RequestId::Number(id), internal::HOST_REPLAY, params);
+
+        self.send(&request)?;
+        let response = self.recv()?;
+
+        if let Some(err) = response.error {
+            anyhow::bail!(
+                "orchestrator replay failed (code {}): {}",
+                err.code,
+                err.message
+            );
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("orchestrator replay: missing result"))?;
+        let resp: HostReplayResponse = serde_json::from_value(result)?;
         Ok(resp)
     }
 
