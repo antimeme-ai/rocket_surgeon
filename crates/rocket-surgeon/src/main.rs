@@ -18,9 +18,9 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_checkpoint, handle_export, handle_inspect, handle_kv_intervene,
-    handle_kv_read, handle_probe, handle_replay, handle_step, handle_subscribe, handle_unsubscribe,
-    handle_view,
+    dispatch, error_with_hint, handle_attach, handle_checkpoint, handle_export, handle_inspect,
+    handle_kv_intervene, handle_kv_read, handle_probe, handle_replay, handle_step,
+    handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -806,6 +806,17 @@ fn main() {
             if is_backward {
                 step_host_response =
                     try_backward_step(&mut orchestrator, &mut session, model_handle);
+                if step_host_response.is_none() {
+                    Response::error(
+                        request.id.clone(),
+                        RpcError::from_error_data(error_with_hint(
+                            rocket_surgeon_protocol::errors::ErrorCode::CapabilityNotSupported,
+                            "No checkpoint available for backward step",
+                        )),
+                    )
+                } else {
+                    handle_step(&mut session, &request, step_host_response.as_ref())
+                }
             } else {
                 step_host_response = try_orchestrator_step(
                     &mut orchestrator,
@@ -814,8 +825,8 @@ fn main() {
                     &granularity_scopes,
                     session.interventions(),
                 );
+                handle_step(&mut session, &request, step_host_response.as_ref())
             }
-            handle_step(&mut session, &request, step_host_response.as_ref())
         } else if request.method == method::INSPECT {
             match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {
                 Ok(host_response) => handle_inspect(

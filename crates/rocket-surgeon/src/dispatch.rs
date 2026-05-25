@@ -98,7 +98,7 @@ pub fn recovery_hint_for(code: ErrorCode) -> &'static str {
 }
 
 /// Build `ErrorData` with the canonical `recovery_hint` already populated.
-fn error_with_hint(code: ErrorCode, suggestion: impl Into<String>) -> ErrorData {
+pub fn error_with_hint(code: ErrorCode, suggestion: impl Into<String>) -> ErrorData {
     let mut data = ErrorData::new(code, suggestion);
     data.recovery_hint = Some(recovery_hint_for(code).to_owned());
     data
