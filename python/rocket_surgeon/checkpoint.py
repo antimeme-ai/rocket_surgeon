@@ -16,6 +16,7 @@ import ctypes
 import struct
 from typing import Any
 
+import numpy as np
 import torch
 
 _ELEMENT_SIZES = {
@@ -129,3 +130,15 @@ def restore_rng_state(state: bytes) -> None:
         offset += length
         t = torch.frombuffer(bytearray(rng_bytes), dtype=torch.uint8)
         torch.cuda.set_rng_state(t, device_id)
+
+
+def capture_cpu_rng_state() -> bytes:
+    """Capture CPU RNG state as raw bytes."""
+    state = torch.random.get_rng_state()
+    return bytes(state.numpy())
+
+
+def restore_cpu_rng_state(state_bytes: bytes) -> None:
+    """Restore CPU RNG state from bytes captured by capture_cpu_rng_state."""
+    state = torch.from_numpy(np.frombuffer(state_bytes, dtype=np.uint8).copy())
+    torch.random.set_rng_state(state)
