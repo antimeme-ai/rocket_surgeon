@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 pub mod cleanup;
 pub mod region;
 pub mod ring;

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod errors;
 pub mod jsonrpc;
 pub mod messages;

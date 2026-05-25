@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod probe_frame;
 
 use pyo3::exceptions::PyValueError;
