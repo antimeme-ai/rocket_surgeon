@@ -22,6 +22,7 @@ Stdout = JSON responses. Stderr = banners and warnings.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shlex
 import subprocess
@@ -152,7 +153,10 @@ def _setup(state: DriverState) -> None:
 
 
 def _spawn_and_setup(state: DriverState) -> None:
-    state.proc = spawn_daemon()
+    # spawn_daemon() prints env/path info to stdout (built for e2e tests that
+    # own stdout). The driver reserves stdout for JSON responses, so redirect.
+    with contextlib.redirect_stdout(sys.stderr):
+        state.proc = spawn_daemon()
     _setup(state)
     _banner(
         f"ready · session={state.session_id} status={state.last_status} tick={state.last_tick}"
@@ -273,7 +277,10 @@ def _run_line(state: DriverState, line: str) -> bool:
 
 def main() -> int:
     _banner("building binaries ...")
-    build_binaries()
+    # build_binaries() prints progress to stdout (built for e2e tests that own
+    # stdout). The driver reserves stdout for JSON responses, so redirect.
+    with contextlib.redirect_stdout(sys.stderr):
+        build_binaries()
     state = DriverState()
     try:
         _spawn_and_setup(state)
@@ -283,7 +290,13 @@ def main() -> int:
         return 1
 
     try:
-        for raw_line in sys.stdin:
+        # NB: explicit readline() loop instead of `for line in sys.stdin`,
+        # which uses readahead buffering on pipes and would delay dispatch
+        # until the buffer fills.
+        while True:
+            raw_line = sys.stdin.readline()
+            if not raw_line:
+                break
             stripped = raw_line.strip()
             if not stripped:
                 continue
