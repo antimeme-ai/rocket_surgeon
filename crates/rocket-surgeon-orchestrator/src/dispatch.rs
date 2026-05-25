@@ -30,7 +30,8 @@ pub fn dispatch(state: &mut OrchestratorState, request: &Request) -> Response {
         | internal::HOST_KV_READ
         | internal::HOST_KV_INTERVENE
         | internal::HOST_EXPORT_ENV
-        | internal::HOST_CHECKPOINT => forward_to_worker(state, request),
+        | internal::HOST_CHECKPOINT
+        | internal::HOST_REPLAY => forward_to_worker(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
