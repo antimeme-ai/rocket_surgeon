@@ -108,7 +108,7 @@ def _send(proc: subprocess.Popen, line: str) -> None:
     proc.stdin.flush()
 
 
-def run_test() -> None:
+def run_test() -> None:  # noqa: PLR0915
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PYTHON_DIR)
 

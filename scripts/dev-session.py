@@ -42,7 +42,6 @@ from e2e_harness import (  # noqa: E402
     spawn_daemon,
 )
 
-
 PROBE_ID = "dev-capture-all"
 SETUP_TIMEOUT_SEC = 60
 
@@ -220,7 +219,7 @@ def _dispatch_json(state: DriverState, payload: dict) -> None:
     _print_response(resp)
 
 
-def _dispatch_command(state: DriverState, line: str) -> bool:
+def _dispatch_command(state: DriverState, line: str) -> bool:  # noqa: PLR0911
     """Handle a `:command` line. Returns False if the loop should exit."""
     parts = shlex.split(line)
     cmd = parts[0]
