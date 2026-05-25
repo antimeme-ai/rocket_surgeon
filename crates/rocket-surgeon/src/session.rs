@@ -11,7 +11,7 @@ use rocket_surgeon_protocol::types::TickPosition;
 use rocket_surgeon_protocol::types::{
     ActionName, Capabilities, CheckpointRef, CheckpointTier, EnvelopeMode, InterventionRecipe,
     Phase, PositionEnvelope, ResponseEnvelope, SessionState, Status, StepDirection, TensorSummary,
-    TickEvent,
+    TickEvent, WorldlineState,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -264,6 +264,7 @@ impl Session {
                 active_probes: Vec::new(),
                 checkpoints: Vec::new(),
                 available_actions: Vec::new(),
+                worldline: WorldlineState::default(),
             },
             start_time: std::time::Instant::now(),
             detached_model_id: None,
@@ -2337,6 +2338,9 @@ mod tests {
             stop_at,
             verify: true,
             envelope: EnvelopeMode::Full,
+            deterministic: None,
+            cosine_threshold: None,
+            mre_threshold: None,
         }
     }
 
