@@ -1,6 +1,7 @@
 import ctypes
 import importlib
 import threading
+import types
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,12 +19,24 @@ class InterventionContext:
     model_handle: int
 
 
-_module_cache: dict[str, object] = {}
+_module_cache: dict[str, types.ModuleType] = {}
 
 
-def resolve_callback(module_name: str, function_name: str) -> Callable[..., Any]:
-    if module_name not in _module_cache:
-        _module_cache[module_name] = importlib.import_module(module_name)
+def invalidate_callback_cache(module_name: str | None = None) -> None:
+    if module_name is None:
+        _module_cache.clear()
+    else:
+        _module_cache.pop(module_name, None)
+
+
+def resolve_callback(
+    module_name: str, function_name: str, *, reload: bool = False
+) -> Callable[..., Any]:
+    if reload or module_name not in _module_cache:
+        mod = importlib.import_module(module_name)
+        if reload and module_name in _module_cache:
+            importlib.reload(mod)
+        _module_cache[module_name] = mod
     mod = _module_cache[module_name]
     fn: Callable[..., Any] = getattr(mod, function_name)
     return fn
