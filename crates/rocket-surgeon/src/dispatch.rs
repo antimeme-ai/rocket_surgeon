@@ -1326,10 +1326,58 @@ pub fn handle_export(
         });
     }
 
+    let bookmarks: Vec<serde_json::Value> = session
+        .state()
+        .checkpoints
+        .iter()
+        .filter(|c| c.bookmark.is_some())
+        .map(|c| {
+            serde_json::json!({
+                "name": c.bookmark,
+                "tick_id": c.tick_id,
+                "layer": c.layer_idx,
+                "checkpoint_id": c.checkpoint_id,
+            })
+        })
+        .collect();
+    let bookmarks_json = serde_json::to_vec_pretty(&bookmarks).unwrap_or_default();
     artifacts.push(BundleArtifact {
         name: "bookmarks.json".into(),
-        data: b"[]".to_vec(),
+        data: bookmarks_json,
     });
+
+    let worldlines = serde_json::json!({
+        "current_segment": session.worldline().current_segment,
+        "segments": session.worldline().segments.iter().map(|s| serde_json::json!({
+            "id": s.id,
+            "parent_segment": s.parent_segment,
+            "branch_tick": s.branch_tick,
+            "tick_range": s.tick_range,
+        })).collect::<Vec<_>>(),
+    });
+    let worldlines_json = serde_json::to_vec_pretty(&worldlines).unwrap_or_default();
+    artifacts.push(BundleArtifact {
+        name: "worldlines.json".into(),
+        data: worldlines_json,
+    });
+
+    for cref in &session.state().checkpoints {
+        if cref.checkpoint_id.starts_with("auto-") || cref.checkpoint_id.starts_with("sub-") {
+            continue;
+        }
+        let meta = serde_json::json!({
+            "checkpoint_id": cref.checkpoint_id,
+            "tier": cref.tier,
+            "tick_id": cref.tick_id,
+            "layer_idx": cref.layer_idx,
+        });
+        let meta_json = serde_json::to_vec_pretty(&meta).unwrap_or_default();
+        let path = format!("checkpoints/{}/meta.json", cref.checkpoint_id);
+        artifacts.push(BundleArtifact {
+            name: path,
+            data: meta_json,
+        });
+    }
 
     let artifact_count = artifacts.len() as u32;
     match assemble_bundle(path, &artifacts) {
