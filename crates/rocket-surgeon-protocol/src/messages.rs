@@ -60,6 +60,7 @@ pub mod internal {
     pub const HOST_INSPECT: &str = "_host/inspect";
     pub const HOST_VIEW: &str = "_host/view";
     pub const HOST_CHECKPOINT: &str = "_host/checkpoint";
+    pub const HOST_REPLAY: &str = "_host/replay";
     pub const HOST_KV_READ: &str = "_host/kv.read";
     pub const HOST_KV_INTERVENE: &str = "_host/kv.intervene";
     pub const HOST_EXPORT_ENV: &str = "_host/export_env";
@@ -302,6 +303,12 @@ pub struct ReplayRequest {
     pub verify: bool,
     #[serde(default)]
     pub envelope: EnvelopeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deterministic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosine_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mre_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -982,6 +989,32 @@ pub struct HostCheckpointResponse {
 }
 
 // ---------------------------------------------------------------------------
+// _host/replay (internal: daemon → orchestrator → worker)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostReplayRequest {
+    pub model_handle: u64,
+    pub checkpoint_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_at: Option<ReplayStopAt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interventions: Vec<InterventionRecipe>,
+    pub verify: bool,
+    pub deterministic: bool,
+    pub cosine_threshold: f64,
+    pub mre_threshold: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostReplayResponse {
+    pub ticks_replayed: u32,
+    pub stopped_at: TickPosition,
+    pub divergences: Vec<Divergence>,
+    pub verified: bool,
+}
+
+// ---------------------------------------------------------------------------
 // _host/kv.read (internal: daemon → orchestrator → worker)
 // ---------------------------------------------------------------------------
 
@@ -1264,6 +1297,11 @@ mod tests {
     #[test]
     fn internal_checkpoint_constant() {
         assert_eq!(internal::HOST_CHECKPOINT, "_host/checkpoint");
+    }
+
+    #[test]
+    fn internal_replay_constant() {
+        assert_eq!(internal::HOST_REPLAY, "_host/replay");
     }
 
     #[test]

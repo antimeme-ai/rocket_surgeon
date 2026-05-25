@@ -14,6 +14,30 @@ pub struct SessionState {
     pub active_probes: Vec<String>,
     pub checkpoints: Vec<CheckpointRef>,
     pub available_actions: Vec<ActionName>,
+    #[serde(default, skip_serializing_if = "WorldlineState::is_empty")]
+    pub worldline: WorldlineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorldlineState {
+    pub current_segment: u32,
+    pub segments: Vec<WorldlineSegment>,
+}
+
+impl WorldlineState {
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldlineSegment {
+    pub id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_segment: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_tick: Option<u64>,
+    pub tick_range: (u64, u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
