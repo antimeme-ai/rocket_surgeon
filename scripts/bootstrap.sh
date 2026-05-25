@@ -36,6 +36,13 @@ command -v cargo >/dev/null || die "cargo not found in PATH"
 command -v uv >/dev/null || die "uv not found — install from https://docs.astral.sh/uv/"
 command -v lefthook >/dev/null || die "lefthook not found — install with 'brew install lefthook' or see https://lefthook.dev/installation/"
 
+if ! command -v cargo-watch >/dev/null; then
+    log "Installing cargo-watch (needed by 'cargo xtask watch' / 'test-watch')"
+    cargo install cargo-watch
+else
+    log "cargo-watch already installed"
+fi
+
 log "Python pin: $PY_VERSION"
 log "Repo root:  $REPO_ROOT"
 

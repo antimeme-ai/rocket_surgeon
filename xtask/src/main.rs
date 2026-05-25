@@ -38,6 +38,20 @@ enum Xtask {
     Ci,
     /// Bootstrap the project (idempotent): venv, deps, maturin, cargo build
     Setup,
+    /// Watch sources and rebuild the workspace on every change
+    Watch,
+    /// Watch sources and rerun tests on every change
+    TestWatch {
+        /// Optional substring; only e2e scripts whose filename contains it run.
+        /// When omitted, the full Rust test suite plus every e2e script runs.
+        pattern: Option<String>,
+    },
+    /// Internal: single rebuild iteration invoked by `watch`
+    #[command(hide = true)]
+    WatchOnce,
+    /// Internal: single test iteration invoked by `test-watch`
+    #[command(hide = true)]
+    TestWatchOnce { pattern: Option<String> },
 }
 
 fn main() -> Result<()> {
@@ -68,6 +82,10 @@ fn main() -> Result<()> {
             e2e()?;
         }
         Xtask::Setup => setup()?,
+        Xtask::Watch => watch()?,
+        Xtask::TestWatch { pattern } => test_watch(pattern)?,
+        Xtask::WatchOnce => watch_once()?,
+        Xtask::TestWatchOnce { pattern } => test_watch_once(pattern)?,
     }
     Ok(())
 }
@@ -206,6 +224,200 @@ fn tck() -> Result<()> {
         &["-m", "pytest", "python/tests/tck", "-v", "--no-header"],
     )
     .context("tck tests failed")
+}
+
+fn ensure_cargo_watch() -> Result<()> {
+    if Command::new("cargo-watch")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    bail!("cargo-watch not found — run `cargo xtask setup` or `cargo install cargo-watch`");
+}
+
+fn watch() -> Result<()> {
+    ensure_cargo_watch()?;
+    run(
+        "cargo",
+        &[
+            "watch",
+            "--clear",
+            "--watch",
+            "crates",
+            "--watch",
+            "python",
+            "--ext",
+            "rs,py",
+            "-x",
+            "xtask watch-once",
+        ],
+    )
+}
+
+fn test_watch(pattern: Option<String>) -> Result<()> {
+    ensure_cargo_watch()?;
+    let inner = match pattern.as_deref() {
+        Some(p) => format!("xtask test-watch-once {p}"),
+        None => String::from("xtask test-watch-once"),
+    };
+    run(
+        "cargo",
+        &[
+            "watch",
+            "--clear",
+            "--watch",
+            "crates",
+            "--watch",
+            "python",
+            "--watch",
+            "tests",
+            "--watch",
+            "tck",
+            "--ext",
+            "rs,py,feature",
+            "-x",
+            &inner,
+        ],
+    )
+}
+
+/// Two-phase workspace build matching `tests/e2e_harness.py::build_binaries`.
+/// PyO3 feature unification forces splitting `rocket-surgeon-worker` (which
+/// uses `auto-initialize` and needs libpython) from the rest of the workspace
+/// (where `extension-module` suppresses libpython linking).
+fn build_all() -> Result<()> {
+    run(
+        "cargo",
+        &[
+            "build",
+            "--workspace",
+            "--exclude",
+            "rocket-surgeon-python",
+            "--exclude",
+            "rocket-surgeon-worker",
+        ],
+    )
+    .context("workspace build failed")?;
+
+    let py = venv_python()?;
+    let libdir = Command::new(&py)
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))",
+        ])
+        .output()
+        .context("query python LIBDIR")?;
+    if !libdir.status.success() {
+        bail!("failed to query venv LIBDIR");
+    }
+    let libdir = String::from_utf8(libdir.stdout)
+        .context("non-utf8 LIBDIR")?
+        .trim()
+        .to_owned();
+
+    eprintln!("==> cargo build -p rocket-surgeon-worker (DYLD/LD_LIBRARY_PATH={libdir})");
+    let status = Command::new("cargo")
+        .args(["build", "-p", "rocket-surgeon-worker"])
+        .env("DYLD_LIBRARY_PATH", &libdir)
+        .env("LD_LIBRARY_PATH", &libdir)
+        .status()
+        .context("failed to run cargo")?;
+    if !status.success() {
+        bail!("worker build exited with {status}");
+    }
+    Ok(())
+}
+
+fn now_stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+fn watch_once() -> Result<()> {
+    let stamp = now_stamp();
+    eprintln!("[watch {stamp}] rebuild starting");
+    match build_all() {
+        Ok(()) => {
+            let done = now_stamp();
+            eprintln!("[watch {done}] rebuild OK");
+            Ok(())
+        }
+        Err(e) => {
+            let done = now_stamp();
+            eprintln!("[watch {done}] rebuild FAILED: {e:#}");
+            Err(e)
+        }
+    }
+}
+
+fn e2e_scripts_matching(pattern: Option<&str>) -> Result<Vec<std::path::PathBuf>> {
+    let tests_dir = std::env::current_dir().context("cwd")?.join("tests");
+    let mut scripts: Vec<std::path::PathBuf> = std::fs::read_dir(&tests_dir)
+        .with_context(|| format!("read {}", tests_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.is_file()
+                && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with("test_e2e_")
+                        && n.ends_with(".py")
+                        && pattern.is_none_or(|p| n.contains(p))
+                })
+        })
+        .collect();
+    scripts.sort();
+    Ok(scripts)
+}
+
+fn test_watch_once(pattern: Option<String>) -> Result<()> {
+    let stamp = now_stamp();
+    let label = pattern.as_deref().unwrap_or("<all>");
+    eprintln!("[test-watch {stamp}] run starting (pattern={label})");
+
+    let result = (|| -> Result<()> {
+        if pattern.is_none() {
+            test()?;
+        }
+        let scripts = e2e_scripts_matching(pattern.as_deref())?;
+        if scripts.is_empty() {
+            if let Some(p) = pattern.as_deref() {
+                bail!("no e2e scripts matched pattern '{p}'");
+            }
+            bail!("no e2e scripts found");
+        }
+        let py = venv_python()?;
+        let mut failures = Vec::new();
+        for script in &scripts {
+            let path = script.to_str().context("non-utf8 script path")?;
+            if run(&py, &["-u", path]).is_err() {
+                failures.push(path.to_owned());
+            }
+        }
+        if !failures.is_empty() {
+            bail!(
+                "{} e2e test(s) failed: {}",
+                failures.len(),
+                failures.join(", ")
+            );
+        }
+        Ok(())
+    })();
+
+    let done = now_stamp();
+    match &result {
+        Ok(()) => eprintln!("[test-watch {done}] PASS (pattern={label})"),
+        Err(e) => eprintln!("[test-watch {done}] FAIL (pattern={label}): {e:#}"),
+    }
+    result
 }
 
 /// Absolute path to an executable in the project virtualenv's `bin/`.
