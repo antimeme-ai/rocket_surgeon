@@ -250,6 +250,7 @@ pub struct Session {
     /// to apply interventions during the forward pass. Cleared on detach.
     interventions: Vec<InterventionRecipe>,
     auto_checkpoint_layers: Vec<u32>,
+    arena_utilization: f64,
 }
 
 impl Session {
@@ -274,6 +275,7 @@ impl Session {
             checkpoint_positions: HashMap::new(),
             interventions: Vec::new(),
             auto_checkpoint_layers: Vec::new(),
+            arena_utilization: 0.0,
         }
     }
 
@@ -1087,6 +1089,17 @@ impl Session {
     #[allow(dead_code)]
     pub fn worldline(&self) -> &WorldlineState {
         &self.state.worldline
+    }
+
+    pub fn arena_utilization(&self) -> f64 {
+        self.arena_utilization
+    }
+
+    pub fn update_arena_utilization(&mut self, bytes_captured: Option<u64>) {
+        if let Some(bytes) = bytes_captured {
+            self.arena_utilization += bytes as f64 / f64::from(256 * 1024 * 1024_i32);
+            self.arena_utilization = self.arena_utilization.min(1.0);
+        }
     }
 
     pub fn advance_worldline_segment(&mut self, branch_tick: u64) {

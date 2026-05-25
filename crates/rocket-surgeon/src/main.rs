@@ -220,6 +220,26 @@ fn try_backward_step(
     let ckpt_id = session.find_checkpoint_before(target_tick + 1)?.to_owned();
     let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
 
+    // Eager sub-checkpoint: save current position for O(1) next backward step
+    if session.arena_utilization() < 0.6 {
+        let current_tick = session.state().tick_id.unwrap_or(0);
+        let sub_id = format!(
+            "sub-{}-{}",
+            session.worldline().current_segment,
+            current_tick
+        );
+        let sub_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
+            model_handle: mh,
+            checkpoint_id: sub_id,
+            tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
+            tick_id: current_tick,
+            layer_idx: 0,
+        };
+        if let Ok(resp) = orch.checkpoint(&sub_req) {
+            session.update_arena_utilization(resp.bytes_captured);
+        }
+    }
+
     let host_req = HostReplayRequest {
         model_handle: mh,
         checkpoint_id: ckpt_id,
