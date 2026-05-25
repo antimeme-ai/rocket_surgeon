@@ -4,6 +4,7 @@ mod capture;
 pub mod checkpoint;
 mod dispatch;
 mod kv;
+mod replay;
 mod step_driver;
 mod tick;
 
