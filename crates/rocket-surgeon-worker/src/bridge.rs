@@ -537,13 +537,23 @@ pub fn apply_interventions_at_point<'py>(
     layer: u32,
     component: &str,
     event: &str,
+    tick_id: u64,
+    model_handle: u64,
 ) -> anyhow::Result<(Bound<'py, pyo3::PyAny>, Vec<String>)> {
     let bridge = py.import("rocket_surgeon.bridge")?;
     let json_mod = py.import("json")?;
     let py_recipes = json_mod.getattr("loads")?.call1((recipes_json,))?;
-    let result = bridge
-        .getattr("apply_interventions_at_point")?
-        .call1((tensor, py_recipes, family, rank, layer, component, event))?;
+    let result = bridge.getattr("apply_interventions_at_point")?.call1((
+        tensor,
+        py_recipes,
+        family,
+        rank,
+        layer,
+        component,
+        event,
+        tick_id,
+        model_handle,
+    ))?;
     let tuple = result.downcast::<PyTuple>().map_err(|e| {
         anyhow::anyhow!("expected tuple from apply_interventions_at_point, got: {e}")
     })?;

@@ -600,6 +600,7 @@ fn try_apply_interventions<'py>(
     tuple: &pyo3::Bound<'py, PyTuple>,
     layer: u32,
     canonical: &str,
+    handle: u64,
 ) -> anyhow::Result<Option<(Bound<'py, pyo3::PyAny>, Vec<String>)>> {
     if req.interventions.is_empty() || tuple.len() <= 2 {
         return Ok(None);
@@ -622,6 +623,8 @@ fn try_apply_interventions<'py>(
         layer,
         canonical,
         "fwd",
+        state.tick_state.tick_id(),
+        handle,
     )?;
     if fired.is_empty() {
         Ok(None)
@@ -711,7 +714,7 @@ fn run_step_loop(
         }
 
         let intervention_result =
-            try_apply_interventions(py, state, req, tuple, layer, &canonical)?;
+            try_apply_interventions(py, state, req, tuple, layer, &canonical, handle)?;
 
         if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
             if step_driver::is_layer_boundary(tracking_layer, layer) {
@@ -1571,6 +1574,8 @@ fn run_replay_loop(
                     layer,
                     &canonical,
                     "fwd",
+                    state.tick_state.tick_id(),
+                    handle,
                 )?;
                 if fired.is_empty() {
                     None

@@ -30,6 +30,8 @@ def apply_interventions(
     component: str,
     event: str,
     tensor_store: Callable[[str], torch.Tensor | None] | None = None,
+    tick_id: int = 0,
+    model_handle: int = 0,
 ) -> tuple[torch.Tensor, list[str]]:
     """Apply matching intervention recipes to a tensor.
 
@@ -56,7 +58,16 @@ def apply_interventions(
         if recipe["mode"] == "replace":
             current = original.clone()
 
-        current = _apply_single(current, recipe, layer, component, event, tensor_store)
+        current = _apply_single(
+            current,
+            recipe,
+            layer,
+            component,
+            event,
+            tensor_store,
+            tick_id,
+            model_handle,
+        )
         fired.append(recipe["id"])
 
     return current, fired
@@ -69,6 +80,8 @@ def _apply_single(
     component: str,
     event: str,
     tensor_store: Callable[[str], torch.Tensor | None] | None,
+    tick_id: int,
+    model_handle: int,
 ) -> torch.Tensor:
     """Apply a single recipe to tensor. Returns the (possibly new) tensor."""
     itype = recipe["intervention_type"]
@@ -85,7 +98,7 @@ def _apply_single(
     elif itype == "clamp":
         tensor.clamp_(min=params["min"], max=params["max"])
     elif itype == "callback":
-        return _apply_callback(tensor, params, layer, component, event)
+        return _apply_callback(tensor, params, layer, component, event, tick_id, model_handle)
 
     return tensor
 
@@ -150,6 +163,8 @@ def _apply_callback(
     layer: int,
     component: str,
     event: str,
+    tick_id: int,
+    model_handle: int,
 ) -> torch.Tensor:
     module_name = params["module"]
     function_name = params["function"]
@@ -160,9 +175,9 @@ def _apply_callback(
         layer=layer,
         component=component,
         event=event,
-        tick_id=0,
+        tick_id=tick_id,
         device=tensor.device,
-        model_handle=0,
+        model_handle=model_handle,
     )
     result, error = execute_callback(fn, tensor, ctx, timeout_s, nan_check)
     if result is not None:

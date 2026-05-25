@@ -374,6 +374,8 @@ def apply_interventions_at_point(
     layer: int,
     component: str,
     event: str,
+    tick_id: int = 0,
+    model_handle: int = 0,
 ) -> tuple[torch.Tensor, list[str]]:
     """Bridge entry point: apply intervention recipes to a tensor at a probe point.
 
@@ -391,4 +393,6 @@ def apply_interventions_at_point(
         component=component,
         event=event,
         tensor_store=None,
+        tick_id=tick_id,
+        model_handle=model_handle,
     )
