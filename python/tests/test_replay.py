@@ -1,6 +1,7 @@
+import pytest
 import torch
 
-from rocket_surgeon.replay import compare_activations
+from rocket_surgeon.replay import compare_activations, compare_activations_from_ptr
 
 
 def test_identical_tensors_no_divergence():
@@ -33,3 +34,14 @@ def test_scaled_tensor_exceeds_mre():
     result = compare_activations(a, b, cosine_threshold=0.0, mre_threshold=0.05)
     assert result is not None
     assert result["max_relative_error"] > 0.05
+
+
+def test_zero_tensors_no_divergence():
+    a = torch.zeros(32, 128)
+    result = compare_activations(a, a.clone(), cosine_threshold=0.999, mre_threshold=0.05)
+    assert result is None
+
+
+def test_unsupported_dtype_raises_valueerror():
+    with pytest.raises(ValueError, match="unsupported dtype"):
+        compare_activations_from_ptr(0, 0, "torch.int8", [1], torch.zeros(1), 0.999, 0.05)

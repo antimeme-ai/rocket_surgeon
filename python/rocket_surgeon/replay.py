@@ -16,7 +16,10 @@ def compare_activations(
     norm_a = torch.linalg.norm(original_flat)
     norm_b = torch.linalg.norm(replayed_flat)
     denom = norm_a * norm_b
-    cosine_sim = (dot / denom).item() if denom > 0 else 0.0
+    if denom == 0:
+        cosine_sim = 1.0 if torch.equal(original_flat, replayed_flat) else 0.0
+    else:
+        cosine_sim = (dot / denom).item()
 
     abs_diff = torch.abs(original_flat - replayed_flat)
     abs_orig = torch.abs(original_flat)
@@ -47,7 +50,10 @@ def compare_activations_from_ptr(
         "torch.float32": torch.float32,
         "torch.float64": torch.float64,
     }
-    dtype = dtype_map[original_dtype]
+    dtype = dtype_map.get(original_dtype)
+    if dtype is None:
+        msg = f"unsupported dtype for divergence comparison: {original_dtype}"
+        raise ValueError(msg)
     buf = (ctypes.c_char * original_len).from_address(original_ptr)
     original = torch.frombuffer(buf, dtype=dtype).reshape(original_shape)
     result = compare_activations(original, replayed, cosine_threshold, mre_threshold)
