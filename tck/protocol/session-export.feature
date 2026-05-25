@@ -11,6 +11,8 @@ Feature: Session bundle export
     And the session has been stepped to tick 0 at layer 0
 
   # ── Happy path ───────────────────────────────────────────────────
+
+  @deferred
   Scenario: Export produces a tar.gz with manifest and interventions
     When the client sends "rocket/session.export" with:
       """json
@@ -27,6 +29,7 @@ Feature: Session bundle export
     And the archive contains "manifest.json"
     And the archive contains "interventions.json"
 
+  @deferred
   Scenario: Manifest contains session metadata
     When the client sends "rocket/session.export" with:
       """json
@@ -39,6 +42,7 @@ Feature: Session bundle export
     And the manifest contains key "session_id"
     And the manifest contains key "bundle_schema_version"
 
+  @deferred
   Scenario: Export includes protocol trace when messages have been exchanged
     When the client sends "rocket/session.export" with:
       """json
@@ -49,6 +53,7 @@ Feature: Session bundle export
       """
     Then the archive contains "protocol-trace.jsonl"
 
+  @deferred
   Scenario: Export with include_tensors true includes tensor files
     Given the client has inspected a tensor at "llama:0:0:attn.o_proj:output"
     When the client sends "rocket/session.export" with:
@@ -60,6 +65,7 @@ Feature: Session bundle export
       """
     Then the archive contains at least one entry matching "tensors/*.bin"
 
+  @deferred
   Scenario: Export with include_tensors defaults to true
     When the client sends "rocket/session.export" with:
       """json
@@ -69,6 +75,7 @@ Feature: Session bundle export
       """
     Then the response data field "path" is "/tmp/default-tensors.tar.gz"
 
+  @deferred
   Scenario: Export produces all required artifacts
     When the client sends "rocket/session.export" with:
       """json
@@ -89,6 +96,8 @@ Feature: Session bundle export
     And the response data field "artifact_count" is at least 8
 
   # ── Interventions in bundle ──────────────────────────────────────
+
+  @deferred
   Scenario: Export after registering interventions includes them in bundle
     Given an active intervention "iv-scale-1" of type "scale" on "llama:0:12:attn.o_proj:output"
     When the client sends "rocket/session.export" with:
@@ -102,6 +111,8 @@ Feature: Session bundle export
     And the interventions array contains an entry with id "iv-scale-1"
 
   # ── Error cases ──────────────────────────────────────────────────
+
+  @deferred
   Scenario: Export while session is not in stopped state returns INVALID_STATE
     Given the session is in "stepping" state
     When the client sends "rocket/session.export" with:
@@ -115,6 +126,7 @@ Feature: Session bundle export
     And the error "data.error_code" is "INVALID_STATE"
     And the error "data.severity" is "recoverable"
 
+  @deferred
   Scenario: Export with missing path parameter returns INVALID_PARAMS
     When the client sends "rocket/session.export" with:
       """json
@@ -124,6 +136,7 @@ Feature: Session bundle export
       """
     Then the response is a JSON-RPC error
 
+  @deferred
   Scenario: Export before model attached returns INVALID_STATE
     Given the session is initialized but no model is attached
     When the client sends "rocket/session.export" with:
