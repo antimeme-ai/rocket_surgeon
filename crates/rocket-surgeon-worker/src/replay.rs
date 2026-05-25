@@ -1,8 +1,8 @@
 use rocket_surgeon_protocol::messages::{Divergence, HostReplayRequest, ReplayStopAt};
 use rocket_surgeon_protocol::types::InterventionRecipe;
 
-#[allow(dead_code)]
 pub struct ReplayContext {
+    pub checkpoint_id: String,
     pub verify: bool,
     pub deterministic: bool,
     pub cosine_threshold: f64,
@@ -16,6 +16,7 @@ pub struct ReplayContext {
 impl ReplayContext {
     pub fn from_request(req: &HostReplayRequest) -> Self {
         Self {
+            checkpoint_id: req.checkpoint_id.clone(),
             verify: req.verify,
             deterministic: req.deterministic,
             cosine_threshold: req.cosine_threshold,

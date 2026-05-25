@@ -470,6 +470,63 @@ pub fn restore_rng_state(state: &[u8]) -> anyhow::Result<()> {
     })
 }
 
+pub fn capture_cpu_rng_state() -> anyhow::Result<Vec<u8>> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        let result: Vec<u8> = ckpt.getattr("capture_cpu_rng_state")?.call0()?.extract()?;
+        Ok(result)
+    })
+}
+
+pub fn restore_cpu_rng_state(state: &[u8]) -> anyhow::Result<()> {
+    Python::with_gil(|py| {
+        let ckpt = py.import("rocket_surgeon.checkpoint")?;
+        let py_bytes = pyo3::types::PyBytes::new(py, state);
+        ckpt.getattr("restore_cpu_rng_state")?.call1((py_bytes,))?;
+        Ok(())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compare_activations_from_ptr(
+    py: Python<'_>,
+    original_ptr: usize,
+    original_len: usize,
+    original_dtype: &str,
+    original_shape: &[i64],
+    replayed: &Bound<'_, pyo3::PyAny>,
+    cosine_threshold: f64,
+    mre_threshold: f64,
+) -> anyhow::Result<Option<(f64, f64)>> {
+    let replay_mod = py.import("rocket_surgeon.replay")?;
+    let py_shape = PyList::new(py, original_shape)?;
+    let result = replay_mod.getattr("compare_activations_from_ptr")?.call1((
+        original_ptr,
+        original_len,
+        original_dtype,
+        py_shape,
+        replayed,
+        cosine_threshold,
+        mre_threshold,
+    ))?;
+
+    if result.is_none() {
+        return Ok(None);
+    }
+    let dict = result
+        .downcast::<PyDict>()
+        .map_err(|e| anyhow::anyhow!("expected dict from compare_activations_from_ptr: {e}"))?;
+    let cosine: f64 = dict
+        .get_item("cosine_similarity")?
+        .ok_or_else(|| anyhow::anyhow!("missing cosine_similarity key"))?
+        .extract()?;
+    let mre: f64 = dict
+        .get_item("max_relative_error")?
+        .ok_or_else(|| anyhow::anyhow!("missing max_relative_error key"))?
+        .extract()?;
+    Ok(Some((cosine, mre)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_interventions_at_point<'py>(
     py: Python<'py>,

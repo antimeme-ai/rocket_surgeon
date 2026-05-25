@@ -1423,6 +1423,64 @@ fn handle_host_replay(state: &mut WorkerState, request: &Request) -> Response {
     }
 }
 
+fn check_divergence_at_boundary(
+    py: Python<'_>,
+    state: &WorkerState,
+    ctx: &mut crate::replay::ReplayContext,
+    layer: u32,
+    canonical: &str,
+    tuple: &Bound<'_, PyTuple>,
+) -> anyhow::Result<()> {
+    let checkpoint_boundary_layers = rocket_surgeon_protocol::checkpoint_layers(state.num_layers);
+    if !checkpoint_boundary_layers.contains(&layer) {
+        return Ok(());
+    }
+    let Some(ref arena) = state.checkpoint_arena else {
+        return Ok(());
+    };
+    let Some((slot_ptr, header)) = arena.get_slot(&ctx.checkpoint_id, layer) else {
+        return Ok(());
+    };
+    let output = tuple.get_item(2)?;
+    if output.is_none() {
+        return Ok(());
+    }
+    // SAFETY: slot_ptr from get_slot, within arena mmap region.
+    let data_ptr = unsafe { slot_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE) } as usize;
+    let shape: Vec<i64> = header
+        .shape
+        .iter()
+        .take(header.ndim as usize)
+        .map(|&s| s as i64)
+        .collect();
+    if let Some((cosine, mre)) = bridge::compare_activations_from_ptr(
+        py,
+        data_ptr,
+        header.byte_len as usize,
+        header.dtype.to_torch_str(),
+        &shape,
+        &output,
+        ctx.cosine_threshold,
+        ctx.mre_threshold,
+    )? {
+        let family = state
+            .component_map
+            .as_ref()
+            .map_or("unknown", |m| m.model_family.as_str());
+        let probe_point = format!("{family}:0:{layer}:{canonical}:output");
+        ctx.divergences
+            .push(rocket_surgeon_protocol::messages::Divergence {
+                tick_id: state.tick_state.tick_id(),
+                original_tick_id: state.tick_state.tick_id(),
+                probe_point,
+                cosine_similarity: cosine,
+                max_relative_error: mre,
+                message: format!("Divergence at layer {layer}: cosine={cosine:.6}, MRE={mre:.6}"),
+            });
+    }
+    Ok(())
+}
+
 fn run_replay_loop(
     py: Python<'_>,
     state: &mut WorkerState,
@@ -1470,6 +1528,11 @@ fn run_replay_loop(
 
         state.tick_state.advance(&canonical, layer, call_index);
         ticks += 1;
+
+        // Divergence detection at √L checkpoint boundaries
+        if ctx.verify && tuple.len() > 2 {
+            check_divergence_at_boundary(py, state, ctx, layer, &canonical, tuple)?;
+        }
 
         // Check stop_at condition
         if ctx.should_stop(layer, &canonical) {
