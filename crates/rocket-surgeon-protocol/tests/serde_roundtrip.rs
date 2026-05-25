@@ -25,8 +25,7 @@ use rocket_surgeon_protocol::types::{
     Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
     ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status, StepDirection,
     TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity, TickLayerInfo,
-    TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat, WorldlineSegment,
-    WorldlineState,
+    TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat, WorldlineSegment, WorldlineState,
 };
 use serde_json::json;
 
