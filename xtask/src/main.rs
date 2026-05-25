@@ -34,6 +34,8 @@ enum Xtask {
     Tck,
     /// Run model conformance tests
     Conformance,
+    /// Run cargo-deny (licenses, advisories, bans, sources)
+    Deny,
     /// Run full CI suite (all lints + all tests)
     Ci,
     /// Bootstrap the project (idempotent): venv, deps, maturin, cargo build
@@ -58,11 +60,13 @@ fn main() -> Result<()> {
         Xtask::E2e => e2e()?,
         Xtask::Conformance => conformance()?,
         Xtask::Tck => tck()?,
+        Xtask::Deny => deny()?,
         Xtask::Ci => {
             fmt(true)?;
             clippy()?;
             ruff(false)?;
             mypy()?;
+            deny()?;
             test()?;
             pytest()?;
             e2e()?;
@@ -138,6 +142,20 @@ fn ruff(fix: bool) -> Result<()> {
 
 fn mypy() -> Result<()> {
     run(&venv_bin("mypy")?, &["python/rocket_surgeon"]).context("mypy failed")
+}
+
+fn deny() -> Result<()> {
+    if !Command::new("cargo-deny")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        bail!(
+            "cargo-deny not found — run `cargo xtask setup` or `cargo install cargo-deny --locked`"
+        );
+    }
+    run("cargo", &["deny", "check"]).context("cargo deny check failed")
 }
 
 fn pytest() -> Result<()> {
