@@ -167,11 +167,16 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Extract the `component` field (index 3) from an inspect target string of
-/// the form `family:rank:layer:component:event`. Returns `None` when the
-/// target does not have enough colon-separated fields.
+/// Extract the `component` field from an inspect target string.
+/// Accepts both 4-part (`family:layer:component:event`) and
+/// 5+ part (`family:rank:layer:component:event[:call_index]`) forms.
 fn target_component(target: &str) -> Option<&str> {
-    target.split(':').nth(3).filter(|c| !c.is_empty())
+    let parts: Vec<&str> = target.split(':').collect();
+    let idx = match parts.len() {
+        4 => 2,
+        _ => 3,
+    };
+    parts.get(idx).copied().filter(|c| !c.is_empty())
 }
 
 /// Closest canonical components to `attempted`, ranked by edit distance.
@@ -3480,5 +3485,25 @@ mod tests {
         // `none` envelope: bare ReplayResponse, no SessionState wrapper.
         assert!(result.get("state").is_none());
         assert!(result["ticks_replayed"].is_number());
+    }
+
+    #[test]
+    fn target_component_5_segment() {
+        // family:rank:layer:component:event → index 3
+        assert_eq!(target_component("gpt2:0:5:q_proj:output"), Some("q_proj"));
+    }
+
+    #[test]
+    fn target_component_6_segment() {
+        // family:rank:layer:component:event:call_index → index 3
+        assert_eq!(
+            target_component("gpt2:0:5:attn.o_proj:output:0"),
+            Some("attn.o_proj")
+        );
+    }
+
+    #[test]
+    fn target_component_empty_returns_none() {
+        assert_eq!(target_component("gpt2"), None);
     }
 }
