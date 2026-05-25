@@ -861,6 +861,10 @@ impl Session {
 
         self.state.tick_id = Some(host_position.tick_id);
         self.state.position = Some(host_position.clone());
+        let seg_idx = self.state.worldline.current_segment as usize;
+        if seg_idx < self.state.worldline.segments.len() {
+            self.state.worldline.segments[seg_idx].tick_range.1 = host_position.tick_id;
+        }
         self.update_available_actions();
 
         let data = StepResponse {
@@ -1103,12 +1107,16 @@ impl Session {
     }
 
     pub fn advance_worldline_segment(&mut self, branch_tick: u64) {
+        let current_idx = self.state.worldline.current_segment as usize;
+        if current_idx < self.state.worldline.segments.len() {
+            self.state.worldline.segments[current_idx].tick_range.1 = branch_tick;
+        }
         let new_id = self.state.worldline.segments.len() as u32;
         self.state.worldline.segments.push(WorldlineSegment {
             id: new_id,
             parent_segment: Some(self.state.worldline.current_segment),
             branch_tick: Some(branch_tick),
-            tick_range: (0, 0),
+            tick_range: (branch_tick, 0),
         });
         self.state.worldline.current_segment = new_id;
     }
@@ -1210,6 +1218,10 @@ impl Session {
 
         self.state.tick_id = Some(stopped_at.tick_id);
         self.state.position = Some(stopped_at.clone());
+        let seg_idx = self.state.worldline.current_segment as usize;
+        if seg_idx < self.state.worldline.segments.len() {
+            self.state.worldline.segments[seg_idx].tick_range.1 = stopped_at.tick_id;
+        }
         self.update_available_actions();
 
         let data = ReplayResponse {
