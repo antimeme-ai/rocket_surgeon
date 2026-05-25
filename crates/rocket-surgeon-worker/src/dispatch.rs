@@ -1430,6 +1430,7 @@ fn check_divergence_at_boundary(
     layer: u32,
     canonical: &str,
     tuple: &Bound<'_, PyTuple>,
+    original_base_tick: u64,
 ) -> anyhow::Result<()> {
     let checkpoint_boundary_layers = rocket_surgeon_protocol::checkpoint_layers(state.num_layers);
     if !checkpoint_boundary_layers.contains(&layer) {
@@ -1471,7 +1472,7 @@ fn check_divergence_at_boundary(
         ctx.divergences
             .push(rocket_surgeon_protocol::messages::Divergence {
                 tick_id: state.tick_state.tick_id(),
-                original_tick_id: state.tick_state.tick_id(),
+                original_tick_id: original_base_tick,
                 probe_point,
                 cosine_similarity: cosine,
                 max_relative_error: mre,
@@ -1487,6 +1488,8 @@ fn run_replay_loop(
     handle: u64,
     ctx: &mut crate::replay::ReplayContext,
 ) -> anyhow::Result<HostReplayResponse> {
+    let pre_replay_tick = state.tick_state.tick_id();
+
     // Tear down existing forward pass to re-run from restored state
     state.forward_pass = None;
     ensure_forward_pass(py, state, handle, None)?;
@@ -1531,7 +1534,15 @@ fn run_replay_loop(
 
         // Divergence detection at √L checkpoint boundaries
         if ctx.verify && tuple.len() > 2 {
-            check_divergence_at_boundary(py, state, ctx, layer, &canonical, tuple)?;
+            check_divergence_at_boundary(
+                py,
+                state,
+                ctx,
+                layer,
+                &canonical,
+                tuple,
+                pre_replay_tick,
+            )?;
         }
 
         // Check stop_at condition
@@ -1579,7 +1590,7 @@ fn run_replay_loop(
 
     ctx.ticks_replayed = ticks;
     let mut stopped_at = state.tick_state.to_tick_position();
-    stopped_at.replay_of = Some(stopped_at.tick_id);
+    stopped_at.replay_of = Some(pre_replay_tick);
 
     Ok(HostReplayResponse {
         ticks_replayed: ticks,
