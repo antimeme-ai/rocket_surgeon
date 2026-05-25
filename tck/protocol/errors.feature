@@ -163,7 +163,7 @@ Feature: Error contract — every error code has a trigger, every response has s
     And the error "data.error_code" is "NCCL_TIMEOUT"
     And the error "data.severity" is "fatal"
 
-  @deferred @phase3
+  @phase3
   Scenario: REPLAY_DIVERGENCE — replay with mutation causing divergence
     Given the session is in "stopped" state with model "llama"
     And the server capability "supports_checkpointing" is true
