@@ -3,7 +3,6 @@ quarantine/
 # Rust
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Python
 __pycache__/

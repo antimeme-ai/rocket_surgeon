@@ -1,0 +1,10 @@
+[toolchain]
+# Pins the Rust toolchain so contributors get the same compiler + components
+# as CI without needing to manage rustup state by hand.
+#
+# Channel matches workspace.rust-version in Cargo.toml — keep them in sync.
+# Components ensure rustfmt/clippy are available; without these, fresh
+# checkouts hit "no such command: fmt" on first `cargo fmt`.
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
