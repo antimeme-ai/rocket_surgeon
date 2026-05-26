@@ -2034,8 +2034,17 @@ fn probe_fired_event_roundtrip() {
         tensor_summary: Some(sample_tensor_summary()),
         action: ProbeAction::Capture,
         timestamp: "2026-05-14T12:00:00Z".to_owned(),
+        rank: 3,
     };
     roundtrip(&evt);
+}
+
+#[test]
+fn probe_fired_event_default_rank_back_compat() {
+    let json = r#"{"probe_id":"p1","point":"llama:0:0:attn.o_proj:output","tick_id":1,"tensor_summary":null,"action":"capture","timestamp":"2026-05-14T12:00:00Z"}"#;
+    let evt: ProbeFiredEvent =
+        serde_json::from_str(json).expect("payload without rank should parse");
+    assert_eq!(evt.rank, 0);
 }
 
 #[test]

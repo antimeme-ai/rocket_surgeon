@@ -1,9 +1,11 @@
 ---
 id: BEAD-0010
 title: Perfetto trace writer — multi-GPU structural issues
-status: open
+status: resolved
 priority: medium
 created: 2026-05-19
+resolved: 2026-05-26
+resolution: ADR-0010 — process-per-rank, bit-packed UUIDs, per-sequence intern tables
 ---
 
 ## Description
@@ -45,6 +47,31 @@ multi-GPU traces need one process track per rank, each with its own subtree.
 
 ## Resolution
 
-Address as part of the multi-GPU work unit (likely WU 2.x). Each finding should
-be a task in that plan. The current single-rank implementation is correct and
-complete for its scope.
+Closed by ADR-0010 (`docs/adr/ADR-0010-perfetto-multi-rank-tracing.md`) and the
+sink rewrite on branch `fix/bead-0010-perfetto-multi-rank`. Findings disposition:
+
+- **M-1 UUID collision** — closed. New scheme is bit-packed
+  `(kind:4 | rank:12 | layer:16 | component:32)`. 4096 ranks × 64K layers ×
+  4B components; structurally non-colliding within those bounds.
+- **M-2 Per-sequence interning** — closed. Sink now holds a
+  `HashMap<sequence_id, InternTable>`; `emit_interned_names(rank)` reads that
+  rank's table and emits `InternedData` on that rank's sequence with
+  `SEQ_INCREMENTAL_STATE_CLEARED` (`TraceWriter::seen_sequences` already
+  tracked the first-packet flag). This was an active correctness bug, not
+  deferred risk — multi-rank traces would have rendered with empty/garbage
+  names past rank 0.
+- **M-4 String-keyed component_uuids** — closed. Map is now keyed by
+  `(rank, layer, component_name)`. The previous traceconv test triggered
+  this bug silently; the rewrite asserts distinctness.
+- **C-2 Hardcoded rank=0 in probe instants** — closed. `ProbeFiredEvent`
+  gained `rank: u32` (additive, `#[serde(default)]` for back-compat); the
+  worker populates it from `WorkerState.rank`; the sink routes to
+  `sequence_id(event.rank)`.
+- **SP-4 Per-rank process tracks** — closed. Ranks are now ProcessDescriptors
+  (with real PIDs surfaced through the orchestrator), with a separate daemon
+  ProcessDescriptor for daemon-originated events. The original Thread-per-rank
+  model is replaced.
+
+Deferred (called out in ADR-0010 §Deferred): cross-host clock snapshots,
+counter tracks for `tick.heartbeat`, MoE expert/router granularity, Tier 2
+CUPTI/eBPF/NVML diagnostics.

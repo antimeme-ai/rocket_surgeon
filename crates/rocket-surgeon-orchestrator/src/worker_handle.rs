@@ -58,6 +58,11 @@ impl WorkerHandle {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Return the OS PID of the spawned worker process.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Kill the worker child process and wait for it to exit.
     pub fn kill(&mut self) {
         if let Err(e) = self.child.kill() {

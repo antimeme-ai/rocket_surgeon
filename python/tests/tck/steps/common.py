@@ -1246,6 +1246,17 @@ def given_perfetto_sink_created() -> None:
     pass
 
 
+# ADR-0010 background: daemon pid is now part of the sink construction.
+@given(
+    parsers.re(
+        r'a PerfettoSink has been created for session "(?P<session>[^"]+)" '
+        r'with model "(?P<model>[^"]+)" and daemon pid (?P<pid>\d+)'
+    )
+)
+def given_perfetto_sink_created_with_pid(session: str, model: str, pid: str) -> None:
+    pass
+
+
 @given(parsers.re(r"a TraceSink is opened for writing"))
 def given_trace_sink_opened() -> None:
     pass
@@ -1253,6 +1264,12 @@ def given_trace_sink_opened() -> None:
 
 @given(parsers.re(r"rank (?P<rank>\d+) has been declared"))
 def given_rank_declared(rank: str) -> None:
+    pass
+
+
+# ADR-0010: ranks are declared as worker processes with PIDs.
+@given(parsers.re(r"worker process rank (?P<rank>\d+) with pid (?P<pid>\d+) has been declared"))
+def given_worker_process_declared(rank: str, pid: str) -> None:
     pass
 
 
@@ -1268,6 +1285,18 @@ def given_layer_declared(layer: str, rank: str) -> None:
     )
 )
 def given_component_declared(name: str, idx: str, layer: str, rank: str) -> None:
+    pass
+
+
+# ADR-0010: component index is implicit (per-rank, per-layer counter); the
+# spec doesn't need to mention it in scenarios anymore.
+@given(
+    parsers.re(
+        r'component "(?P<name>[^"]+)" '
+        r"under layer (?P<layer>\d+) rank (?P<rank>\d+) has been declared"
+    )
+)
+def given_component_declared_no_index(name: str, layer: str, rank: str) -> None:
     pass
 
 
@@ -1316,6 +1345,18 @@ def when_on_tick_stopped(layer: str, component: str) -> None:
     pass
 
 
+# ADR-0010: tick events route to the originating rank's sequence.
+@when(
+    parsers.re(
+        r"on_tick_stopped is called with rank (?P<rank>\d+) "
+        r"layer (?P<layer>\d+) "
+        r'component "(?P<component>[^"]+)"'
+    )
+)
+def when_on_tick_stopped_with_rank(rank: str, layer: str, component: str) -> None:
+    pass
+
+
 @when(
     parsers.re(
         r'on_probe_fired is called with probe_id "(?P<pid>[^"]+)" '
@@ -1323,6 +1364,24 @@ def when_on_tick_stopped(layer: str, component: str) -> None:
     )
 )
 def when_on_probe_fired(pid: str) -> None:
+    pass
+
+
+# ADR-0010: ProbeFiredEvent carries `rank`; the sink routes accordingly.
+@when(
+    parsers.re(
+        r"on_probe_fired is called with rank (?P<rank>\d+) "
+        r'probe_id "(?P<pid>[^"]+)" '
+        r'point "(?P<point>[^"]+)"'
+        r"(?P<has_summary> and tensor summary)?$"
+    )
+)
+def when_on_probe_fired_with_rank(rank: str, pid: str, point: str, has_summary: str) -> None:
+    pass
+
+
+@when(parsers.re(r"emit_interned_names is called for rank (?P<rank>\d+)"))
+def when_emit_interned_names(rank: str) -> None:
     pass
 
 
@@ -1366,9 +1425,12 @@ def then_output_min_packet_count(n: str) -> None:
     pass
 
 
+_UUID_RE = r"(?:0x[0-9A-Fa-f]+|\d+)"
+
+
 @then(
     parsers.re(
-        r"a TrackDescriptor packet exists with uuid (?P<uuid>\d+) "
+        r"a TrackDescriptor packet exists with uuid (?P<uuid>" + _UUID_RE + r") "
         r'and name "(?P<name>[^"]+)"'
     )
 )
@@ -1378,16 +1440,41 @@ def then_track_descriptor_exists(uuid: str, name: str) -> None:
 
 @then(
     parsers.re(
-        r"a TrackDescriptor packet exists with uuid (?P<uuid>\d+) "
-        r"and parent_uuid (?P<parent>\d+)"
+        r"a TrackDescriptor packet exists with uuid (?P<uuid>" + _UUID_RE + r") "
+        r"and parent_uuid (?P<parent>" + _UUID_RE + r")"
     )
 )
 def then_track_descriptor_parent(uuid: str, parent: str) -> None:
     pass
 
 
+@then(parsers.re(r"a TrackDescriptor packet exists with uuid (?P<uuid>" + _UUID_RE + r")$"))
+def then_track_descriptor_exists_uuid_only(uuid: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"the two component tracks have parent_uuid (?P<a>" + _UUID_RE + r") "
+        r"and (?P<b>" + _UUID_RE + r") respectively"
+    )
+)
+def then_two_component_tracks_parent_uuids(a: str, b: str) -> None:
+    pass
+
+
 @then(parsers.re(r"the process track has a ProcessDescriptor"))
 def then_process_track_has_descriptor() -> None:
+    pass
+
+
+@then(parsers.re(r"the daemon track has a ProcessDescriptor"))
+def then_daemon_track_has_descriptor() -> None:
+    pass
+
+
+@then(parsers.re(r"the rank track has a ProcessDescriptor"))
+def then_rank_track_has_process_descriptor() -> None:
     pass
 
 
@@ -1411,8 +1498,59 @@ def then_slice_end_exists() -> None:
     pass
 
 
+# ADR-0010: per-sequence routing assertions for tick events.
+@then(parsers.re(r"a SLICE_BEGIN TrackEvent exists on track (?P<uuid>" + _UUID_RE + r")$"))
+def then_slice_begin_on_track(uuid: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"a SLICE_BEGIN TrackEvent exists on track (?P<uuid>" + _UUID_RE + r") "
+        r"with trusted_packet_sequence_id (?P<seq>\d+)"
+    )
+)
+def then_slice_begin_on_track_with_seq(uuid: str, seq: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"a SLICE_BEGIN packet exists on track (?P<uuid>" + _UUID_RE + r") "
+        r"with trusted_packet_sequence_id (?P<seq>\d+)"
+    )
+)
+def then_slice_begin_packet_on_track_with_seq(uuid: str, seq: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"a SLICE_END TrackEvent exists on track (?P<uuid>" + _UUID_RE + r") "
+        r"with trusted_packet_sequence_id (?P<seq>\d+)"
+    )
+)
+def then_slice_end_on_track_with_seq(uuid: str, seq: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the SLICE_BEGIN packet has trusted_packet_sequence_id (?P<seq>\d+)"))
+def then_slice_begin_packet_seq(seq: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the rank-(?P<rank>\d+) SLICE_END has trusted_packet_sequence_id (?P<seq>\d+)"))
+def then_rank_slice_end_seq(rank: str, seq: str) -> None:
+    pass
+
+
 @then(parsers.re(r'a TYPE_INSTANT TrackEvent exists with name "(?P<name>[^"]+)"'))
 def then_instant_event_exists(name: str) -> None:
+    pass
+
+
+@then(parsers.re(r"the INSTANT packet has trusted_packet_sequence_id (?P<seq>\d+)"))
+def then_instant_packet_seq(seq: str) -> None:
     pass
 
 
@@ -1433,6 +1571,37 @@ def then_instant_has_annotations(fields: str) -> None:
     )
 )
 def then_interned_data_flags() -> None:
+    pass
+
+
+# ADR-0010: per-sequence interning assertions.
+@then(
+    parsers.re(
+        r"an InternedData packet exists with trusted_packet_sequence_id (?P<seq>\d+) "
+        r'containing name "(?P<name>[^"]+)"'
+    )
+)
+def then_interned_data_exists_for_seq(seq: str, name: str) -> None:
+    pass
+
+
+@then(parsers.re(r'no InternedData packet on sequence (?P<seq>\d+) contains "(?P<name>[^"]+)"'))
+def then_no_interned_data_for_seq(seq: str, name: str) -> None:
+    pass
+
+
+@then(
+    parsers.re(
+        r"the first InternedData packet on sequence (?P<seq>\d+) "
+        r"has SEQ_INCREMENTAL_STATE_CLEARED set"
+    )
+)
+def then_first_interned_packet_cleared(seq: str) -> None:
+    pass
+
+
+@then(parsers.re(r"first_packet_on_sequence is true for both initial packets"))
+def then_first_packet_on_sequence_both() -> None:
     pass
 
 
