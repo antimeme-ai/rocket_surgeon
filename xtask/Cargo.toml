@@ -2,6 +2,9 @@
 name = "xtask"
 version = "0.1.0"
 edition.workspace = true
+# Inherits MIT-OR-Apache-2.0 from [workspace.package]. Needed for cargo-deny's
+# license check even though `publish = false` keeps this off crates.io.
+license.workspace = true
 publish = false
 
 [dependencies]
