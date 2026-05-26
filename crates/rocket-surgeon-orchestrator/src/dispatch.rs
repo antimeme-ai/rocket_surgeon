@@ -84,7 +84,7 @@ fn handle_host_attach(state: &mut OrchestratorState, request: &Request) -> Respo
         );
     }
 
-    let response = match worker.recv_response() {
+    let mut response = match worker.recv_response() {
         Ok(r) => r,
         Err(e) => {
             error!("failed to receive response from worker: {e}");
@@ -104,6 +104,18 @@ fn handle_host_attach(state: &mut OrchestratorState, request: &Request) -> Respo
     if response.error.is_some() {
         worker.kill();
     } else {
+        // Stamp the worker PID into the result so the daemon can declare a
+        // Perfetto ProcessDescriptor for this rank. The worker doesn't know
+        // its own PID (it would `getpid()` on its own process anyway); the
+        // orchestrator is the one that just spawned it and holds the Child.
+        if let Some(result) = response.result.as_mut()
+            && let Some(obj) = result.as_object_mut()
+        {
+            obj.insert(
+                "worker_pid".to_owned(),
+                serde_json::Value::from(worker.pid()),
+            );
+        }
         state.worker = Some(worker);
     }
 
