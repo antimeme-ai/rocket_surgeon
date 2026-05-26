@@ -158,9 +158,12 @@ fn e2e() -> Result<()> {
         .filter(|path| {
             path.is_file()
                 && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+                && path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("test_e2e_") && n.ends_with(".py"))
+                    .is_some_and(|n| n.starts_with("test_e2e_"))
         })
         .collect();
     if scripts.is_empty() {
