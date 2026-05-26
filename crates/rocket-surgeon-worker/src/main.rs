@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 mod adapter;
 mod bridge;
 mod capture;

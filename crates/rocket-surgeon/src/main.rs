@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod bundle;
 mod dispatch;
 mod notifications;

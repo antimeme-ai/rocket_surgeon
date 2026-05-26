@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod dispatch;
 mod worker_handle;
 
