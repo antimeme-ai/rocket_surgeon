@@ -54,11 +54,14 @@ Extreme rigor baseline. No shortcuts.
 
 ### Hard rules for git (LLM agents and contributors alike)
 
-- **Never push directly to `master`.** Every change lands via PR — the branch protection rule "Changes must be made through a pull request" is real, not advisory. Use `gh auth login` to get write perms; don't admin-bypass.
-- **Never `--no-verify` on a push to `master` or any shared release branch.** Feature branches are fine when local hooks are demonstrably broken (document the reason in the commit/PR), but pushed-to-master is always hook-gated.
-- **Admin overrides on branch protection are off-limits without explicit human confirmation.** If you have admin and the user has told you to ship, that's authorization to *open the PR and merge through the normal flow*, not to bypass the flow.
+The requirement is that every change to `master` **has a PR**. It is NOT required that the PR be approved by a separate human reviewer — self-merging your own PR once CI is green is fine. The PR is the audit trail and the CI gate; that's the whole job.
+
+- **Never push directly to `master`.** Every change goes through a PR. The branch protection rule "Changes must be made through a pull request" is real, not advisory. Don't admin-bypass; use `gh auth login` to get write perms and open the PR.
+- **Self-merge is fine.** Once your PR's CI is green, `gh pr merge --squash` (or `--merge`) on your own work is allowed. No external approving review is required.
+- **Never `--no-verify` on a push to `master`.** Feature branches are fine when local hooks are demonstrably broken (document the reason), but the PR's CI run is the real gate and must pass.
+- **Admin overrides on branch protection are off-limits without explicit human confirmation.** If the user has told you to ship and CI is green, that's authorization to self-merge through the normal flow — not to bypass the flow.
 - **If `gh pr create` fails for auth reasons, stop and ask the user to re-auth.** Don't improvise an alternative path that ends up at direct-push-to-master.
-- **"gg2g" / "ship it" / "let's go" do NOT mean "skip the PR ceremony."** They mean "proceed with the agreed plan" — which in this repo always includes PRs.
+- **"gg2g" / "ship it" / "let's go" do NOT mean "skip the PR ceremony."** They mean "open the PR, wait for CI, self-merge."
 
 ## Design principles
 
