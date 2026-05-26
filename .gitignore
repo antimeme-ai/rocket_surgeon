@@ -43,3 +43,7 @@ venv/
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Per-developer direnv overrides
+.envrc
+.envrc.local
