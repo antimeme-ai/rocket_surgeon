@@ -52,6 +52,14 @@ Extreme rigor baseline. No shortcuts.
 - Beads for ALL issue tracking (in .context/beads/)
 - Git commits: frequent, atomic, descriptive
 
+### Hard rules for git (LLM agents and contributors alike)
+
+- **Never push directly to `master`.** Every change lands via PR — the branch protection rule "Changes must be made through a pull request" is real, not advisory. Use `gh auth login` to get write perms; don't admin-bypass.
+- **Never `--no-verify` on a push to `master` or any shared release branch.** Feature branches are fine when local hooks are demonstrably broken (document the reason in the commit/PR), but pushed-to-master is always hook-gated.
+- **Admin overrides on branch protection are off-limits without explicit human confirmation.** If you have admin and the user has told you to ship, that's authorization to *open the PR and merge through the normal flow*, not to bypass the flow.
+- **If `gh pr create` fails for auth reasons, stop and ask the user to re-auth.** Don't improvise an alternative path that ends up at direct-push-to-master.
+- **"gg2g" / "ship it" / "let's go" do NOT mean "skip the PR ceremony."** They mean "proceed with the agreed plan" — which in this repo always includes PRs.
+
 ## Design principles
 
 - Dual-interface: TUI for humans, structured protocol for LLMs
