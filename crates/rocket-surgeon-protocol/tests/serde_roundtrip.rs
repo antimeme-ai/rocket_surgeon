@@ -1347,6 +1347,22 @@ fn worldline_state_default_skips_in_session_state() {
 }
 
 #[test]
+fn worldline_state_non_zero_cursor_with_empty_segments_serializes() {
+    // Catches a real wire-format hazard: is_empty() must NOT return true
+    // when current_segment is non-default, otherwise skip_serializing_if
+    // drops the field and the cursor roundtrips back to 0 on the other side.
+    let state = WorldlineState {
+        current_segment: 7,
+        segments: vec![],
+    };
+    assert!(
+        !state.is_empty(),
+        "non-zero current_segment must not be elided"
+    );
+    roundtrip(&state);
+}
+
+#[test]
 fn worldline_state_with_segments_roundtrip() {
     let state = WorldlineState {
         current_segment: 1,
