@@ -44,6 +44,7 @@ from e2e_harness import (  # noqa: E402
 
 PROBE_ID = "dev-capture-all"
 SETUP_TIMEOUT_SEC = 60
+MAX_SCRIPT_DEPTH = 16
 
 
 class DriverState:
@@ -55,6 +56,7 @@ class DriverState:
         self.last_status: str | None = None
         self.last_tick: int | None = None
         self.req_seq = 1000  # leave low ids for setup
+        self.script_depth = 0  # bounded :script -> :script recursion
 
     def next_id(self) -> int:
         self.req_seq += 1
@@ -172,6 +174,14 @@ def _kill(state: DriverState) -> None:
     except subprocess.TimeoutExpired:
         state.proc.kill()
         state.proc.wait(timeout=5)
+    # Explicitly close the pipes so fds don't leak across respawns.
+    # Popen leaves them open even after wait(); on a long session that
+    # churns daemons (repeated :reset or daemon crashes) the driver
+    # eventually hits the per-process fd limit.
+    for stream in (state.proc.stdin, state.proc.stdout, state.proc.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
     state.proc = None
     state.session_id = None
     state.last_status = None
@@ -210,7 +220,10 @@ def _dispatch_json(state: DriverState, payload: dict) -> None:
         return
     try:
         resp = _send(state, method, payload or None, req_id=state.next_id())
-    except (EOFError, BrokenPipeError) as exc:
+    except (EOFError, BrokenPipeError, TimeoutError) as exc:
+        # TimeoutError is treated as daemon-death: the pipe is now out of
+        # sync (the daemon's late response would be read as the next
+        # request's reply), so the safe recovery is a full respawn.
         _banner(f"daemon died ({exc}) — respawning")
         _kill(state)
         _spawn_and_setup(state)
@@ -219,7 +232,7 @@ def _dispatch_json(state: DriverState, payload: dict) -> None:
     _print_response(resp)
 
 
-def _dispatch_command(state: DriverState, line: str) -> bool:  # noqa: PLR0911
+def _dispatch_command(state: DriverState, line: str) -> bool:  # noqa: PLR0911, PLR0912
     """Handle a `:command` line. Returns False if the loop should exit."""
     parts = shlex.split(line)
     cmd = parts[0]
@@ -248,11 +261,25 @@ def _dispatch_command(state: DriverState, line: str) -> bool:  # noqa: PLR0911
         if not path.is_file():
             _banner(f"error: not a file: {path}")
             return True
-        for script_line in path.read_text().splitlines():
-            stripped = script_line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            _run_line(state, stripped)
+        # Bounded recursion: a script that :scripts itself (or a cycle)
+        # would otherwise infinite-loop the driver. 16 is plenty for any
+        # legitimate nesting; well below Python's recursion limit.
+        if state.script_depth >= MAX_SCRIPT_DEPTH:
+            _banner(f"error: :script nesting exceeded depth {MAX_SCRIPT_DEPTH}")
+            return True
+        state.script_depth += 1
+        try:
+            for script_line in path.read_text().splitlines():
+                stripped = script_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # Honor :quit inside a script — _run_line returns False
+                # when the loop should exit. Propagate that out so the
+                # outer REPL closes too.
+                if not _run_line(state, stripped):
+                    return False
+        finally:
+            state.script_depth -= 1
         return True
     _banner(f"unknown command: {cmd}  (try :help)")
     return True
