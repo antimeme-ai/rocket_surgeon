@@ -37,19 +37,22 @@ pre-commit:
       run: .venv/bin/mypy python/rocket_surgeon
 
 pre-push:
-  # piped, not parallel: cargo-test and e2e both build the workspace and
-  # share target/. Run concurrently they serialize on Cargo's build lock and
-  # thrash the PyO3 feature-set rebuild (the worker/python crates resolve
-  # pyo3 features differently). Sequential definition order is correct and
-  # fails fast — no point running the slow e2e suite if unit tests are red.
+  # Lightened pre-push: unit tests only, no e2e. The full e2e suite (esp.
+  # tests/test_e2e_phase1.py with real GPT-2 124M) used to gate every push
+  # and added ~15-20 min of wall-clock locally. It also broke on parallel
+  # pushes — cargo's target lock and /dev/shm contention serialized the
+  # shared-build steps and thrashed PyO3 feature unification.
+  #
+  # E2E now lives exclusively in CI, sharded into `e2e-fast` and
+  # `e2e-phase1` jobs that run in parallel with lint and unit tests (see
+  # .github/workflows/ci.yml). If you want the full local gate before
+  # pushing, run `cargo xtask ci` by hand — that subcommand is unchanged.
+  #
+  # piped, not parallel: both commands invoke cargo build steps and
+  # serialize on the target/ build lock anyway. Sequential = fail fast.
   piped: true
   commands:
     cargo-test:
       run: PATH="$PWD/.venv/bin:$PATH" cargo xtask test
     pytest:
       run: .venv/bin/pytest python/tests/
-    e2e:
-      # Spawns the real daemon + orchestrator + worker and drives the
-      # JSON-RPC protocol. PATH override so the scripts' `python3` is the
-      # venv interpreter, matching cargo-test above.
-      run: PATH="$PWD/.venv/bin:$PATH" cargo xtask e2e

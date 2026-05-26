@@ -1,79 +1,335 @@
-# Remote CI for rocket_surgeon — BEAD-0016.
+# Remote CI for rocket_surgeon — BEAD-0016 (parallelized).
 #
-# Produces the status check `master` branch protection requires, so PRs no
-# longer need `gh pr merge --admin`. The job is named `ci` (see the `name:`
-# on the job below); set that string as the required status check on the
-# `master` protection rule once this workflow's first run is green.
+# The required branch-protection status check is `ci-gate` — the final
+# aggregator job at the bottom of this file. It depends on every other job
+# and succeeds only when they all pass, giving branch protection a single
+# stable check name regardless of how the fan-out evolves.
 #
-# The job runs `cargo xtask ci` verbatim — the same gate `lefthook` enforces
-# locally (fmt + clippy + ruff + mypy + cargo test + pytest + e2e) — so the
-# remote and local gates are byte-identical. See xtask/src/main.rs (Ci arm).
+# IMPORTANT: When this workflow first lands, update the `master` branch
+# protection rule: replace the required check `ci` with `ci-gate`. Until
+# that flip, PRs will see the old `ci` check as missing and merge will be
+# blocked. After the flip, `gh pr merge` works without `--admin`.
+#
+# Architecture: a single checkout/bootstrap is NOT shared across jobs —
+# GitHub Actions jobs run on separate runners, so each job pays its own
+# setup cost. We accept this because (a) the jobs run in parallel, so
+# wall-clock is dominated by the slowest job, and (b) the per-job caches
+# (rust-cache, uv, HF Hub) reduce the actual cost on warm runs to <1 min.
+#
+# Job DAG:
+#   checkout fanout -> {lint, rust-test, pytest, e2e-fast, e2e-phase1}
+#                                          \         \         \
+#                                           +---------+---------+--> ci-gate
+#
+# `cargo xtask ci` is still the canonical local one-shot — see
+# xtask/src/main.rs (Ci arm) and lefthook.yml. CI no longer calls it
+# because the whole point of this file is to fan out for wall-clock.
 name: CI
 
 on:
   pull_request:
     branches: [master]
+    # Doc-only PRs skip CI entirely. Anything that touches code (Rust,
+    # Python, workflows, configs) still triggers — only the listed paths
+    # are filtered out.
+    paths-ignore:
+      - 'docs/**'
+      - '.context/**'
+      - 'README.md'
+      - '**/*.md'
   push:
     branches: [master]
+    # No paths-ignore on push: master pushes always run, even doc-only,
+    # so the master branch status reflects every commit.
 
-# Least privilege: the job only reads the repo. No write scopes, no secrets.
+# Least privilege: jobs only read the repo. No write scopes, no secrets.
 permissions:
   contents: read
 
-# One in-flight run per ref; a new push cancels the stale run.
+# One in-flight run per workflow+ref. A new push cancels the stale run
+# (including all fan-out jobs). Group key is workflow-scoped so unrelated
+# workflows on the same ref don't collide.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  ci:
-    name: ci
+  # ------------------------------------------------------------------ lint
+  # Fmt + clippy + ruff + mypy + cargo-deny. Fastest signal — runs on every
+  # change and surfaces formatting/typing errors in 3-5 min instead of
+  # waiting behind the 15 min phase-1 e2e.
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Rust 1.88.0 — workspace `rust-version`, edition 2024. rustfmt + clippy
-      # components are required by `cargo xtask ci` (fmt --check, clippy).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
 
-      # Cache the cargo registry and target/ dir. Keyed on Cargo.lock by the
-      # action; the explicit job-scoped prefix keeps it isolated.
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: ci
+          prefix-key: ci-lint
 
-      # uv provisions the interpreter and builds the project venv.
-      # `python-version` must track `.python-version` (currently 3.11) — it
-      # only sets uv's default `UV_PYTHON`; `scripts/bootstrap.sh` re-reads
-      # `.python-version` itself, so the venv interpreter is pinned regardless.
-      # `enable-cache` caches the uv download/wheel store.
-      # Pinned to the exact tag: setup-uv's v8 line has no moving `v8` major
-      # tag yet (only `v8.0.0` / `v8.1.0`), so a `@v8` ref fails to resolve.
       - name: Install uv and pinned Python
         uses: astral-sh/setup-uv@v8.1.0
         with:
           python-version: "3.11"
           enable-cache: true
 
-      # `scripts/bootstrap.sh` (invoked by `cargo xtask setup`) hard-fails if
-      # `lefthook` is not on PATH. `lefthook install` only writes local git
-      # hook files — inert in CI — but the binary must exist for setup to run.
-      # `uv tool install` drops the binary in `~/.local/bin`; add that to
-      # PATH explicitly so the `cargo xtask setup` step below resolves it.
       - name: Install lefthook
         run: |
           uv tool install lefthook
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Bootstrap: venv, dev deps, maturin PyO3 extension, workspace build.
       - name: Bootstrap project (cargo xtask setup)
         run: cargo xtask setup
 
-      # The gate: fmt + clippy + ruff + mypy + cargo test + pytest + e2e.
-      - name: Run CI suite (cargo xtask ci)
-        run: cargo xtask ci
+      - name: cargo fmt --check
+        run: cargo xtask fmt --check
+
+      - name: cargo clippy (all targets, -D warnings)
+        # PATH override so clippy's PyO3 build scripts see the venv python.
+        run: PATH="$PWD/.venv/bin:$PATH" cargo xtask clippy
+
+      - name: ruff check + format --check
+        run: cargo xtask ruff
+
+      - name: mypy
+        run: cargo xtask mypy
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
+  # -------------------------------------------------------------- rust-test
+  # Rust unit + integration tests via `cargo xtask test`. Excludes the PyO3
+  # cdylib crates (see xtask/src/main.rs `test` fn for why).
+  rust-test:
+    name: rust-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-rust-test
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install lefthook
+        run: |
+          uv tool install lefthook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Bootstrap project (cargo xtask setup)
+        run: cargo xtask setup
+
+      - name: cargo xtask test
+        # PATH override: PyO3 build scripts in workspace crates need python3.
+        run: PATH="$PWD/.venv/bin:$PATH" cargo xtask test
+
+  # ----------------------------------------------------------------- pytest
+  # Python unit tests under python/tests/. Fast, isolated from the daemon.
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-pytest
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install lefthook
+        run: |
+          uv tool install lefthook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Bootstrap project (cargo xtask setup)
+        run: cargo xtask setup
+
+      - name: pytest python/tests
+        run: .venv/bin/pytest python/tests/ -v
+
+  # --------------------------------------------------------------- e2e-fast
+  # All tests/test_e2e_*.py EXCEPT test_e2e_phase1.py, which is sharded into
+  # its own job below (real GPT-2 124M download + run, ~10-12 min).
+  # Each script builds the workspace and drives the JSON-RPC protocol.
+  # We invoke them directly (mirroring xtask/e2e's loop) with an explicit
+  # phase1 exclusion — keeps the xtask subcommand unmodified for local use.
+  e2e-fast:
+    name: e2e-fast
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-e2e-fast
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install lefthook
+        run: |
+          uv tool install lefthook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # HF Hub cache. The e2e suite pulls hf-internal-testing/tiny-random-*
+      # models on cold runs (~tens of MB total). Keyed by the e2e test set
+      # so test edits don't invalidate the cache; falls back to any prior
+      # HF cache on this runner OS via restore-keys.
+      - name: Cache Hugging Face Hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-hub-${{ runner.os }}-${{ hashFiles('tests/test_e2e_*.py') }}
+          restore-keys: hf-hub-${{ runner.os }}-
+
+      - name: Bootstrap project (cargo xtask setup)
+        run: cargo xtask setup
+
+      - name: Run e2e (excluding phase1)
+        # Loop matches xtask/src/main.rs::e2e but skips test_e2e_phase1.py.
+        # `set -e` is OFF so all scripts run; we tally failures and exit 1
+        # at the end if any failed (same semantics as the xtask version).
+        run: |
+          PATH="$PWD/.venv/bin:$PATH"
+          export PATH
+          failures=()
+          for script in tests/test_e2e_*.py; do
+            name=$(basename "$script")
+            if [ "$name" = "test_e2e_phase1.py" ]; then
+              echo "::group::skip $name (sharded into e2e-phase1 job)"
+              echo "$name runs in its own job"
+              echo "::endgroup::"
+              continue
+            fi
+            echo "::group::$name"
+            if ! .venv/bin/python -u "$script"; then
+              failures+=("$name")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failures[@]} -gt 0 ]; then
+            echo "FAILED: ${failures[*]}" >&2
+            exit 1
+          fi
+
+  # ------------------------------------------------------------- e2e-phase1
+  # The big one: real GPT-2 124M download + forward-pass conformance.
+  # Sharded so a fmt/clippy failure isn't gated behind 15 minutes of GPU-CPU
+  # math. HF cache is critical here — saves ~500MB download on warm runs.
+  e2e-phase1:
+    name: e2e-phase1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ci-e2e-phase1
+
+      - name: Install uv and pinned Python
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install lefthook
+        run: |
+          uv tool install lefthook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Hugging Face Hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-hub-${{ runner.os }}-${{ hashFiles('tests/test_e2e_*.py') }}
+          restore-keys: hf-hub-${{ runner.os }}-
+
+      - name: Bootstrap project (cargo xtask setup)
+        run: cargo xtask setup
+
+      - name: Run e2e phase1
+        run: PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -u tests/test_e2e_phase1.py
+
+  # --------------------------------------------------------------- ci-gate
+  # Aggregator. Branch protection requires THIS job. It does no work —
+  # `needs` enforces that every fan-out job passes. If you add a new
+  # required job above, add it to `needs` here too.
+  ci-gate:
+    name: ci-gate
+    needs: [lint, rust-test, pytest, e2e-fast, e2e-phase1]
+    runs-on: ubuntu-latest
+    # Always run so the gate reports a definite pass/fail even if an
+    # upstream job is cancelled. The conditional below converts any
+    # non-success in `needs` into a hard failure of this job.
+    if: always()
+    steps:
+      - name: All required jobs succeeded
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] \
+             || [ "${{ needs.rust-test.result }}" != "success" ] \
+             || [ "${{ needs.pytest.result }}" != "success" ] \
+             || [ "${{ needs.e2e-fast.result }}" != "success" ] \
+             || [ "${{ needs.e2e-phase1.result }}" != "success" ]; then
+            echo "one or more required jobs did not succeed" >&2
+            echo "  lint:        ${{ needs.lint.result }}" >&2
+            echo "  rust-test:   ${{ needs.rust-test.result }}" >&2
+            echo "  pytest:      ${{ needs.pytest.result }}" >&2
+            echo "  e2e-fast:    ${{ needs.e2e-fast.result }}" >&2
+            echo "  e2e-phase1:  ${{ needs.e2e-phase1.result }}" >&2
+            exit 1
+          fi
+          echo "all required jobs succeeded"
