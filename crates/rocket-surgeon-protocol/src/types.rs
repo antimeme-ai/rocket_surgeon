@@ -14,6 +14,35 @@ pub struct SessionState {
     pub active_probes: Vec<String>,
     pub checkpoints: Vec<CheckpointRef>,
     pub available_actions: Vec<ActionName>,
+    #[serde(default, skip_serializing_if = "WorldlineState::is_empty")]
+    pub worldline: WorldlineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorldlineState {
+    pub current_segment: u32,
+    pub segments: Vec<WorldlineSegment>,
+}
+
+impl WorldlineState {
+    /// True only when both the segment list and current-segment cursor are
+    /// at their default values. Checking both prevents `skip_serializing_if`
+    /// from silently dropping a non-zero `current_segment` when `segments`
+    /// happens to be empty — a real wire-format hazard if a producer
+    /// initializes the cursor before pushing the first segment.
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty() && self.current_segment == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldlineSegment {
+    pub id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_segment: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_tick: Option<u64>,
+    pub tick_range: (u64, u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

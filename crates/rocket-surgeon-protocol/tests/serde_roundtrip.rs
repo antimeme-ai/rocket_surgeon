@@ -7,16 +7,16 @@ use rocket_surgeon_protocol::messages::{
     BranchDropRequest, BranchDropResponse, BranchForkRequest, BranchForkResponse, BranchTier,
     BranchTierChangedEvent, CheckpointRequest, CheckpointResponse, CreateCheckpointTier,
     DetachRequest, DetachResponse, DiscoverMatch, DiscoverRequest, DiscoverResponse, Divergence,
-    ErrorEvent, EventType, FocusAnchor, FocusSelector, HostViewRequest, HostViewResponse,
-    InitializeRequest, InitializeResponse, InspectDetail, InspectRequest, InspectResponse,
-    InterveneRequest, KvCacheEntry, KvEvictedEvent, KvMetric, KvOverlay, KvReadRequest,
-    KvReadResponse, KvSlot, KvUpdateEvent, MemoryUsage, ProbeFiredEvent, ProbeRequest,
-    ProbeResponse, ReplayDivergenceEvent, ReplayRequest, ReplayResponse, ReplayStopAt,
-    StatusRequest, StatusResponse, StepRequest, StepResponse, SubscribeFilter, SubscribeRequest,
-    SubscribeResponse, SweepMetric, SweepRequest, SweepResponse, SweepTrial, SweepTrialResult,
-    TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest, UnsubscribeResponse,
-    ViewDefineRequest, ViewDefineResponse, ViewFocusRequest, ViewFocusResponse, ViewRequest,
-    ViewResponse,
+    ErrorEvent, EventType, FocusAnchor, FocusSelector, HostReplayRequest, HostReplayResponse,
+    HostViewRequest, HostViewResponse, InitializeRequest, InitializeResponse, InspectDetail,
+    InspectRequest, InspectResponse, InterveneRequest, KvCacheEntry, KvEvictedEvent, KvMetric,
+    KvOverlay, KvReadRequest, KvReadResponse, KvSlot, KvUpdateEvent, MemoryUsage, ProbeFiredEvent,
+    ProbeRequest, ProbeResponse, ReplayDivergenceEvent, ReplayRequest, ReplayResponse,
+    ReplayStopAt, StatusRequest, StatusResponse, StepRequest, StepResponse, SubscribeFilter,
+    SubscribeRequest, SubscribeResponse, SweepMetric, SweepRequest, SweepResponse, SweepTrial,
+    SweepTrialResult, TickHeartbeatEvent, TickStoppedEvent, UnsubscribeRequest,
+    UnsubscribeResponse, ViewDefineRequest, ViewDefineResponse, ViewFocusRequest,
+    ViewFocusResponse, ViewRequest, ViewResponse,
 };
 use rocket_surgeon_protocol::types::{
     AblateMode, ActionName, AliasEntry, BuiltInView, Capabilities, CheckpointRef, CheckpointTier,
@@ -25,7 +25,7 @@ use rocket_surgeon_protocol::types::{
     Parallelism, Phase, Placement, PlacementType, PositionEnvelope, ProbeAction, ProbeConfig,
     ProbeDefinition, ResponseEnvelope, SessionState, ShardingInfo, Status, StepDirection,
     TensorHandle, TensorStats, TensorSummary, TickClock, TickEvent, TickGranularity, TickLayerInfo,
-    TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat,
+    TickMapEntry, TickPosition, TopKEntry, Transport, WireFormat, WorldlineSegment, WorldlineState,
 };
 use serde_json::json;
 
@@ -62,6 +62,7 @@ fn sample_session_state() -> SessionState {
         active_probes: vec!["probe-1".to_owned()],
         checkpoints: vec![],
         available_actions: vec![ActionName::Step, ActionName::Inspect],
+        worldline: WorldlineState::default(),
     }
 }
 
@@ -1238,6 +1239,9 @@ fn replay_request_roundtrip() {
         }),
         verify: true,
         envelope: EnvelopeMode::default(),
+        deterministic: None,
+        cosine_threshold: None,
+        mre_threshold: None,
     };
     roundtrip(&req);
 }
@@ -1267,6 +1271,117 @@ fn replay_response_roundtrip() {
         verified: true,
     };
     roundtrip(&resp);
+}
+
+#[test]
+fn replay_request_new_fields_roundtrip() {
+    let req = ReplayRequest {
+        from_checkpoint: "cp-1".to_owned(),
+        interventions: None,
+        stop_at: None,
+        verify: true,
+        envelope: EnvelopeMode::default(),
+        deterministic: Some(true),
+        cosine_threshold: Some(0.9999),
+        mre_threshold: Some(0.0005),
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn replay_request_new_fields_skip_when_none() {
+    let req = ReplayRequest {
+        from_checkpoint: "cp-1".to_owned(),
+        interventions: None,
+        stop_at: None,
+        verify: true,
+        envelope: EnvelopeMode::default(),
+        deterministic: None,
+        cosine_threshold: None,
+        mre_threshold: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("deterministic").is_none());
+    assert!(json.get("cosine_threshold").is_none());
+    assert!(json.get("mre_threshold").is_none());
+}
+
+#[test]
+fn host_replay_request_roundtrip() {
+    let req = HostReplayRequest {
+        model_handle: 7,
+        checkpoint_id: "cp-42".to_owned(),
+        stop_at: Some(ReplayStopAt {
+            layer: 12,
+            component: "attn.o_proj".to_owned(),
+        }),
+        interventions: vec![],
+        verify: true,
+        deterministic: true,
+        cosine_threshold: 0.9999,
+        mre_threshold: 0.0005,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn host_replay_response_roundtrip() {
+    let resp = HostReplayResponse {
+        ticks_replayed: 5,
+        stopped_at: sample_tick_position(),
+        divergences: vec![],
+        verified: true,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn worldline_state_default_skips_in_session_state() {
+    let state = sample_session_state();
+    assert!(state.worldline.is_empty());
+    let json = serde_json::to_value(&state).unwrap();
+    assert!(
+        json.get("worldline").is_none(),
+        "empty worldline should be skipped"
+    );
+}
+
+#[test]
+fn worldline_state_non_zero_cursor_with_empty_segments_serializes() {
+    // Catches a real wire-format hazard: is_empty() must NOT return true
+    // when current_segment is non-default, otherwise skip_serializing_if
+    // drops the field and the cursor roundtrips back to 0 on the other side.
+    let state = WorldlineState {
+        current_segment: 7,
+        segments: vec![],
+    };
+    assert!(
+        !state.is_empty(),
+        "non-zero current_segment must not be elided"
+    );
+    roundtrip(&state);
+}
+
+#[test]
+fn worldline_state_with_segments_roundtrip() {
+    let state = WorldlineState {
+        current_segment: 1,
+        segments: vec![
+            WorldlineSegment {
+                id: 0,
+                parent_segment: None,
+                branch_tick: None,
+                tick_range: (0, 100),
+            },
+            WorldlineSegment {
+                id: 1,
+                parent_segment: Some(0),
+                branch_tick: Some(50),
+                tick_range: (50, 75),
+            },
+        ],
+    };
+    roundtrip(&state);
 }
 
 #[test]
