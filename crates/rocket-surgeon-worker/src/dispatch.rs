@@ -423,7 +423,7 @@ fn build_tick_probe_point(
         layer: NumOrWild::Num(layer),
         component: ComponentOrWild::Path(vec![ComponentSeg::Named(canonical.to_owned())]),
         call_index: NumOrWild::Num(call_index),
-        event: NameOrWild::Name("fwd".to_owned()),
+        event: NameOrWild::Name("output".to_owned()),
     }
 }
 
@@ -622,7 +622,7 @@ fn try_apply_interventions<'py>(
         state.rank,
         layer,
         canonical,
-        "fwd",
+        "output",
         state.tick_state.tick_id(),
         handle,
     )?;
@@ -1589,7 +1589,7 @@ fn run_replay_loop(
                     state.rank,
                     layer,
                     &canonical,
-                    "fwd",
+                    "output",
                     state.tick_state.tick_id(),
                     handle,
                 )?;
