@@ -94,7 +94,7 @@ def reference_residual_norms() -> list[float]:
     return [torch.norm(captured[i].float(), p=2).item() for i in range(n_blocks)]
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     proc = spawn_daemon()
     req_id = 0
 

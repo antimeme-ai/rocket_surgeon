@@ -45,7 +45,18 @@ pub fn probe_matches_target(probe_point: &str, target: &str) -> bool {
     let Ok(point) = ProbePoint::parse(probe_point) else {
         return false;
     };
-    let Ok(tgt) = ProbePoint::parse(target) else {
+    let segments: Vec<&str> = target.split(':').collect();
+    let normalized;
+    let parse_target = if segments.len() == 5 {
+        normalized = format!(
+            "{}:{}:{}:{}:*:{}",
+            segments[0], segments[1], segments[2], segments[3], segments[4]
+        );
+        &normalized
+    } else {
+        target
+    };
+    let Ok(tgt) = ProbePoint::parse(parse_target) else {
         return false;
     };
     point.matches(&tgt)
@@ -184,6 +195,26 @@ mod tests {
         assert!(!probe_matches_target(
             "model:0:0:q_proj:0:fwd",
             "model:0:0:k_proj:0:fwd"
+        ));
+    }
+
+    #[test]
+    fn five_segment_target_matches_six_segment_probe() {
+        assert!(probe_matches_target(
+            "llama:0:0:q_proj:0:output",
+            "llama:0:0:q_proj:output",
+        ));
+    }
+
+    #[test]
+    fn five_segment_target_wildcard_call_index() {
+        assert!(probe_matches_target(
+            "gpt2:0:3:down_proj:0:output",
+            "gpt2:0:3:down_proj:output",
+        ));
+        assert!(!probe_matches_target(
+            "gpt2:0:3:down_proj:0:output",
+            "gpt2:0:3:up_proj:output",
         ));
     }
 }

@@ -27,7 +27,7 @@ from e2e_harness import (
 )
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     proc = spawn_daemon()
 
     try:

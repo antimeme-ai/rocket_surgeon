@@ -27,6 +27,15 @@ _ELEMENT_SIZES = {
 }
 
 
+def activation_available(
+    last_outputs: dict[tuple[str, int], Any],
+    component_path: str,
+    call_index: int,
+) -> bool:
+    """Check whether an activation has been captured for this component."""
+    return (component_path, call_index) in last_outputs
+
+
 def capture_activation(
     last_outputs: dict[tuple[str, int], Any],
     component_path: str,

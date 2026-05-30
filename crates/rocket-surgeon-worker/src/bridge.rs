@@ -405,6 +405,20 @@ pub fn unregister_arena_cuda(ptr: usize) -> anyhow::Result<bool> {
     })
 }
 
+pub fn activation_available(
+    py: Python<'_>,
+    last_outputs: &pyo3::PyObject,
+    component_path: &str,
+    call_index: u32,
+) -> anyhow::Result<bool> {
+    let ckpt = py.import("rocket_surgeon.checkpoint")?;
+    let result: bool = ckpt
+        .getattr("activation_available")?
+        .call1((last_outputs.bind(py), component_path, call_index))?
+        .extract()?;
+    Ok(result)
+}
+
 pub fn capture_activation(
     py: Python<'_>,
     last_outputs: &pyo3::PyObject,

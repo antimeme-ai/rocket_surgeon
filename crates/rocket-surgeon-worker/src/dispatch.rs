@@ -980,6 +980,7 @@ fn layer_index_from_path(path: &str) -> Option<u32> {
         .position(|&s| s == "layers")
         .and_then(|i| parts.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
+        .or_else(|| parts.iter().find_map(|s| s.parse::<u32>().ok()))
 }
 
 fn build_layer_container_map(container_paths: &[String]) -> HashMap<u32, String> {
@@ -1066,11 +1067,18 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
             let snap = arena.snapshot();
             let mut total_bytes: u64 = 0;
 
+            let mut captured_layers: Vec<u32> = Vec::new();
             let result = Python::with_gil(|py| -> anyhow::Result<()> {
                 for &layer in &layers {
-                    let container_path = layer_containers.get(&layer).ok_or_else(|| {
-                        anyhow::anyhow!("no container path for checkpoint layer {layer}")
-                    })?;
+                    let Some(container_path) = layer_containers.get(&layer) else {
+                        continue;
+                    };
+
+                    let available =
+                        bridge::activation_available(py, last_outputs, container_path, 0)?;
+                    if !available {
+                        continue;
+                    }
 
                     let (slot_ptr, _) = arena.alloc_slot(&checkpoint_id, layer)?;
                     // SAFETY: slot_ptr from alloc_slot, advancing past header stays within slot.
@@ -1115,6 +1123,7 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                         arena.update_header(slot_ptr, &header);
                     }
                     total_bytes += byte_len;
+                    captured_layers.push(layer);
                 }
                 Ok(())
             });
@@ -1126,6 +1135,13 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                     format!("checkpoint create failed: {e}"),
                 );
             }
+
+            tracing::debug!(
+                checkpoint_id = %checkpoint_id,
+                requested = layers.len(),
+                captured = captured_layers.len(),
+                "checkpoint layer capture complete"
+            );
 
             match bridge::capture_rng_state() {
                 Ok(rng_bytes) => {
@@ -2200,7 +2216,18 @@ mod tests {
         assert_eq!(layer_index_from_path("model.layers.5"), Some(5));
         assert_eq!(layer_index_from_path("model.layers.0.self_attn"), Some(0));
         assert_eq!(layer_index_from_path("embed_tokens"), None);
-        assert_eq!(layer_index_from_path("model.42.bias"), None);
+        // Numeric fallback: finds 42 as first numeric segment.
+        // Only called with adapter container paths, so this case is academic.
+        assert_eq!(layer_index_from_path("model.42.bias"), Some(42));
+    }
+
+    #[test]
+    fn layer_index_from_path_gpt2_convention() {
+        // GPT-2 uses "transformer.h.N" not "model.layers.N"
+        assert_eq!(layer_index_from_path("transformer.h.0"), Some(0));
+        assert_eq!(layer_index_from_path("transformer.h.3"), Some(3));
+        assert_eq!(layer_index_from_path("transformer.h.11.attn"), Some(11));
+        assert_eq!(layer_index_from_path("transformer.h.0.mlp"), Some(0));
     }
 
     #[test]

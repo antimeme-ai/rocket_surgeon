@@ -39,7 +39,7 @@ def recv_response(proc: subprocess.Popen, req_id: int, timeout: float = TIMEOUT_
     raise TimeoutError(msg)
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     proc = spawn_daemon()
 
     try:
