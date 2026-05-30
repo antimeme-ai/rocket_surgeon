@@ -197,7 +197,7 @@ def run_test() -> None:
             proc,
             make_request(
                 "rocket/inspect",
-                {"target": "model:0:*:*:*:fwd", "detail": "summary"},
+                {"target": "*:0:*:*:*:output", "detail": "summary"},
                 req_id,
             ),
         )

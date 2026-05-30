@@ -75,7 +75,7 @@ def run_test() -> None:
                     "recipe": {
                         "id": "iv-scale-all",
                         "type": "scale",
-                        "target": "*:*:*:*:fwd",
+                        "target": "*:*:*:*:output",
                         "params": {"factor": 0.001},
                         "priority": 0,
                     },

@@ -118,7 +118,7 @@ def run_test() -> None:
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                     "detail": "summary",
                 },
                 req_id,
@@ -152,7 +152,7 @@ def run_test() -> None:
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                     "detail": "slice",
                     "slices": [[0, 8]],
                 },
