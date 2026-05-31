@@ -48,9 +48,10 @@ pub fn probe_matches_target(probe_point: &str, target: &str) -> bool {
     let segments: Vec<&str> = target.split(':').collect();
     let normalized;
     let parse_target = if segments.len() == 5 {
+        let comp = strip_bracket_suffix(segments[3]);
         normalized = format!(
             "{}:{}:{}:{}:*:{}",
-            segments[0], segments[1], segments[2], segments[3], segments[4]
+            segments[0], segments[1], segments[2], comp, segments[4]
         );
         &normalized
     } else {
@@ -60,6 +61,13 @@ pub fn probe_matches_target(probe_point: &str, target: &str) -> bool {
         return false;
     };
     point.matches(&tgt)
+}
+
+fn strip_bracket_suffix(s: &str) -> &str {
+    match s.find('[') {
+        Some(pos) => &s[..pos],
+        None => s,
+    }
 }
 
 #[cfg(test)]

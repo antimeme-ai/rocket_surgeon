@@ -941,7 +941,8 @@ fn handle_host_inspect(state: &mut WorkerState, request: &Request) -> Response {
         );
     }
 
-    let tensors = match collect_tensors(state, &matched_components) {
+    let head_index = extract_head_index(&req.target).map(|(_, idx)| idx);
+    let tensors = match collect_tensors(state, &matched_components, head_index) {
         Ok(t) => t,
         Err(e) => {
             return internal_error(request.id.clone(), format!("inspect failed: {e}"));
@@ -959,6 +960,7 @@ fn handle_host_inspect(state: &mut WorkerState, request: &Request) -> Response {
 fn collect_tensors(
     state: &mut WorkerState,
     matched_components: &[crate::adapter::MappedComponent],
+    head_index: Option<u32>,
 ) -> anyhow::Result<Vec<CapturedTensor>> {
     use base64::Engine;
 
@@ -982,10 +984,25 @@ fn collect_tensors(
             )?;
 
             if let Some(tensor_obj) = dict.get_item(&key)? {
-                let bytes_result = bridge::tensor_to_bytes(py, &tensor_obj)?;
-                let shape = bridge::get_tensor_shape(py, &tensor_obj)?;
-                let dtype = bridge::get_tensor_dtype(py, &tensor_obj)?;
-                let device = bridge::get_tensor_device(py, &tensor_obj)?;
+                let tensor_to_use = if let Some(hi) = head_index
+                    .filter(|_| ATTENTION_HEAD_COMPONENTS.contains(&comp.canonical.as_str()))
+                {
+                    let full_shape = bridge::get_tensor_shape(py, &tensor_obj)?;
+                    let hidden = *full_shape.last().unwrap() as u32;
+                    let head_dim = hidden / state.num_heads;
+                    let start = hi * head_dim;
+                    let end = start + head_dim;
+                    let slice_idx = build_head_slice(py, start, end)?;
+                    tensor_obj
+                        .call_method1("__getitem__", (slice_idx,))?
+                        .call_method0("contiguous")?
+                } else {
+                    tensor_obj.clone()
+                };
+                let bytes_result = bridge::tensor_to_bytes(py, &tensor_to_use)?;
+                let shape = bridge::get_tensor_shape(py, &tensor_to_use)?;
+                let dtype = bridge::get_tensor_dtype(py, &tensor_to_use)?;
+                let device = bridge::get_tensor_device(py, &tensor_to_use)?;
 
                 let tensor_id = blake3::hash(&bytes_result).to_hex().to_string();
 

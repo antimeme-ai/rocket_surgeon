@@ -192,7 +192,123 @@ def run_test() -> None:
             proc.wait()
 
 
+def run_inspect_head_test() -> None:
+    """Inspect a specific head returns only that head's data."""
+    proc = spawn_daemon()
+
+    try:
+        send_message(
+            proc,
+            make_request(
+                "initialize",
+                {
+                    "client_name": "inspect-head-test",
+                    "protocol_version": "0.3.0",
+                },
+                req_id=1,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 1)
+        assert resp.get("error") is None
+
+        send_message(
+            proc,
+            make_request(
+                "attach",
+                {
+                    "model_path": MODEL_SOURCE,
+                    "model_family": MODEL_FAMILY,
+                    "device": "cpu",
+                    "num_ranks": 1,
+                },
+                req_id=2,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 2)
+        assert resp.get("error") is None
+        num_heads = resp["result"]["data"]["num_heads"]
+        hidden_dim = resp["result"]["data"]["hidden_dim"]
+        head_dim = hidden_dim // num_heads
+
+        # Step 1 layer to populate data
+        send_message(
+            proc,
+            make_request(
+                "rocket/step",
+                {
+                    "direction": "forward",
+                    "count": 1,
+                    "granularity": "layer",
+                },
+                req_id=3,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 3)
+        assert resp.get("error") is None
+
+        # Inspect full o_proj
+        print("\n[test] Inspect full o_proj at layer 0")
+        send_message(
+            proc,
+            make_request(
+                "rocket/inspect",
+                {
+                    "target": "*:0:0:o_proj:output",
+                    "detail": "summary",
+                },
+                req_id=4,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 4)
+        assert resp.get("error") is None
+        full_shape = resp["result"]["data"]["tensors"][0]["shape"]
+        print(f"  full shape: {full_shape}")
+
+        # Inspect head 0 of o_proj
+        print("\n[test] Inspect o_proj[0] at layer 0")
+        send_message(
+            proc,
+            make_request(
+                "rocket/inspect",
+                {
+                    "target": "*:0:0:o_proj[0]:output",
+                    "detail": "summary",
+                },
+                req_id=5,
+            ),
+        )
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 5)
+        assert resp.get("error") is None, (
+            f"inspect head error: {resp.get('error')}"
+        )
+        head_tensors = resp["result"]["data"]["tensors"]
+        assert len(head_tensors) >= 1
+        head_shape = head_tensors[0]["shape"]
+        print(f"  head shape: {head_shape}")
+
+        # Head shape last dim should be head_dim, not hidden_dim
+        assert head_shape[-1] == head_dim, (
+            f"Expected last dim = head_dim ({head_dim}), "
+            f"got {head_shape[-1]}"
+        )
+        print("  PASS — head inspect returns correct shape")
+
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+            proc.wait()
+
+
 if __name__ == "__main__":
     build_binaries()
     run_test()
-    print("\nPASS — head-level ablation e2e")
+    run_inspect_head_test()
+    print("\nAll head ablation tests passed!")
