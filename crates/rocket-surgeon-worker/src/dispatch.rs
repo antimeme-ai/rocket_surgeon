@@ -633,6 +633,7 @@ fn try_apply_interventions<'py>(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_step_loop(
     py: Python<'_>,
     state: &mut WorkerState,
@@ -654,6 +655,7 @@ fn run_step_loop(
     let mut ticks_consumed = 0u32;
     let current_layer = state.tick_state.to_tick_position().layer;
     let mut tracking_layer = if resuming { Some(current_layer) } else { None };
+    let mut drain_state = step_driver::DrainState::Counting;
 
     if resuming {
         resume_mb.call_method1("put", (py.None(),))?;
@@ -718,15 +720,20 @@ fn run_step_loop(
 
         if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
             if step_driver::is_layer_boundary(tracking_layer, layer) {
+                if drain_state == step_driver::DrainState::Draining {
+                    break;
+                }
                 ticks_consumed += 1;
+                if ticks_consumed >= plan.ticks_to_drain {
+                    drain_state = step_driver::DrainState::Draining;
+                }
             }
             tracking_layer = Some(layer);
         } else {
             ticks_consumed += 1;
-        }
-
-        if ticks_consumed >= plan.ticks_to_drain {
-            break;
+            if ticks_consumed >= plan.ticks_to_drain {
+                break;
+            }
         }
 
         if let Some((modified_tensor, fired)) = intervention_result {
