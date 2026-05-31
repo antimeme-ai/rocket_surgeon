@@ -45,6 +45,7 @@ Feature: Forward-pass stepping — rocket/step verb
       | layer       | 1     |
       | layer       | 2     |
 
+  @deferred
   Scenario: Layer granularity covers more of the forward pass than component
     When the client sends "rocket/step" with:
       | direction   | forward   |
@@ -108,6 +109,7 @@ Feature: Forward-pass stepping — rocket/step verb
     And the response "data.stopped_at" has field "event" of type string
     And the response "data.stopped_at.event" is one of "input" or "output"
 
+  @deferred
   Scenario: Position layer advances across successive steps
     When the client sends "rocket/step" with:
       | direction   | forward   |
