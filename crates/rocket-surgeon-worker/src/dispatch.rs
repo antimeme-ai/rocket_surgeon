@@ -641,8 +641,21 @@ fn run_step_loop(
     req: &HostStepRequest,
 ) -> anyhow::Result<HostStepResponse> {
     let plan = step_driver::plan_step(req.count, req.granularity);
-    let resuming = state.forward_pass.is_some();
 
+    if state
+        .forward_pass
+        .as_ref()
+        .is_some_and(|fwd| fwd.forward_complete)
+    {
+        let fwd = state.forward_pass.take().unwrap();
+        let mut all_handles = fwd.sentinel_handles;
+        all_handles.extend(fwd.capture_handles);
+        all_handles.extend(fwd.passive_handles);
+        let _ = bridge::remove_hooks(py, &all_handles);
+        state.tick_state = TickState::new(state.rank);
+    }
+
+    let resuming = state.forward_pass.is_some();
     ensure_forward_pass(py, state, handle, req.input_ids.as_deref())?;
 
     let fwd = state

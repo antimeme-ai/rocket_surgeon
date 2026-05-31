@@ -31,7 +31,6 @@ def run_test() -> None:
     Inspecting down_proj at layer 1 should fail (no tensor data).
     With the fix, the entire layer 1 is drained, so down_proj has data.
     """
-    build_binaries()
     proc = spawn_daemon()
 
     try:
@@ -103,6 +102,77 @@ def run_test() -> None:
             proc.wait()
 
 
+def run_auto_reset_test() -> None:
+    """After forward_complete, a new step starts a fresh forward pass."""
+    proc = spawn_daemon()
+
+    try:
+        # Initialize + Attach
+        send_message(proc, make_request("initialize", {
+            "client_name": "auto-reset-test",
+            "protocol_version": "0.3.0",
+        }, req_id=1))
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 1)
+        assert resp.get("error") is None
+
+        send_message(proc, make_request("attach", {
+            "model_path": MODEL_SOURCE,
+            "model_family": MODEL_FAMILY,
+            "device": "cpu",
+            "num_ranks": 1,
+        }, req_id=2))
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 2)
+        assert resp.get("error") is None
+
+        # First forward pass — step to completion
+        print("\n[test] First forward pass to completion")
+        send_message(proc, make_request("rocket/step", {
+            "direction": "forward",
+            "count": 200,
+            "granularity": "layer",
+        }, req_id=3))
+        resp = recv_message(proc)
+        assert_jsonrpc(resp, 3)
+        assert resp.get("error") is None
+        data = resp["result"]["data"]
+        stopped = data["stopped_at"]
+        assert stopped["component"] != "", "first pass should have real stopped_at"
+        print(f"  first pass stopped_at: layer={stopped['layer']} component={stopped['component']}")
+
+        # Second forward pass — step again, should auto-reset and run
+        # Without auto-reset, the worker times out (30s) and the daemon
+        # returns a synthetic response with stopped_at.component == "".
+        print("\n[test] Second forward pass (auto-reset)")
+        send_message(proc, make_request("rocket/step", {
+            "direction": "forward",
+            "count": 200,
+            "granularity": "layer",
+        }, req_id=4))
+        resp = recv_message(proc, timeout=TIMEOUT)
+        assert_jsonrpc(resp, 4)
+        assert resp.get("error") is None, f"second step error: {resp.get('error')}"
+        data = resp["result"]["data"]
+        stopped = data["stopped_at"]
+        assert stopped["component"] != "", (
+            "second forward pass has empty stopped_at.component — "
+            "forward pass was not auto-reset after completion"
+        )
+        print(f"  second pass stopped_at: layer={stopped['layer']} component={stopped['component']}")
+        print("  PASS")
+
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+            proc.wait()
+
+
 if __name__ == "__main__":
+    build_binaries()
     run_test()
-    print("\nPASS — layer step boundary")
+    run_auto_reset_test()
+    print("\nAll layer step tests passed!")
