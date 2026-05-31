@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+import re
+
+_BRACKET_RE = re.compile(r"\[(\d+)\]$")
+
+
+def strip_bracket(segment: str) -> str:
+    return _BRACKET_RE.sub("", segment)
+
+
+def extract_head_index(segment: str) -> int | None:
+    m = _BRACKET_RE.search(segment)
+    return int(m.group(1)) if m else None
+
 
 def target_matches(
     *,
@@ -16,6 +29,8 @@ def target_matches(
 
     Target format: family:rank:layer:component:event
     Wildcards: '*' matches any single segment.
+    Bracket notation on component (e.g., o_proj[7]) is stripped before
+    matching — head slicing is handled by the caller.
     """
     segments = target.split(":")
     expected_segments = 5
@@ -26,6 +41,6 @@ def target_matches(
     for pattern_seg, actual_seg in zip(segments, actual, strict=True):
         if pattern_seg == "*":
             continue
-        if pattern_seg != actual_seg:
+        if strip_bracket(pattern_seg) != actual_seg:
             return False
     return True
