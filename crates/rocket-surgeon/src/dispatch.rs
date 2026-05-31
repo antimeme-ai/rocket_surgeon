@@ -145,9 +145,14 @@ const CANONICAL_COMPONENTS: &[&str] = &[
     "lm_head",
 ];
 
-/// The final dotted segment of a component path (`attn.o_proj` -> `o_proj`).
+/// The final dotted segment of a component path, stripped of any bracket
+/// index (`attn.o_proj[7]` -> `o_proj`, `o_proj` -> `o_proj`).
 fn component_leaf(component: &str) -> &str {
-    component.rsplit('.').next().unwrap_or(component)
+    let leaf = component.rsplit('.').next().unwrap_or(component);
+    match leaf.find('[') {
+        Some(pos) => &leaf[..pos],
+        None => leaf,
+    }
 }
 
 /// Levenshtein edit distance between two byte strings.

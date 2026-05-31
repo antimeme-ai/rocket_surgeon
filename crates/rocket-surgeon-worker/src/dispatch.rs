@@ -45,6 +45,8 @@ pub struct WorkerState {
     pub model_handle: Option<u64>,
     pub rank: u32,
     pub num_layers: u32,
+    pub num_heads: u32,
+    pub hidden_dim: u32,
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
     pub last_outputs: Option<pyo3::PyObject>,
@@ -68,6 +70,8 @@ impl WorkerState {
             model_handle: None,
             rank: 0,
             num_layers: 0,
+            num_heads: 0,
+            hidden_dim: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
             last_outputs: None,
@@ -221,6 +225,8 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
     state.num_layers = info.num_layers;
+    state.num_heads = info.num_heads;
+    state.hidden_dim = info.hidden_dim;
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
     state.tick_state = TickState::new(req.rank);
@@ -593,6 +599,35 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
     }
 }
 
+const ATTENTION_HEAD_COMPONENTS: &[&str] = &["o_proj", "q_proj", "k_proj", "v_proj"];
+
+fn extract_head_index(target: &str) -> Option<(String, u32)> {
+    let segments: Vec<&str> = target.split(':').collect();
+    if segments.len() != 5 {
+        return None;
+    }
+    let comp = segments[3];
+    let bracket_start = comp.find('[')?;
+    let base = &comp[..bracket_start];
+    let idx_str = &comp[bracket_start + 1..comp.len() - 1];
+    let idx = idx_str.parse::<u32>().ok()?;
+    let stripped = format!(
+        "{}:{}:{}:{}:{}",
+        segments[0], segments[1], segments[2], base, segments[4]
+    );
+    Some((stripped, idx))
+}
+
+fn build_head_slice(py: Python<'_>, start: u32, end: u32) -> anyhow::Result<Bound<'_, PyTuple>> {
+    let builtins = py.import("builtins")?;
+    let py_ellipsis = builtins.getattr("Ellipsis")?;
+    let py_slice = builtins.getattr("slice")?.call1((start, end))?;
+    Ok(PyTuple::new(
+        py,
+        [py_ellipsis.into_any(), py_slice.into_any()],
+    )?)
+}
+
 fn try_apply_interventions<'py>(
     py: Python<'py>,
     state: &WorkerState,
@@ -613,23 +648,80 @@ fn try_apply_interventions<'py>(
         .component_map
         .as_ref()
         .map_or("unknown", |m| m.model_family.as_str());
-    let recipes_json = serde_json::to_string(&req.interventions)?;
-    let (modified, fired) = crate::bridge::apply_interventions_at_point(
-        py,
-        &output,
-        &recipes_json,
-        family,
-        state.rank,
-        layer,
-        canonical,
-        "output",
-        state.tick_state.tick_id(),
-        handle,
-    )?;
-    if fired.is_empty() {
+
+    let mut head_recipes = Vec::new();
+    let mut regular_recipes = Vec::new();
+
+    for recipe in &req.interventions {
+        if let Some((stripped_target, head_idx)) = extract_head_index(&recipe.target) {
+            let base_comp = stripped_target.split(':').nth(3).unwrap_or("");
+            if ATTENTION_HEAD_COMPONENTS.contains(&base_comp) && base_comp == canonical {
+                let mut r = recipe.clone();
+                r.target = stripped_target;
+                head_recipes.push((r, head_idx));
+            }
+        } else {
+            regular_recipes.push(recipe.clone());
+        }
+    }
+
+    let mut all_fired = Vec::new();
+    let mut current_output = if head_recipes.is_empty() {
+        output.clone()
+    } else {
+        output.call_method0("clone")?
+    };
+
+    for (recipe, head_idx) in head_recipes {
+        let shape: Vec<i64> = current_output.getattr("shape")?.extract()?;
+        let hidden = *shape.last().unwrap() as u32;
+        let head_dim = hidden / state.num_heads;
+        let start = head_idx * head_dim;
+        let end = start + head_dim;
+
+        let index = build_head_slice(py, start, end)?;
+        let head_slice = current_output.call_method1("__getitem__", (index.clone(),))?;
+        let head_clone = head_slice.call_method0("clone")?;
+
+        let recipes_json = serde_json::to_string(&[&recipe])?;
+        let (modified_slice, fired) = crate::bridge::apply_interventions_at_point(
+            py,
+            &head_clone,
+            &recipes_json,
+            family,
+            state.rank,
+            layer,
+            canonical,
+            "output",
+            state.tick_state.tick_id(),
+            handle,
+        )?;
+        all_fired.extend(fired);
+        current_output.call_method1("__setitem__", (index, modified_slice))?;
+    }
+
+    if !regular_recipes.is_empty() {
+        let recipes_json = serde_json::to_string(&regular_recipes)?;
+        let (modified, fired) = crate::bridge::apply_interventions_at_point(
+            py,
+            &current_output,
+            &recipes_json,
+            family,
+            state.rank,
+            layer,
+            canonical,
+            "output",
+            state.tick_state.tick_id(),
+            handle,
+        )?;
+        all_fired.extend(fired);
+        current_output = modified;
+    }
+
+    if all_fired.is_empty() {
         Ok(None)
     } else {
-        Ok(Some((modified, fired)))
+        Ok(Some((current_output, all_fired)))
     }
 }
 
