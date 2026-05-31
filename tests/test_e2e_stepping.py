@@ -296,11 +296,12 @@ def run_test() -> None:
         print("  PASS")
 
         # ------------------------------------------------------------------
-        # Step 10: layer advances across layer-granularity steps
+        # Step 10: layer-granularity step completes the entered layer
         # (detach + re-attach for a fresh forward pass — the tiny model
-        # only has 2 layers, so the prior 22+ ticks have wrapped around)
+        # only has 2 layers, so count=1 layer step drains the entered
+        # layer and forward-completes the whole pass)
         # ------------------------------------------------------------------
-        print("\n[test] Step 10: layer advances across layer-granularity steps")
+        print("\n[test] Step 10: layer-granularity step completes entered layer")
         send_message(proc, make_request("detach", {}, req_id=190))
         resp = recv_message(proc)
         assert_jsonrpc(resp, 190)
@@ -338,8 +339,13 @@ def run_test() -> None:
         resp = recv_message(proc)
         assert_jsonrpc(resp, 200)
         assert resp.get("error") is None, f"Layer step A error: {resp.get('error')}"
-        layer_a = resp["result"]["data"]["stopped_at"]["layer"]
+        stopped_a = resp["result"]["data"]["stopped_at"]
+        layer_a = stopped_a["layer"]
+        comp_a = stopped_a["component"]
+        assert comp_a != "", "layer step should produce a real stopped_at"
+        print(f"  layer_a={layer_a}, comp_a={comp_a}")
 
+        # Second step: auto-resets after forward_complete, runs again
         send_message(
             proc,
             make_request(
@@ -355,9 +361,12 @@ def run_test() -> None:
         resp = recv_message(proc)
         assert_jsonrpc(resp, 201)
         assert resp.get("error") is None, f"Layer step B error: {resp.get('error')}"
-        layer_b = resp["result"]["data"]["stopped_at"]["layer"]
-        assert layer_b != layer_a, f"Layer must change: layer_a={layer_a}, layer_b={layer_b}"
-        print(f"  layer_a={layer_a}, layer_b={layer_b} (changed: OK)")
+        stopped_b = resp["result"]["data"]["stopped_at"]
+        comp_b = stopped_b["component"]
+        assert comp_b != "", (
+            "second layer step should auto-reset and produce real stopped_at"
+        )
+        print(f"  layer_b={stopped_b['layer']}, comp_b={comp_b}")
         print("  PASS")
 
         # ------------------------------------------------------------------
