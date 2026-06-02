@@ -1570,6 +1570,7 @@ dependencies = [
 name = "rocket-surgeon-probes"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rocket-surgeon-protocol",
  "serde",
  "serde_json",
