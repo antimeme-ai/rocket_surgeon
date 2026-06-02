@@ -3,7 +3,6 @@ quarantine/
 # Rust
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Python
 __pycache__/
@@ -44,3 +43,7 @@ venv/
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Per-developer direnv overrides
+.envrc
+.envrc.local

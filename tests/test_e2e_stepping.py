@@ -363,9 +363,7 @@ def run_test() -> None:
         assert resp.get("error") is None, f"Layer step B error: {resp.get('error')}"
         stopped_b = resp["result"]["data"]["stopped_at"]
         comp_b = stopped_b["component"]
-        assert comp_b != "", (
-            "second layer step should auto-reset and produce real stopped_at"
-        )
+        assert comp_b != "", "second layer step should auto-reset and produce real stopped_at"
         print(f"  layer_b={stopped_b['layer']}, comp_b={comp_b}")
         print("  PASS")
 

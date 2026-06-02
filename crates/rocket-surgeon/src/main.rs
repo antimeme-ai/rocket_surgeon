@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod bundle;
 mod dispatch;
 mod notifications;
@@ -929,11 +931,17 @@ fn main() {
                 &trace_dir,
                 &session.state().session_id,
                 session.state().model_id.as_deref().unwrap_or("unknown"),
+                std::process::id(),
                 started_at,
             ) {
                 Ok(mut ps) => {
-                    if let Err(e) = ps.declare_rank(0) {
-                        warn!("perfetto: failed to declare rank: {e}");
+                    // Declare the worker process per ADR-0010. Today the
+                    // orchestrator manages a single worker (rank 0); when
+                    // Phase 5 lights up multi-worker fanout the orchestrator
+                    // will report one PID per rank and this loop expands.
+                    let worker_pid = host_resp.worker_pid.unwrap_or(0);
+                    if let Err(e) = ps.declare_process(0, worker_pid, "rank:0") {
+                        warn!("perfetto: failed to declare worker process: {e}");
                     }
                     info!(path = %ps.path().display(), "perfetto trace started");
                     perfetto = Some(ps);

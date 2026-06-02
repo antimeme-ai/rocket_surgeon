@@ -13,6 +13,7 @@ from __future__ import annotations
 import statistics
 import time
 
+import torch
 from e2e_harness import (
     build_binaries,
     make_request,
@@ -20,9 +21,23 @@ from e2e_harness import (
     send_message,
     spawn_daemon,
 )
+from transformers import GPT2LMHeadModel
 
 TOKENS = [
-    2215, 5335, 290, 1757, 1816, 284, 262, 3650, 11, 1757, 2921, 257, 4144, 284,
+    2215,
+    5335,
+    290,
+    1757,
+    1816,
+    284,
+    262,
+    3650,
+    11,
+    1757,
+    2921,
+    257,
+    4144,
+    284,
 ]
 N_PASSES = 20
 
@@ -52,10 +67,7 @@ def bench_rocket_surgeon() -> list[float]:
             },
         )
         data = resp["result"]["data"]
-        print(
-            f"  Model: GPT-2 124M, {data['num_layers']} layers, "
-            f"{data['num_heads']} heads"
-        )
+        print(f"  Model: GPT-2 124M, {data['num_layers']} layers, {data['num_heads']} heads")
 
         # Warm-up
         rpc(
@@ -97,9 +109,6 @@ def bench_rocket_surgeon() -> list[float]:
 
 
 def bench_bare_pytorch() -> list[float]:
-    import torch
-    from transformers import GPT2LMHeadModel
-
     model = GPT2LMHeadModel.from_pretrained("gpt2")
     model.eval()
     input_ids = torch.tensor([TOKENS])
@@ -141,7 +150,7 @@ if __name__ == "__main__":
 
     overhead_pct = ((rs_mean - bare_mean) / bare_mean) * 100
     print(f"\n{'=' * 60}")
-    print(f"OVERHEAD MEASUREMENT")
+    print("OVERHEAD MEASUREMENT")
     print(f"  Bare PyTorch:     {bare_mean:.1f}ms")
     print(f"  Rocket Surgeon:   {rs_mean:.1f}ms")
     print(f"  Overhead:         {overhead_pct:+.1f}%")

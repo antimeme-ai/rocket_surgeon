@@ -25,8 +25,13 @@ pub struct WorldlineState {
 }
 
 impl WorldlineState {
+    /// True only when both the segment list and current-segment cursor are
+    /// at their default values. Checking both prevents `skip_serializing_if`
+    /// from silently dropping a non-zero `current_segment` when `segments`
+    /// happens to be empty — a real wire-format hazard if a producer
+    /// initializes the cursor before pushing the first segment.
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
+        self.segments.is_empty() && self.current_segment == 0
     }
 }
 

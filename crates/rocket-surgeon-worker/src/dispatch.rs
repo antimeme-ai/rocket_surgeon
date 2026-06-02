@@ -322,6 +322,7 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
         model_type: config.model_type,
         component_vocabulary: component_map.vocabulary,
         shm_name: state.shm_ring.as_ref().map(|r| r.shm_name().to_owned()),
+        worker_pid: None,
     };
 
     match serde_json::to_value(resp) {
@@ -461,6 +462,7 @@ fn evaluate_probes(
             tensor_summary: None,
             action: def.action,
             timestamp: format!("{}", d.as_secs()),
+            rank: state.rank,
         };
         events.push(event);
     }

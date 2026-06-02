@@ -32,7 +32,20 @@ TIMEOUT = 120
 # "When Mary and John went to the store, John gave a drink to"
 # GPT-2 BPE token IDs (verified against HF GPT2Tokenizer)
 PROMPT_TOKENS = [
-    2215, 5335, 290, 1757, 1816, 284, 262, 3650, 11, 1757, 2921, 257, 4144, 284,
+    2215,
+    5335,
+    290,
+    1757,
+    1816,
+    284,
+    262,
+    3650,
+    11,
+    1757,
+    2921,
+    257,
+    4144,
+    284,
 ]
 MARY_TOKEN = 5335
 JOHN_TOKEN = 1757
@@ -104,10 +117,7 @@ def run() -> None:
         num_heads = attach_data["num_heads"]
         hidden_dim = attach_data["hidden_dim"]
         head_dim = hidden_dim // num_heads
-        print(
-            f"    layers={num_layers} heads={num_heads} "
-            f"hidden={hidden_dim} head_dim={head_dim}"
-        )
+        print(f"    layers={num_layers} heads={num_heads} hidden={hidden_dim} head_dim={head_dim}")
         print(f"    attach took {time.monotonic() - t0:.1f}s")
 
         # --- Baseline forward pass ---
@@ -125,8 +135,7 @@ def run() -> None:
         )
         assert_ok(resp, "baseline step")
         print(
-            f"    ticks={resp['result']['data']['ticks_executed']} "
-            f"({time.monotonic() - t0:.3f}s)"
+            f"    ticks={resp['result']['data']['ticks_executed']} ({time.monotonic() - t0:.3f}s)"
         )
 
         # --- Read baseline logits ---
@@ -144,8 +153,7 @@ def run() -> None:
         baseline_logit_diff = read_logit_diff(proc, req_id, vocab_size, seq_len)
         print(f"    baseline logit_diff = {baseline_logit_diff:.4f}")
         assert baseline_logit_diff > 0, (
-            f"Model should prefer Mary over John, "
-            f"got logit_diff={baseline_logit_diff:.4f}"
+            f"Model should prefer Mary over John, got logit_diff={baseline_logit_diff:.4f}"
         )
 
         # --- Ablation sweep ---
@@ -185,7 +193,10 @@ def run() -> None:
                 assert_ok(resp, f"step L{layer_idx}H{head_idx}")
 
                 ablated_diff = read_logit_diff(
-                    proc, req_id, vocab_size, seq_len,
+                    proc,
+                    req_id,
+                    vocab_size,
+                    seq_len,
                 )
                 delta = baseline_logit_diff - ablated_diff
 
@@ -241,33 +252,21 @@ def run() -> None:
         # --- Validation ---
         print("\n[7] Validation")
 
-        assert len(significant) < 30, (
-            f"Expected <30 significant heads, got {len(significant)}"
-        )
+        assert len(significant) < 30, f"Expected <30 significant heads, got {len(significant)}"
         print(f"    Sparse: {len(significant)} significant heads (<30)")
 
         top10_layers = {r["layer"] for r in results[:10]}
         has_late_layers = bool(top10_layers & {9, 10, 11})
         if has_late_layers:
-            print(
-                f"    Late-layer heads in top 10: "
-                f"layers {top10_layers & {9, 10, 11}}"
-            )
+            print(f"    Late-layer heads in top 10: layers {top10_layers & {9, 10, 11}}")
         else:
-            print(
-                f"    No late-layer heads in top 10 "
-                f"(layers present: {top10_layers})"
-            )
+            print(f"    No late-layer heads in top 10 (layers present: {top10_layers})")
             print("      (May differ from Wang et al. with single prompt)")
 
         top_delta = results[0]["delta"]
-        print(
-            f"    Top head: L{results[0]['layer']}H{results[0]['head']} "
-            f"delta={top_delta:+.4f}"
-        )
+        print(f"    Top head: L{results[0]['layer']}H{results[0]['head']} delta={top_delta:+.4f}")
         assert abs(top_delta) > threshold, (
-            f"Top head delta ({top_delta:.4f}) should exceed "
-            f"threshold ({threshold:.4f})"
+            f"Top head delta ({top_delta:.4f}) should exceed threshold ({threshold:.4f})"
         )
         print("    Top head effect exceeds threshold")
 
@@ -281,10 +280,7 @@ def run() -> None:
         print(f"  Model: GPT-2 124M ({num_layers} layers, {num_heads} heads)")
         print(f"  Baseline logit_diff: {baseline_logit_diff:.4f}")
         print(f"  Significant heads: {len(significant)} / {total_heads}")
-        print(
-            f"  Top head: L{results[0]['layer']}H{results[0]['head']} "
-            f"(delta={top_delta:+.4f})"
-        )
+        print(f"  Top head: L{results[0]['layer']}H{results[0]['head']} (delta={top_delta:+.4f})")
         print(f"  Sweep time: {sweep_time:.1f}s")
         print("=" * 70)
 

@@ -265,7 +265,7 @@ impl Session {
                 active_probes: Vec::new(),
                 checkpoints: Vec::new(),
                 available_actions: Vec::new(),
-                worldline: WorldlineState::default(),
+                worldline: rocket_surgeon_protocol::types::WorldlineState::default(),
             },
             start_time: std::time::Instant::now(),
             detached_model_id: None,

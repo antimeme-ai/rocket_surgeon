@@ -52,6 +52,17 @@ Extreme rigor baseline. No shortcuts.
 - Beads for ALL issue tracking (in .context/beads/)
 - Git commits: frequent, atomic, descriptive
 
+### Hard rules for git (LLM agents and contributors alike)
+
+The requirement is that every change to `master` **has a PR**. That's the audit trail and the CI gate. **Whether and how the PR gets merged is decided by orchestration outside the scope of this Claude** — your job ends at "PR is open with green CI."
+
+- **Never push directly to `master`.** Every change goes through a PR. The branch protection rule "Changes must be made through a pull request" is real, not advisory. Don't admin-bypass; use `gh auth login` to get write perms and open the PR.
+- **Don't merge the PR yourself.** Open the PR, push commits, wait for CI. Merging is the orchestrator's call, not yours.
+- **Never `--no-verify` on a push to `master`.** Feature branches are fine when local hooks are demonstrably broken (document the reason), but the PR's CI run is the real gate and must pass.
+- **Admin overrides on branch protection are off-limits without explicit human confirmation.** Even if the user said "ship it," that's authorization to *open the PR* — not to bypass the flow.
+- **If `gh pr create` fails for auth reasons, stop and ask the user to re-auth.** Don't improvise an alternative path that ends up at direct-push-to-master.
+- **"gg2g" / "ship it" / "let's go" do NOT mean "skip the PR ceremony."** They mean "open the PR and get CI green." Merge happens elsewhere.
+
 ## Design principles
 
 - Dual-interface: TUI for humans, structured protocol for LLMs

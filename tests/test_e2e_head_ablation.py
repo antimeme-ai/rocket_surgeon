@@ -63,10 +63,7 @@ def run_test() -> None:
         num_heads = resp["result"]["data"]["num_heads"]
         hidden_dim = resp["result"]["data"]["hidden_dim"]
         head_dim = hidden_dim // num_heads
-        print(
-            f"  num_heads={num_heads}, hidden_dim={hidden_dim}, "
-            f"head_dim={head_dim}"
-        )
+        print(f"  num_heads={num_heads}, hidden_dim={hidden_dim}, head_dim={head_dim}")
 
         # Baseline: full forward pass without intervention
         print("\n[test] Baseline forward pass")
@@ -148,9 +145,7 @@ def run_test() -> None:
         assert resp.get("error") is None
         data = resp["result"]["data"]
         fired = data.get("fired_interventions", [])
-        assert "ablate-head-0" in fired, (
-            f"Expected ablate-head-0 to fire, got: {fired}"
-        )
+        assert "ablate-head-0" in fired, f"Expected ablate-head-0 to fire, got: {fired}"
         print(f"  interventions fired: {fired}")
 
         # Inspect lm_head after ablation
@@ -283,9 +278,7 @@ def run_inspect_head_test() -> None:
         )
         resp = recv_message(proc)
         assert_jsonrpc(resp, 5)
-        assert resp.get("error") is None, (
-            f"inspect head error: {resp.get('error')}"
-        )
+        assert resp.get("error") is None, f"inspect head error: {resp.get('error')}"
         head_tensors = resp["result"]["data"]["tensors"]
         assert len(head_tensors) >= 1
         head_shape = head_tensors[0]["shape"]
@@ -293,8 +286,7 @@ def run_inspect_head_test() -> None:
 
         # Head shape last dim should be head_dim, not hidden_dim
         assert head_shape[-1] == head_dim, (
-            f"Expected last dim = head_dim ({head_dim}), "
-            f"got {head_shape[-1]}"
+            f"Expected last dim = head_dim ({head_dim}), got {head_shape[-1]}"
         )
         print("  PASS — head inspect returns correct shape")
 

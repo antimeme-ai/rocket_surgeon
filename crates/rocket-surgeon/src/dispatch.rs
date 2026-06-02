@@ -1455,6 +1455,7 @@ mod tests {
             model_type: "llama".to_owned(),
             component_vocabulary: vec![],
             shm_name: None,
+            worker_pid: None,
         }
     }
 

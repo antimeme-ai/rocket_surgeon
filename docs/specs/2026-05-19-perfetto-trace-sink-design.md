@@ -1,5 +1,11 @@
 # WU 1.15: Perfetto Trace Sink — Design Spec
 
+> **Amended by [ADR-0010](../adr/ADR-0010-perfetto-multi-rank-tracing.md).**
+> Sections 3 (track hierarchy + UUIDs), 5 (interning), and 6 (PerfettoSink API)
+> are superseded by ADR-0010 for multi-rank correctness. The original text is
+> preserved below for historical context. Read ADR-0010 first if you are
+> implementing or modifying the sink today.
+
 ## Goal
 
 Write tick boundaries, probe firings, and session metadata to a Perfetto protobuf trace file. The trace opens in `ui.perfetto.dev` and shows a coherent timeline of the debugging session — every component tick as a duration span, every probe firing as an instant event, structured as a process→rank→layer→component track hierarchy.

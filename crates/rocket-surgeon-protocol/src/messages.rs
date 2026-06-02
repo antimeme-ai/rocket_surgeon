@@ -740,6 +740,8 @@ pub struct ProbeFiredEvent {
     pub tensor_summary: Option<TensorSummary>,
     pub action: ProbeAction,
     pub timestamp: String,
+    #[serde(default)]
+    pub rank: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -816,6 +818,11 @@ pub struct HostAttachResponse {
     pub component_vocabulary: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shm_name: Option<String>,
+    /// PID of the `rs-worker` process serving this attach, surfaced by the
+    /// orchestrator. Used by the daemon to declare per-rank Perfetto
+    /// `ProcessDescriptor`s. Optional for back-compat with older orchestrators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_pid: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,10 +1149,19 @@ mod tests {
             model_type: "llama".to_owned(),
             component_vocabulary: vec!["q_proj".to_owned()],
             shm_name: None,
+            worker_pid: Some(12345),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn host_attach_response_worker_pid_optional_for_back_compat() {
+        let json = r#"{"model_handle":1,"num_layers":2,"num_heads":2,"hidden_dim":16,"module_tree":[],"model_type":"llama","component_vocabulary":[]}"#;
+        let resp: HostAttachResponse =
+            serde_json::from_str(json).expect("payload without worker_pid should parse");
+        assert_eq!(resp.worker_pid, None);
     }
 
     #[test]
@@ -1272,6 +1288,7 @@ mod tests {
             model_type: "llama".to_owned(),
             component_vocabulary: vec!["q_proj".to_owned(), "k_proj".to_owned()],
             shm_name: None,
+            worker_pid: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HostAttachResponse = serde_json::from_str(&json).unwrap();
@@ -1297,6 +1314,11 @@ mod tests {
     #[test]
     fn internal_checkpoint_constant() {
         assert_eq!(internal::HOST_CHECKPOINT, "_host/checkpoint");
+    }
+
+    #[test]
+    fn internal_replay_constant() {
+        assert_eq!(internal::HOST_REPLAY, "_host/replay");
     }
 
     #[test]
