@@ -48,3 +48,6 @@ Thumbs.db
 # Per-developer direnv overrides
 .envrc
 .envrc.local
+
+# NOVEMBER mutation re-audit raw output (B004)
+.mutants-out/
