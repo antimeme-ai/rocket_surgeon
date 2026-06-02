@@ -886,3 +886,482 @@ mod tests {
         assert!(approx_eq(r.max, 3.0, 1e-10));
     }
 }
+
+// ===========================================================================
+// Property / model-based / metamorphic tests  (B004 — callsign INDIA)
+// ===========================================================================
+//
+// The example suite above pins the streaming statistics engine at oracle tiers
+// 2-3 (hand-picked inputs, regression). This module climbs the MATERIA oracle
+// hierarchy for the same engine:
+//
+//   * tier 6 — MODEL-BASED. [`compute_pass1`] is a single-pass streaming
+//     estimator (Welford mean/M2, running-max-scaled `dnrm2` L2). We define an
+//     independent, deliberately-naive two-pass f64 reference ([`naive_ref`]) and
+//     assert the streaming engine agrees with it: order-independent quantities
+//     (counts, min/max/abs_max, sparsity) *exactly*, and the floating-point
+//     accumulators (mean, M2, L2) within an explicit numeric tolerance. The
+//     reference is "obviously correct" precisely because it is the slow,
+//     allocate-then-fold algorithm the streaming code exists to avoid.
+//
+//   * tier 4 — METAMORPHIC. Two relations that need no reference value:
+//       - merge:        `merge(pass1(A), pass1(B)) == pass1(A ++ B)`
+//                       (Chan / Golub / LeVeque parallel-variance identity).
+//       - order:        `pass1(A)` and `pass1(perm(A))` agree on every statistic
+//                       (mean/M2/L2 within tolerance; the rest exactly).
+//
+//   * tier 5 — EXCEPTION-RAISING / INVARIANT. Over *arbitrary* decoded bytes we
+//     assert the public `compute_summary` never panics and always emits a
+//     well-formed, JSON-serialisable summary (histogram shape, sorted top-k,
+//     sparsity in [0,1]); over the bounded dtypes we additionally assert every
+//     stat is finite. This is the 113×-effective category MATERIA flags.
+//
+//   * a generator-distribution test (`cover` discipline) so we know the corpus
+//     actually exercises NaN/Inf/denormal/empty and both clean & messy streams.
+//
+// FINDING (see PLATOON-FINDINGS.md): the finiteness invariant deliberately
+// excludes `DType::Float64`, because finite-but-huge f64 inputs overflow the
+// Welford/​histogram intermediates and yield non-finite stats. The reproducer
+// lives in `documents_f64_huge_value_overflow` below.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    // ── numeric comparison helpers ──────────────────────────────────────────
+
+    /// Exact equality, treating the two NaN encodings as equal. Used only for
+    /// order-independent quantities (`min`/`max`/`abs_max`) that the spec
+    /// computes by the same selection on both sides, so bit-for-bit agreement
+    /// is required.
+    #[allow(clippy::float_cmp)]
+    fn exact_eq(a: f64, b: f64) -> bool {
+        a == b || (a.is_nan() && b.is_nan())
+    }
+
+    /// Relative-or-absolute closeness for the floating-point accumulators.
+    /// `a == b` short-circuits the infinities (where the relative form is NaN).
+    #[allow(clippy::float_cmp)]
+    fn close(a: f64, b: f64, rel: f64, abs: f64) -> bool {
+        if a == b {
+            return true;
+        }
+        let diff = (a - b).abs();
+        diff <= abs || diff <= rel * a.abs().max(b.abs())
+    }
+
+    fn pass1_l2(r: &Pass1Result) -> f64 {
+        if r.l2_scale > 0.0 {
+            r.l2_scale * r.l2_accum.sqrt()
+        } else {
+            0.0
+        }
+    }
+
+    // ── independent naive reference (the model) ─────────────────────────────
+
+    #[derive(Debug)]
+    struct RefStats {
+        n: u64,
+        finite: u64,
+        nan: u64,
+        inf: u64,
+        mean: f64,
+        m2: f64,
+        min: f64,
+        max: f64,
+        abs_max: f64,
+        sparse: u64,
+        l2: f64,
+    }
+
+    /// Slow, obviously-correct two-pass reference. Mirrors `compute_pass1`'s
+    /// non-finite policy (count NaN/Inf, exclude them from every accumulator)
+    /// and its empty-stream sentinels (min=+inf, max=-inf) so the two can be
+    /// compared field-for-field.
+    fn naive_ref(values: &[f64]) -> RefStats {
+        let n = values.len() as u64;
+        let nan = values.iter().filter(|x| x.is_nan()).count() as u64;
+        let inf = values.iter().filter(|x| x.is_infinite()).count() as u64;
+        let finite_vals: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+        let finite = finite_vals.len() as u64;
+
+        if finite == 0 {
+            return RefStats {
+                n,
+                finite,
+                nan,
+                inf,
+                mean: 0.0,
+                m2: 0.0,
+                min: f64::INFINITY,
+                max: f64::NEG_INFINITY,
+                abs_max: 0.0,
+                sparse: 0,
+                l2: 0.0,
+            };
+        }
+
+        let sum: f64 = finite_vals.iter().sum();
+        let mean = sum / finite as f64;
+        let m2 = finite_vals
+            .iter()
+            .map(|x| {
+                let d = x - mean;
+                d * d
+            })
+            .sum();
+        let min = finite_vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = finite_vals
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let abs_max = finite_vals.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        let sparse = finite_vals
+            .iter()
+            .filter(|x| x.abs() < SPARSITY_EPSILON)
+            .count() as u64;
+        let l2 = finite_vals.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        RefStats {
+            n,
+            finite,
+            nan,
+            inf,
+            mean,
+            m2,
+            min,
+            max,
+            abs_max,
+            sparse,
+            l2,
+        }
+    }
+
+    // ── value generators ────────────────────────────────────────────────────
+
+    /// Finite values bounded to ±1e6 so the model/streaming agreement holds at
+    /// tight tolerance, salted with zeros, sub-epsilon values, and denormals so
+    /// the sparsity and scaled-L2 paths are exercised.
+    fn finite_val() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            8 => -1.0e6f64..1.0e6,
+            2 => prop_oneof![Just(0.0_f64), Just(-0.0_f64)],
+            1 => -1e-12f64..1e-12,
+            1 => prop_oneof![Just(f64::MIN_POSITIVE), Just(5e-324_f64), Just(-5e-324_f64)],
+        ]
+    }
+
+    fn special_val() -> impl Strategy<Value = f64> {
+        prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY),]
+    }
+
+    fn maybe_special() -> impl Strategy<Value = f64> {
+        prop_oneof![3 => finite_val(), 1 => special_val()]
+    }
+
+    /// Half the corpus is a clean all-finite stream (exercises the numeric
+    /// accumulators heavily); half is "messy" with NaN/Inf mixed in (exercises
+    /// the non-finite filtering and count paths). Lengths span the empty case.
+    fn values() -> impl Strategy<Value = Vec<f64>> {
+        prop_oneof![
+            prop::collection::vec(finite_val(), 0..256),
+            prop::collection::vec(maybe_special(), 0..256),
+        ]
+    }
+
+    fn any_dtype() -> impl Strategy<Value = DType> {
+        prop_oneof![
+            Just(DType::Float16),
+            Just(DType::Bfloat16),
+            Just(DType::Float32),
+            Just(DType::Float64),
+            Just(DType::Int8),
+            Just(DType::Int16),
+            Just(DType::Int32),
+            Just(DType::Int64),
+            Just(DType::Uint8),
+            Just(DType::Bool),
+        ]
+    }
+
+    /// dtypes whose decoded magnitude is bounded well inside f64 range, so the
+    /// Welford/L2/histogram intermediates cannot overflow.
+    fn bounded_dtype() -> impl Strategy<Value = DType> {
+        prop_oneof![
+            Just(DType::Float16),
+            Just(DType::Bfloat16),
+            Just(DType::Float32),
+            Just(DType::Int8),
+            Just(DType::Int16),
+            Just(DType::Int32),
+            Just(DType::Int64),
+            Just(DType::Uint8),
+            Just(DType::Bool),
+        ]
+    }
+
+    // ── tier-6 model-based ───────────────────────────────────────────────────
+
+    proptest! {
+        /// The streaming engine matches the naive two-pass reference on every
+        /// statistic it computes.
+        #[test]
+        fn pass1_matches_naive_reference(vals in values()) {
+            let r = compute_pass1(&vals);
+            let m = naive_ref(&vals);
+
+            // Order-independent / integer quantities: exact.
+            prop_assert_eq!(r.n, m.n);
+            prop_assert_eq!(r.nan_count, m.nan);
+            prop_assert_eq!(r.inf_count, m.inf);
+            prop_assert_eq!(r.n - r.nan_count - r.inf_count, m.finite);
+            prop_assert_eq!(r.sparse_count, m.sparse);
+            prop_assert!(exact_eq(r.min, m.min), "min {} vs {}", r.min, m.min);
+            prop_assert!(exact_eq(r.max, m.max), "max {} vs {}", r.max, m.max);
+            prop_assert!(
+                exact_eq(r.abs_max, m.abs_max),
+                "abs_max {} vs {}",
+                r.abs_max,
+                m.abs_max
+            );
+
+            // Floating-point accumulators: within tolerance.
+            prop_assert!(close(r.mean, m.mean, 1e-9, 1e-6), "mean {} vs {}", r.mean, m.mean);
+            prop_assert!(close(r.m2, m.m2, 1e-6, 1e-6), "m2 {} vs {}", r.m2, m.m2);
+            prop_assert!(
+                close(pass1_l2(&r), m.l2, 1e-9, 1e-12),
+                "l2 {} vs {}",
+                pass1_l2(&r),
+                m.l2
+            );
+        }
+    }
+
+    // ── tier-4 metamorphic: parallel merge ────────────────────────────────────
+
+    proptest! {
+        /// Chan/Golub/LeVeque: merging the partials of A and B reproduces the
+        /// single-pass result over the concatenation A ++ B.
+        #[test]
+        fn merge_equals_concatenation(a in values(), b in values()) {
+            let ra = compute_pass1(&a);
+            let rb = compute_pass1(&b);
+            let merged = merge_pass1(&ra, &rb);
+
+            let mut concat = a;
+            concat.extend_from_slice(&b);
+            let direct = compute_pass1(&concat);
+
+            prop_assert_eq!(merged.n, direct.n);
+            prop_assert_eq!(merged.nan_count, direct.nan_count);
+            prop_assert_eq!(merged.inf_count, direct.inf_count);
+            prop_assert_eq!(merged.sparse_count, direct.sparse_count);
+            prop_assert!(exact_eq(merged.min, direct.min));
+            prop_assert!(exact_eq(merged.max, direct.max));
+            prop_assert!(exact_eq(merged.abs_max, direct.abs_max));
+
+            prop_assert!(
+                close(merged.mean, direct.mean, 1e-9, 1e-6),
+                "mean {} vs {}",
+                merged.mean,
+                direct.mean
+            );
+            prop_assert!(
+                close(merged.m2, direct.m2, 1e-6, 1e-3),
+                "m2 {} vs {}",
+                merged.m2,
+                direct.m2
+            );
+            prop_assert!(
+                close(pass1_l2(&merged), pass1_l2(&direct), 1e-9, 1e-12),
+                "l2 {} vs {}",
+                pass1_l2(&merged),
+                pass1_l2(&direct)
+            );
+        }
+    }
+
+    // ── tier-4 metamorphic: order invariance ──────────────────────────────────
+
+    proptest! {
+        /// Permuting the stream leaves every reported statistic invariant
+        /// (the float accumulators up to reassociation tolerance).
+        #[test]
+        fn statistics_are_order_invariant(
+            (orig, shuffled) in values().prop_flat_map(|v| (Just(v.clone()), Just(v).prop_shuffle()))
+        ) {
+            let a = compute_pass1(&orig);
+            let b = compute_pass1(&shuffled);
+
+            prop_assert_eq!(a.n, b.n);
+            prop_assert_eq!(a.nan_count, b.nan_count);
+            prop_assert_eq!(a.inf_count, b.inf_count);
+            prop_assert_eq!(a.sparse_count, b.sparse_count);
+            prop_assert!(exact_eq(a.min, b.min));
+            prop_assert!(exact_eq(a.max, b.max));
+            prop_assert!(exact_eq(a.abs_max, b.abs_max));
+
+            prop_assert!(close(a.mean, b.mean, 1e-9, 1e-6), "mean {} vs {}", a.mean, b.mean);
+            prop_assert!(close(a.m2, b.m2, 1e-6, 1e-3), "m2 {} vs {}", a.m2, b.m2);
+            prop_assert!(
+                close(pass1_l2(&a), pass1_l2(&b), 1e-9, 1e-12),
+                "l2 {} vs {}",
+                pass1_l2(&a),
+                pass1_l2(&b)
+            );
+        }
+    }
+
+    // ── tier-5 exception-raising / invariant ──────────────────────────────────
+
+    proptest! {
+        /// For ANY decoded byte stream and ANY dtype, `compute_summary` never
+        /// panics and emits a structurally well-formed summary.
+        #[test]
+        fn summary_is_always_well_formed(
+            data in prop::collection::vec(any::<u8>(), 0..1024),
+            dtype in any_dtype(),
+        ) {
+            let shape = [data.len().max(1) as u64];
+            let (stats, top_k) = compute_summary(&data, dtype, &shape);
+
+            // Histogram shape is constant and counts/edges are consistent.
+            prop_assert_eq!(stats.histogram.counts.len(), NUM_HISTOGRAM_BINS);
+            prop_assert_eq!(stats.histogram.edges.len(), NUM_HISTOGRAM_BINS + 1);
+            prop_assert_eq!(stats.histogram.bins as usize, NUM_HISTOGRAM_BINS);
+
+            // Sparsity is a probability.
+            prop_assert!((0.0..=1.0).contains(&stats.sparsity), "sparsity={}", stats.sparsity);
+
+            // top-k is bounded and sorted by descending |value|.
+            prop_assert!(top_k.len() <= DEFAULT_TOP_K);
+            for w in top_k.windows(2) {
+                prop_assert!(
+                    w[0].value.abs() >= w[1].value.abs(),
+                    "top-k not sorted: {} then {}",
+                    w[0].value,
+                    w[1].value
+                );
+            }
+        }
+    }
+
+    proptest! {
+        /// For the bounded dtypes, every reported statistic is finite — the
+        /// contract that keeps a `TensorStats` JSON-serialisable.
+        #[test]
+        fn bounded_dtype_summary_is_finite(
+            data in prop::collection::vec(any::<u8>(), 0..1024),
+            dtype in bounded_dtype(),
+        ) {
+            let shape = [data.len().max(1) as u64];
+            let (stats, _top_k) = compute_summary(&data, dtype, &shape);
+
+            prop_assert!(stats.mean.is_finite(), "mean={}", stats.mean);
+            prop_assert!(stats.std.is_finite() && stats.std >= 0.0, "std={}", stats.std);
+            prop_assert!(stats.min.is_finite(), "min={}", stats.min);
+            prop_assert!(stats.max.is_finite(), "max={}", stats.max);
+            prop_assert!(
+                stats.abs_max.is_finite() && stats.abs_max >= 0.0,
+                "abs_max={}",
+                stats.abs_max
+            );
+            prop_assert!(
+                stats.l2_norm.is_finite() && stats.l2_norm >= 0.0,
+                "l2_norm={}",
+                stats.l2_norm
+            );
+            for e in &stats.histogram.edges {
+                prop_assert!(e.is_finite(), "edge={}", e);
+            }
+        }
+    }
+
+    /// FINDING (recorded in PLATOON-FINDINGS.md, not a fix): finite-but-huge
+    /// `Float64` inputs overflow the streaming intermediates. Two opposite
+    /// near-`f64::MAX` values drive the Welford mean to ±inf and M2 to -inf, so
+    /// the emitted `mean`/`std` are non-finite — violating the
+    /// JSON-serialisability contract that holds for every bounded dtype. This
+    /// test PINS the current (defective) behaviour so the regression is visible
+    /// and the protocol owner can decide on a saturating/guarded fix.
+    #[test]
+    fn documents_f64_huge_value_overflow() {
+        let vals = [f64::MAX, -f64::MAX];
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (stats, _) = compute_summary(&data, DType::Float64, &[2]);
+
+        // The defect: at least one core statistic escapes the finite contract.
+        let any_non_finite = !stats.mean.is_finite()
+            || !stats.std.is_finite()
+            || stats.histogram.edges.iter().any(|e| !e.is_finite());
+        assert!(
+            any_non_finite,
+            "expected non-finite stats for huge f64 inputs (mean={}, std={}); \
+             if this now holds, the overflow has been fixed — update PLATOON-FINDINGS.md",
+            stats.mean, stats.std
+        );
+    }
+
+    // ── generator-distribution measurement (the `cover` discipline) ──────────
+
+    #[test]
+    fn value_generator_distribution_is_non_trivial() {
+        let mut runner = TestRunner::deterministic();
+        let strat = values();
+        let n = 500usize;
+
+        let mut empty = 0usize;
+        let mut has_nan = 0usize;
+        let mut has_inf = 0usize;
+        let mut has_zero = 0usize;
+        let mut all_finite = 0usize;
+        let mut total_len = 0usize;
+
+        for _ in 0..n {
+            let tree = strat
+                .new_tree(&mut runner)
+                .expect("strategy produces a value");
+            let v = tree.current();
+            total_len += v.len();
+            if v.is_empty() {
+                empty += 1;
+            }
+            if v.iter().any(|x| x.is_nan()) {
+                has_nan += 1;
+            }
+            if v.iter().any(|x| x.is_infinite()) {
+                has_inf += 1;
+            }
+            if v.contains(&0.0) {
+                has_zero += 1;
+            }
+            if !v.is_empty() && v.iter().all(|x| x.is_finite()) {
+                all_finite += 1;
+            }
+        }
+
+        let pct = |k: usize| k as f64 / n as f64 * 100.0;
+        eprintln!(
+            "tensor_stats value generator over {n} streams (avg len {:.1}):\n  \
+             empty: {:.1}%  has-NaN: {:.1}%  has-Inf: {:.1}%  has-zero: {:.1}%  \
+             non-empty all-finite: {:.1}%",
+            total_len as f64 / n as f64,
+            pct(empty),
+            pct(has_nan),
+            pct(has_inf),
+            pct(has_zero),
+            pct(all_finite),
+        );
+
+        // Both regimes must be well represented: clean numeric streams AND
+        // messy ones carrying NaN/Inf. Thresholds sit well below observed.
+        assert!(pct(all_finite) > 25.0, "too few all-finite streams");
+        assert!(pct(has_nan) > 10.0, "too few NaN-bearing streams");
+        assert!(pct(has_inf) > 10.0, "too few Inf-bearing streams");
+        assert!(pct(has_zero) > 10.0, "too few zero-bearing streams");
+        assert!(empty < n / 4, "too many empty streams");
+    }
+}
