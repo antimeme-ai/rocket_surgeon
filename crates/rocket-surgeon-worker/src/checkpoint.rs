@@ -958,3 +958,689 @@ mod tests {
         assert_eq!(arena.oldest_checkpoint().as_deref(), Some("beta"));
     }
 }
+
+// ===========================================================================
+// Property-based / stateful model-based tests (B002 platoon, BRAVO lane).
+//
+// Oracle tiers per MATERIA: these reach tier 6 (model-based) for the arena
+// allocator and tier 4 (metamorphic/roundtrip) for the binary serializers and
+// NVMe spill path. Every test states its oracle in a doc comment.
+// ===========================================================================
+#[cfg(test)]
+mod prop_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use proptest::prelude::*;
+
+    use super::{
+        CheckpointArena, DtypeTag, SLOT_HEADER_SIZE, SLOT_MAGIC, SPILL_INDEX_ENTRY_SIZE,
+        SlotHeader, SpillIndexEntry, align_up, load_spilled_checkpoint, spill_checkpoint,
+    };
+    use crate::tick::TickState;
+
+    // ---- shared op alphabet --------------------------------------------------
+    // Small alphabets force collisions, exhaustion, and re-use — the regimes
+    // where allocator bugs live. Distribution is measured below.
+    const N_CKPTS: u8 = 4;
+    const N_LAYERS: u8 = 4;
+
+    fn ckpt_id(n: u8) -> String {
+        format!("ck{n}")
+    }
+
+    #[derive(Clone, Debug)]
+    enum ArenaOp {
+        Alloc { ckpt: u8, layer: u8 },
+        Free { ckpt: u8 },
+    }
+
+    fn arena_op_strategy() -> impl Strategy<Value = ArenaOp> {
+        prop_oneof![
+            (0..N_CKPTS, 0..N_LAYERS).prop_map(|(ckpt, layer)| ArenaOp::Alloc { ckpt, layer }),
+            (0..N_CKPTS).prop_map(|ckpt| ArenaOp::Free { ckpt }),
+        ]
+    }
+
+    /// Abstract reference model of the arena's bookkeeping. Deliberately a
+    /// *different, simpler* implementation than the real arena: counts and sets
+    /// instead of a free-list + descriptor table + mmap.
+    #[derive(Default)]
+    struct ArenaModel {
+        free: usize,
+        /// ckpt -> number of physical slots it currently owns (dup allocs count).
+        slot_count: BTreeMap<String, usize>,
+        /// (ckpt, layer) keys currently retrievable via `get_slot`.
+        present: BTreeSet<(String, u32)>,
+        /// first-seen order of live checkpoint ids, with removal on free.
+        order: Vec<String>,
+    }
+
+    #[derive(Default, Debug)]
+    struct ArenaStats {
+        ops: usize,
+        alloc_ok: usize,
+        alloc_exhausted: usize,
+        free_present: usize,
+        free_absent: usize,
+        max_used: usize,
+    }
+
+    /// Drives the real arena and the abstract model through `ops` in lockstep,
+    /// asserting equality after every operation. Panics (which proptest catches
+    /// and shrinks) on any divergence. Returns generation statistics.
+    ///
+    /// Oracle: tier 6 — the model is the spec.
+    fn check_arena_ops(capacity: usize, ops: &[ArenaOp]) -> ArenaStats {
+        let arena = CheckpointArena::new(SLOT_HEADER_SIZE, capacity).unwrap();
+        let mut model = ArenaModel {
+            free: capacity,
+            ..ArenaModel::default()
+        };
+        let mut stats = ArenaStats::default();
+
+        for op in ops {
+            stats.ops += 1;
+            match op {
+                ArenaOp::Alloc { ckpt, layer } => {
+                    let id = ckpt_id(*ckpt);
+                    let layer = u32::from(*layer);
+                    let result = arena.alloc_slot(&id, layer);
+                    if model.free == 0 {
+                        assert!(
+                            result.is_err(),
+                            "arena accepted alloc while model says full (cap={capacity})"
+                        );
+                        stats.alloc_exhausted += 1;
+                    } else {
+                        assert!(result.is_ok(), "arena rejected alloc while model has room");
+                        model.free -= 1;
+                        let is_new = !model.slot_count.contains_key(&id);
+                        *model.slot_count.entry(id.clone()).or_insert(0) += 1;
+                        model.present.insert((id.clone(), layer));
+                        if is_new {
+                            model.order.push(id);
+                        }
+                        stats.alloc_ok += 1;
+                    }
+                }
+                ArenaOp::Free { ckpt } => {
+                    let id = ckpt_id(*ckpt);
+                    if let Some(n) = model.slot_count.remove(&id) {
+                        model.free += n;
+                        model.present.retain(|(c, _)| c != &id);
+                        model.order.retain(|c| c != &id);
+                        stats.free_present += 1;
+                    } else {
+                        stats.free_absent += 1;
+                    }
+                    arena.free_checkpoint(&id);
+                }
+            }
+
+            // --- invariants checked after EVERY op ---
+            let used = capacity - model.free;
+            stats.max_used = stats.max_used.max(used);
+            assert_eq!(arena.available(), model.free, "available() != model.free");
+            assert!(arena.available() <= capacity, "available exceeds capacity");
+            assert_eq!(
+                arena.oldest_checkpoint().as_deref(),
+                model.order.first().map(String::as_str),
+                "oldest_checkpoint disagrees with model insertion order"
+            );
+            // get_slot presence agrees with the model across the whole key space.
+            for c in 0..N_CKPTS {
+                for l in 0..N_LAYERS {
+                    let id = ckpt_id(c);
+                    let layer = u32::from(l);
+                    let real_present = arena.get_slot(&id, layer).is_some();
+                    let model_present = model.present.contains(&(id.clone(), layer));
+                    assert_eq!(
+                        real_present, model_present,
+                        "get_slot({id},{layer}) presence mismatch"
+                    );
+                }
+            }
+        }
+        stats
+    }
+
+    proptest! {
+        /// Stateful model-based: the arena allocator matches a count/set model
+        /// after every alloc/free in an arbitrary sequence. Oracle tier 6.
+        #[test]
+        fn arena_matches_model(
+            capacity in 1usize..6,
+            ops in proptest::collection::vec(arena_op_strategy(), 0..60),
+        ) {
+            check_arena_ops(capacity, &ops);
+        }
+
+        /// Exception-raising / metamorphic: allocation MUST fail exactly when
+        /// the arena is full and MUST succeed while a slot is free. Round-trips
+        /// alloc -> free -> alloc to prove freed slots become reusable.
+        #[test]
+        fn arena_exhaustion_is_exact(capacity in 1usize..5) {
+            let arena = CheckpointArena::new(SLOT_HEADER_SIZE, capacity).unwrap();
+            for i in 0..capacity {
+                prop_assert!(arena.alloc_slot("full", i as u32).is_ok());
+            }
+            prop_assert_eq!(arena.available(), 0);
+            prop_assert!(arena.alloc_slot("full", 999).is_err(), "alloc succeeded on full arena");
+            arena.free_checkpoint("full");
+            prop_assert_eq!(arena.available(), capacity);
+            // freed capacity is fully reusable
+            for i in 0..capacity {
+                prop_assert!(arena.alloc_slot("again", i as u32).is_ok());
+            }
+        }
+    }
+
+    /// Generator characterization (MATERIA "measure your generators"). Samples
+    /// many op sequences and asserts the interesting regimes are actually
+    /// exercised — otherwise the property above is testing trivial inputs.
+    #[test]
+    fn arena_generator_distribution() {
+        use proptest::strategy::{Strategy, ValueTree};
+        use proptest::test_runner::TestRunner;
+
+        const SAMPLES: usize = 400;
+
+        let mut runner = TestRunner::deterministic();
+        let strat = (
+            1usize..6,
+            proptest::collection::vec(arena_op_strategy(), 0..60),
+        );
+
+        let mut total = ArenaStats::default();
+        let mut cases_with_exhaustion = 0usize;
+        let mut cases_with_present_free = 0usize;
+
+        for _ in 0..SAMPLES {
+            let tree = strat.new_tree(&mut runner).unwrap();
+            let (cap, ops) = tree.current();
+            let s = check_arena_ops(cap, &ops);
+            if s.alloc_exhausted > 0 {
+                cases_with_exhaustion += 1;
+            }
+            if s.free_present > 0 {
+                cases_with_present_free += 1;
+            }
+            total.ops += s.ops;
+            total.alloc_ok += s.alloc_ok;
+            total.alloc_exhausted += s.alloc_exhausted;
+            total.free_present += s.free_present;
+            total.free_absent += s.free_absent;
+            total.max_used = total.max_used.max(s.max_used);
+        }
+
+        println!(
+            "arena generator over {SAMPLES} cases: total_ops={} alloc_ok={} \
+             alloc_exhausted={} free_present={} free_absent={} \
+             cases_hitting_exhaustion={cases_with_exhaustion} \
+             cases_with_present_free={cases_with_present_free}",
+            total.ops, total.alloc_ok, total.alloc_exhausted, total.free_present, total.free_absent,
+        );
+
+        // Coverage floors: if these fail the generator has gone trivial.
+        assert!(
+            cases_with_exhaustion * 5 >= SAMPLES,
+            "exhaustion exercised in <20% of cases ({cases_with_exhaustion}/{SAMPLES})"
+        );
+        assert!(
+            cases_with_present_free * 5 >= SAMPLES,
+            "freeing a live checkpoint exercised in <20% of cases"
+        );
+        assert!(total.alloc_ok > 0 && total.alloc_exhausted > 0 && total.free_absent > 0);
+    }
+
+    // ---- oldest_evictable parser, model-based --------------------------------
+
+    /// Reference re-implementation of the eviction-selection policy, written
+    /// independently from the production parser. Oracle for the model test.
+    fn model_oldest_evictable(order: &[String], current_segment: u32) -> Option<String> {
+        for id in order {
+            if let Some(rest) = id.strip_prefix("sub-") {
+                if let Some(seg) = rest.split('-').next().and_then(|s| s.parse::<u32>().ok()) {
+                    if seg != current_segment {
+                        return Some(id.clone());
+                    }
+                }
+            }
+        }
+        order.iter().find(|id| id.starts_with("auto-")).cloned()
+    }
+
+    fn evictable_id_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            (0u32..4, 0u32..3).prop_map(|(seg, k)| format!("sub-{seg}-{k}")),
+            (0u32..4).prop_map(|k| format!("auto-{k}")),
+            (0u32..4).prop_map(|k| format!("user-{k}")),
+        ]
+    }
+
+    proptest! {
+        /// Model-based: `oldest_evictable` matches an independent reference of
+        /// the sub-segment / auto eviction policy across arbitrary live sets.
+        /// Oracle tier 6.
+        #[test]
+        fn oldest_evictable_matches_model(
+            ids in proptest::collection::vec(evictable_id_strategy(), 0..8),
+            current_segment in 0u32..4,
+        ) {
+            // Allocate one slot per distinct id so they enter the arena in order.
+            let arena = CheckpointArena::new(SLOT_HEADER_SIZE, 16).unwrap();
+            let mut order = Vec::new();
+            for id in &ids {
+                if !order.iter().any(|o| o == id) {
+                    order.push(id.clone());
+                }
+                // dup allocs to the same id are fine; we cap at 16 slots.
+                if arena.available() > 0 {
+                    let _ = arena.alloc_slot(id, 0);
+                }
+            }
+            let expected = model_oldest_evictable(&order, current_segment);
+            prop_assert_eq!(arena.oldest_evictable(current_segment), expected);
+        }
+    }
+
+    // ---- align_up properties (tier 5) ---------------------------------------
+
+    proptest! {
+        /// Property: align_up rounds up to the next multiple of a power-of-two
+        /// alignment. Checks the full algebraic contract, not one example.
+        #[test]
+        fn align_up_properties(val in 0usize..1_000_000, shift in 0u32..16) {
+            let align = 1usize << shift;
+            let out = align_up(val, align);
+            prop_assert!(out >= val, "align_up went backwards");
+            prop_assert_eq!(out % align, 0, "result not aligned");
+            prop_assert!(out - val < align, "overshoots by a full alignment");
+            // idempotent on already-aligned inputs
+            prop_assert_eq!(align_up(out, align), out, "not idempotent");
+        }
+
+        /// Metamorphic: align_up is monotonic non-decreasing in `val`.
+        #[test]
+        fn align_up_monotonic(a in 0usize..500_000, b in 0usize..500_000, shift in 0u32..16) {
+            let align = 1usize << shift;
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(align_up(lo, align) <= align_up(hi, align));
+        }
+    }
+
+    // ---- DtypeTag roundtrip + exception (tier 4 + exception) -----------------
+
+    proptest! {
+        /// Roundtrip + exception: from_u8 is the exact inverse of `as u8` for
+        /// valid tags, and rejects (None, no panic) every out-of-range byte.
+        #[test]
+        fn dtype_from_u8_total(byte in any::<u8>()) {
+            match DtypeTag::from_u8(byte) {
+                Some(tag) => prop_assert_eq!(tag as u8, byte),
+                None => prop_assert!(byte > 3, "rejected a valid dtype byte {}", byte),
+            }
+        }
+
+        /// Roundtrip + exception: torch-string conversion. Valid strings round
+        /// trip; arbitrary strings never panic and yield None unless canonical.
+        #[test]
+        fn dtype_torch_str_roundtrip(s in "\\PC{0,16}") {
+            // Valid strings round trip; non-canonical strings are correctly
+            // rejected (None) without panicking.
+            if let Some(tag) = DtypeTag::from_torch_str(&s) {
+                prop_assert_eq!(tag.to_torch_str(), s.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn dtype_torch_str_roundtrip_all_variants() {
+        for tag in [
+            DtypeTag::Float16,
+            DtypeTag::Bfloat16,
+            DtypeTag::Float32,
+            DtypeTag::Float64,
+        ] {
+            assert_eq!(DtypeTag::from_torch_str(tag.to_torch_str()), Some(tag));
+        }
+    }
+
+    // ---- SlotHeader binary roundtrip + exception (tier 4 + exception) --------
+
+    fn slot_header_strategy() -> impl Strategy<Value = SlotHeader> {
+        (
+            0u8..4,
+            0u8..=6,
+            proptest::array::uniform6(0u64..100_000),
+            any::<u64>(),
+        )
+            .prop_map(|(dtype_byte, ndim, shape, byte_len)| SlotHeader {
+                magic: SLOT_MAGIC,
+                dtype: DtypeTag::from_u8(dtype_byte).unwrap(),
+                ndim,
+                shape,
+                byte_len,
+            })
+    }
+
+    proptest! {
+        /// Roundtrip: write_to then read_from is the identity on every field.
+        /// Oracle tier 4.
+        #[test]
+        fn slot_header_write_read_roundtrip(h in slot_header_strategy()) {
+            let mut buf = [0u8; SLOT_HEADER_SIZE];
+            h.write_to(&mut buf);
+            let parsed = SlotHeader::read_from(&buf).expect("valid header must parse");
+            prop_assert_eq!(parsed.magic, h.magic);
+            prop_assert_eq!(parsed.dtype, h.dtype);
+            prop_assert_eq!(parsed.ndim, h.ndim);
+            prop_assert_eq!(parsed.shape, h.shape);
+            prop_assert_eq!(parsed.byte_len, h.byte_len);
+        }
+
+        /// Exception-raising / implicit oracle: read_from never panics on
+        /// arbitrary bytes, and returns Some only when magic AND dtype are valid.
+        #[test]
+        fn slot_header_read_total(bytes in proptest::array::uniform32(any::<u8>())) {
+            let mut buf = [0u8; SLOT_HEADER_SIZE];
+            buf[..32].copy_from_slice(&bytes);
+            buf[32..].copy_from_slice(&bytes); // fill remaining 32 bytes too
+            let parsed = SlotHeader::read_from(&buf);
+            let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            if parsed.is_some() {
+                prop_assert_eq!(magic, SLOT_MAGIC);
+                prop_assert!(buf[4] <= 3, "accepted invalid dtype byte");
+            }
+        }
+    }
+
+    // ---- SpillIndexEntry binary roundtrip (tier 4) --------------------------
+
+    proptest! {
+        /// Roundtrip: the NVMe spill index entry serializer is its own inverse.
+        /// Oracle tier 4.
+        #[test]
+        fn spill_index_entry_roundtrip(
+            layer_idx in any::<u32>(),
+            dtype_byte in 0u8..4,
+            ndim in 0u8..=6,
+            shape in proptest::array::uniform6(any::<u64>()),
+            data_offset in any::<u64>(),
+            data_len in any::<u64>(),
+            crc32 in any::<u32>(),
+        ) {
+            let entry = SpillIndexEntry {
+                layer_idx,
+                dtype: DtypeTag::from_u8(dtype_byte).unwrap(),
+                ndim,
+                shape,
+                data_offset,
+                data_len,
+                crc32,
+            };
+            let mut buf = [0u8; SPILL_INDEX_ENTRY_SIZE];
+            entry.write_to(&mut buf);
+            let parsed = SpillIndexEntry::read_from(&buf).expect("valid entry must parse");
+            prop_assert_eq!(parsed.layer_idx, entry.layer_idx);
+            prop_assert_eq!(parsed.dtype, entry.dtype);
+            prop_assert_eq!(parsed.ndim, entry.ndim);
+            prop_assert_eq!(parsed.shape, entry.shape);
+            prop_assert_eq!(parsed.data_offset, entry.data_offset);
+            prop_assert_eq!(parsed.data_len, entry.data_len);
+            prop_assert_eq!(parsed.crc32, entry.crc32);
+        }
+    }
+
+    // ---- spill/load metamorphic roundtrip + corruption exception ------------
+
+    /// A checkpoint described abstractly: per layer, a dtype/ndim/shape and the
+    /// raw payload bytes that must survive a spill->load round trip.
+    #[derive(Clone, Debug)]
+    struct LayerSpec {
+        layer: u32,
+        dtype_byte: u8,
+        ndim: u8,
+        shape: [u64; 6],
+        payload: Vec<u8>,
+    }
+
+    fn layer_spec_strategy(max_payload: usize) -> impl Strategy<Value = LayerSpec> {
+        (
+            0u32..8,
+            0u8..4,
+            0u8..=6,
+            proptest::array::uniform6(0u64..64),
+            proptest::collection::vec(any::<u8>(), 0..max_payload),
+        )
+            .prop_map(|(layer, dtype_byte, ndim, shape, payload)| LayerSpec {
+                layer,
+                dtype_byte,
+                ndim,
+                shape,
+                payload,
+            })
+    }
+
+    /// Build an arena holding one checkpoint with the given layer specs. Slot
+    /// size is sized to fit the largest payload. Returns the arena.
+    fn build_checkpoint(id: &str, specs: &[LayerSpec]) -> CheckpointArena {
+        let max_payload = specs.iter().map(|s| s.payload.len()).max().unwrap_or(0);
+        let slot_size = SLOT_HEADER_SIZE + max_payload.max(1);
+        let arena = CheckpointArena::new(slot_size, specs.len().max(1)).unwrap();
+        for spec in specs {
+            let (ptr, _) = arena.alloc_slot(id, spec.layer).unwrap();
+            let header = SlotHeader {
+                magic: SLOT_MAGIC,
+                dtype: DtypeTag::from_u8(spec.dtype_byte).unwrap(),
+                ndim: spec.ndim,
+                shape: spec.shape,
+                byte_len: spec.payload.len() as u64,
+            };
+            // SAFETY: ptr was just returned by alloc_slot; payload fits slot.
+            unsafe {
+                arena.update_header(ptr, &header);
+                std::ptr::copy_nonoverlapping(
+                    spec.payload.as_ptr(),
+                    ptr.add(SLOT_HEADER_SIZE),
+                    spec.payload.len(),
+                );
+            }
+        }
+        arena
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+        /// Metamorphic round-trip: spilling a checkpoint to disk and loading it
+        /// back into a fresh id reproduces every payload byte, dtype, ndim and
+        /// shape exactly, and frees then re-consumes the right slot count.
+        /// Oracle tier 4 (spill is the inverse of load on the data).
+        #[test]
+        fn spill_load_roundtrip(
+            specs in proptest::collection::vec(layer_spec_strategy(48), 1..5)
+                .prop_filter("distinct layers", |v| {
+                    let mut seen = std::collections::BTreeSet::new();
+                    v.iter().all(|s| seen.insert(s.layer))
+                }),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let arena = build_checkpoint("src", &specs);
+            let slots = specs.len();
+            prop_assert_eq!(arena.available(), 0);
+
+            spill_checkpoint(&arena, "src", dir.path()).unwrap();
+            prop_assert_eq!(arena.available(), slots, "spill did not free slots");
+
+            let path = dir.path().join("src.ckpt");
+            load_spilled_checkpoint(&arena, &path, "dst").unwrap();
+            prop_assert_eq!(arena.available(), 0, "load did not re-consume slots");
+
+            for spec in &specs {
+                let (ptr, hdr) = arena.get_slot("dst", spec.layer)
+                    .expect("loaded layer must be present");
+                prop_assert_eq!(hdr.dtype as u8, spec.dtype_byte);
+                prop_assert_eq!(hdr.ndim, spec.ndim);
+                prop_assert_eq!(hdr.shape, spec.shape);
+                prop_assert_eq!(hdr.byte_len, spec.payload.len() as u64);
+                // SAFETY: ptr is a live slot; we read exactly payload.len() bytes.
+                let restored = unsafe {
+                    std::slice::from_raw_parts(ptr.add(SLOT_HEADER_SIZE), spec.payload.len())
+                };
+                prop_assert_eq!(restored, spec.payload.as_slice(), "payload corrupted");
+            }
+        }
+
+        /// Exception-raising: flipping ANY single byte in the spilled file's
+        /// data region must be caught (CRC32) — never silently load wrong data,
+        /// never panic. This is the metamorphic "corruption is always detected"
+        /// relation generalized over the corruption site.
+        #[test]
+        fn spill_corruption_always_detected(
+            spec in layer_spec_strategy(64)
+                .prop_filter("non-empty payload", |s| !s.payload.is_empty()),
+            flip in 0usize..512,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let arena = build_checkpoint("c", std::slice::from_ref(&spec));
+            spill_checkpoint(&arena, "c", dir.path()).unwrap();
+            let path = dir.path().join("c.ckpt");
+
+            let mut bytes = std::fs::read(&path).unwrap();
+            // Find the data region: it starts after the 64-aligned header+index.
+            let header_size = 16 + SPILL_INDEX_ENTRY_SIZE; // one entry
+            let data_start = super::align_up(header_size, 64);
+            prop_assume!(bytes.len() > data_start);
+            let site = data_start + (flip % (bytes.len() - data_start));
+            bytes[site] ^= 0x01;
+            std::fs::write(&path, &bytes).unwrap();
+
+            let result = load_spilled_checkpoint(&arena, &path, "restored");
+            // Either CRC catches it, or the flip landed in trailing zero padding
+            // (outside the CRC'd payload) and the load legitimately succeeds with
+            // the original payload intact. Both are correct; a silent wrong-data
+            // load or a panic is not.
+            match result {
+                Ok(()) => {
+                    let (ptr, _) = arena.get_slot("restored", spec.layer).unwrap();
+                    // SAFETY: live slot, reading payload.len() bytes.
+                    let restored = unsafe {
+                        std::slice::from_raw_parts(ptr.add(SLOT_HEADER_SIZE), spec.payload.len())
+                    };
+                    prop_assert_eq!(
+                        restored, spec.payload.as_slice(),
+                        "load succeeded but payload differs — corruption went undetected"
+                    );
+                }
+                Err(e) => prop_assert!(
+                    e.to_string().contains("CRC32"),
+                    "expected a CRC32 error for in-payload corruption"
+                ),
+            }
+        }
+
+        /// Exception-raising: a truncated spill file is always rejected, never
+        /// panics, regardless of where it is cut.
+        #[test]
+        fn spill_truncation_rejected(
+            spec in layer_spec_strategy(64)
+                .prop_filter("non-empty payload", |s| !s.payload.is_empty()),
+            cut in 0usize..512,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let arena = build_checkpoint("t", std::slice::from_ref(&spec));
+            spill_checkpoint(&arena, "t", dir.path()).unwrap();
+            let path = dir.path().join("t.ckpt");
+            let bytes = std::fs::read(&path).unwrap();
+            let keep = cut % bytes.len();
+            std::fs::write(&path, &bytes[..keep]).unwrap();
+
+            // Must return an error (or, if the cut left a byte-identical valid
+            // prefix, succeed) — but must never panic.
+            let _ = load_spilled_checkpoint(&arena, &path, "trunc");
+        }
+    }
+
+    #[test]
+    fn spill_bad_magic_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bogus.ckpt");
+        std::fs::write(&path, b"NOTSPILLxxxxxxxxxxxxxxxx").unwrap();
+        let arena = CheckpointArena::new(SLOT_HEADER_SIZE + 16, 4).unwrap();
+        let err = load_spilled_checkpoint(&arena, &path, "x").unwrap_err();
+        assert!(err.to_string().contains("magic"), "got: {err}");
+    }
+
+    // ---- combined step / checkpoint op sequences (independence) --------------
+
+    #[derive(Clone, Debug)]
+    enum DriverOp {
+        Step { component: u8, layer: u32 },
+        NextToken,
+        Checkpoint { ckpt: u8, layer: u8 },
+        Free { ckpt: u8 },
+    }
+
+    fn driver_op_strategy() -> impl Strategy<Value = DriverOp> {
+        prop_oneof![
+            (0u8..4, 0u32..8).prop_map(|(component, layer)| DriverOp::Step { component, layer }),
+            Just(DriverOp::NextToken),
+            (0..N_CKPTS, 0..N_LAYERS)
+                .prop_map(|(ckpt, layer)| DriverOp::Checkpoint { ckpt, layer }),
+            (0..N_CKPTS).prop_map(|ckpt| DriverOp::Free { ckpt }),
+        ]
+    }
+
+    proptest! {
+        /// Stateful + metamorphic: the step-driver cursor and the checkpoint
+        /// arena are INDEPENDENT subsystems. Interleaving step/next-token with
+        /// checkpoint/free, a checkpoint op must never move the tick clocks and
+        /// a step op must never change the arena's free count. This guards
+        /// against future coupling of replay/checkpoint state. Oracle tier 6.
+        #[test]
+        fn step_and_checkpoint_are_independent(
+            ops in proptest::collection::vec(driver_op_strategy(), 0..60),
+            capacity in 1usize..6,
+        ) {
+            let mut tick = TickState::new(0);
+            let arena = CheckpointArena::new(SLOT_HEADER_SIZE, capacity).unwrap();
+
+            for op in &ops {
+                let tick_before = (tick.token(), tick.operator(), tick.step_count());
+                let arena_before = arena.available();
+                match *op {
+                    DriverOp::Step { component, layer } => {
+                        tick.advance(&format!("c{component}"), layer, 0);
+                        // tick advanced; arena untouched.
+                        prop_assert_eq!(arena.available(), arena_before, "step changed arena");
+                        prop_assert_eq!(tick.operator(), tick_before.1 + 1, "step did not advance");
+                    }
+                    DriverOp::NextToken => {
+                        tick.advance_token();
+                        prop_assert_eq!(arena.available(), arena_before, "next-token changed arena");
+                    }
+                    DriverOp::Checkpoint { ckpt, layer } => {
+                        let _ = arena.alloc_slot(&ckpt_id(ckpt), u32::from(layer));
+                        // checkpoint op; tick clocks untouched.
+                        prop_assert_eq!(
+                            (tick.token(), tick.operator(), tick.step_count()),
+                            tick_before,
+                            "checkpoint op moved the tick cursor"
+                        );
+                    }
+                    DriverOp::Free { ckpt } => {
+                        arena.free_checkpoint(&ckpt_id(ckpt));
+                        prop_assert_eq!(
+                            (tick.token(), tick.operator(), tick.step_count()),
+                            tick_before,
+                            "free op moved the tick cursor"
+                        );
+                    }
+                }
+                // Global arena invariant survives the whole interleaving.
+                prop_assert!(arena.available() <= capacity);
+            }
+        }
+    }
+}

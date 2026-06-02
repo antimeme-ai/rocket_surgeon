@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1ff11502054dfe42a5c71e818eca0dc1f57ace3612261cf862fabbf1b7317f09 # shrinks to v = Inline([-5.872509050683965e298])
+cc 84e7ca4f12bde30afc5d6cbb3286b5503d48d73f73f5b811c18b687057371893 # shrinks to v = Inline([-1.9943773746490479])
+cc 3e1a57cb9bc960c110eeacaeb57c95e46bd8d6e168f30106bd97b0a06dcb83b3 # shrinks to v = -9.824762698844575e132
+cc 729a7db1310fd75979fbc3352336d41c536ba5ba15b5f7da756cdf491895a221 # shrinks to v = -2.1445558383837477e241
+cc 5302032494747d1d1450a355ce0d9c79284ea0477e4106ceb561b8a5b2c94667 # shrinks to v = ProbeDefinition { id: "", point: "", action: Capture, config: Some(ProbeConfig { summary: false, capture_tensor: false, filter: None, aggregate_fn: None, assertion: None, intervention: Some(InterventionRecipe { id: None, intervention_type: Ablate, target: "", params: Clamp { min: -5.613216423111896e-27, max: 0.0 }, condition: None, priority: 0, mode: Additive }) }), enabled: false, priority: 0 }

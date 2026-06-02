@@ -13,5 +13,14 @@ thiserror.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+proptest = "1"
+
+# loom drives the exhaustive-interleaving test of the SPSC ordering protocol.
+# Gated behind `--cfg loom`; a normal `cargo test` / clippy build never compiles
+# loom code (the test files are `#![cfg(loom)]`), keeping default builds clean.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

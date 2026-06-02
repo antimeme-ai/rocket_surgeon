@@ -322,3 +322,228 @@ mod tests {
         assert!(json["clock"]["wall_ns"].as_u64().unwrap() > 0);
     }
 }
+
+// ===========================================================================
+// Property-based / stateful model-based tests for the step-driver tick cursor
+// (B002 platoon, BRAVO lane).
+//
+// The TickState is the step-driver FSM: a three-clock cursor advanced one
+// operator (or token) at a time. We model it with an independent abstract
+// state and assert the real cursor matches after EVERY operation in an
+// arbitrary op sequence (oracle tier 6, model-based / stateful).
+// ===========================================================================
+#[cfg(test)]
+mod prop_tests {
+    use proptest::prelude::*;
+
+    use super::{Phase, TickState};
+
+    /// Phases the driver can be placed in. Chunked-prefill carries fields, but
+    /// for transition purposes only the variant tag matters to `advance_token`.
+    fn phase_variants() -> Vec<Phase> {
+        vec![
+            Phase::Prefill,
+            Phase::Decode,
+            Phase::PrefillChunked {
+                chunk_size: 512,
+                chunk_index: 0,
+                total_chunks: 4,
+            },
+        ]
+    }
+
+    #[derive(Clone, Debug)]
+    enum TickOp {
+        Advance {
+            component: u8,
+            layer: u32,
+            call_index: u32,
+        },
+        AdvanceToken,
+        SetPhase(usize),
+        SetTokenPosition(u64),
+    }
+
+    fn tick_op_strategy() -> impl Strategy<Value = TickOp> {
+        prop_oneof![
+            3 => (0u8..4, 0u32..8, 0u32..4).prop_map(|(component, layer, call_index)| {
+                TickOp::Advance { component, layer, call_index }
+            }),
+            2 => Just(TickOp::AdvanceToken),
+            1 => (0usize..3).prop_map(TickOp::SetPhase),
+            1 => (0u64..1000).prop_map(TickOp::SetTokenPosition),
+        ]
+    }
+
+    /// Independent reference model of the cursor. Mirrors the documented
+    /// three-clock semantics without sharing code with `TickState`.
+    struct TickModel {
+        token: u64,
+        operator: u64,
+        step_count: u64,
+        layer: u32,
+        component: String,
+        call_index: u32,
+        phase: Phase,
+        token_position: Option<u64>,
+    }
+
+    impl TickModel {
+        fn new() -> Self {
+            Self {
+                token: 0,
+                operator: 0,
+                step_count: 0,
+                layer: 0,
+                component: String::new(),
+                call_index: 0,
+                phase: Phase::Prefill,
+                token_position: None,
+            }
+        }
+
+        fn apply(&mut self, op: &TickOp, phases: &[Phase]) {
+            match *op {
+                TickOp::Advance {
+                    component,
+                    layer,
+                    call_index,
+                } => {
+                    self.operator += 1;
+                    self.layer = layer;
+                    self.component = format!("c{component}");
+                    self.call_index = call_index;
+                    self.step_count += 1;
+                    self.token_position = Some(self.token);
+                }
+                TickOp::AdvanceToken => {
+                    self.token += 1;
+                    self.operator = 0;
+                    self.token_position = Some(self.token);
+                    if matches!(self.phase, Phase::Prefill) {
+                        self.phase = Phase::Decode;
+                    }
+                }
+                TickOp::SetPhase(i) => {
+                    self.phase = phases[i];
+                }
+                TickOp::SetTokenPosition(pos) => {
+                    self.token = pos;
+                    self.token_position = Some(pos);
+                }
+            }
+        }
+    }
+
+    fn apply_real(state: &mut TickState, op: &TickOp, phases: &[Phase]) {
+        match *op {
+            TickOp::Advance {
+                component,
+                layer,
+                call_index,
+            } => state.advance(&format!("c{component}"), layer, call_index),
+            TickOp::AdvanceToken => state.advance_token(),
+            TickOp::SetPhase(i) => state.set_phase(phases[i]),
+            TickOp::SetTokenPosition(pos) => state.set_token_position(pos),
+        }
+    }
+
+    proptest! {
+        /// Stateful model-based: the real cursor matches the abstract model on
+        /// every getter after every op, and the load-bearing invariants hold
+        /// throughout (tick_id aliases operator; to_tick_position is consistent;
+        /// wall_ns is always non-zero). Oracle tier 6.
+        #[test]
+        fn tick_state_matches_model(
+            ops in proptest::collection::vec(tick_op_strategy(), 0..80),
+        ) {
+            let phases = phase_variants();
+            let mut state = TickState::new(7);
+            let mut model = TickModel::new();
+
+            for op in &ops {
+                model.apply(op, &phases);
+                apply_real(&mut state, op, &phases);
+
+                prop_assert_eq!(state.token(), model.token, "token clock");
+                prop_assert_eq!(state.operator(), model.operator, "operator clock");
+                prop_assert_eq!(state.step_count(), model.step_count, "step_count");
+                prop_assert_eq!(state.layer(), model.layer, "layer cursor");
+                prop_assert_eq!(state.component(), model.component.as_str(), "component");
+                prop_assert_eq!(state.call_index(), model.call_index, "call_index");
+                prop_assert_eq!(state.phase(), model.phase, "phase");
+
+                // Invariant: tick_id is exactly the operator clock alias.
+                prop_assert_eq!(state.tick_id(), state.operator(), "tick_id != operator");
+
+                let pos = state.to_tick_position();
+                prop_assert_eq!(pos.tick_id, model.operator, "position tick_id");
+                prop_assert_eq!(pos.layer, model.layer, "position layer");
+                prop_assert_eq!(pos.component.as_str(), model.component.as_str(), "position comp");
+                prop_assert_eq!(pos.phase, model.phase, "position phase");
+                prop_assert_eq!(pos.token_position, model.token_position, "token_position");
+                prop_assert_eq!(pos.rank, Some(7), "rank");
+                let clock = pos.clock.expect("clock must be present");
+                prop_assert_eq!(clock.token, model.token, "clock token");
+                prop_assert_eq!(clock.operator, model.operator, "clock operator");
+                prop_assert_eq!(clock.operator, pos.tick_id, "clock operator != tick_id");
+                prop_assert!(clock.wall_ns > 0, "wall_ns must be non-zero");
+            }
+        }
+
+        /// Metamorphic: advancing the operator clock NEVER changes the token
+        /// clock. Token motion is the sole province of advance_token /
+        /// set_token_position.
+        #[test]
+        fn advance_does_not_touch_token(
+            n in 0u32..50,
+            layer in 0u32..8,
+        ) {
+            let mut state = TickState::new(0);
+            let token_before = state.token();
+            for _ in 0..n {
+                state.advance("comp", layer, 0);
+            }
+            prop_assert_eq!(state.token(), token_before, "advance moved the token clock");
+            prop_assert_eq!(state.operator(), u64::from(n), "operator did not count advances");
+            prop_assert_eq!(state.step_count(), u64::from(n), "step_count did not count advances");
+        }
+
+        /// Metamorphic: step_count is invariant under token boundaries — it
+        /// counts every operator regardless of how many advance_token resets
+        /// occur between them.
+        #[test]
+        fn step_count_survives_token_resets(
+            steps in proptest::collection::vec(0u32..5, 0..20),
+        ) {
+            let mut state = TickState::new(0);
+            let mut expected = 0u64;
+            for &k in &steps {
+                for _ in 0..k {
+                    state.advance("c", 0, 0);
+                    expected += 1;
+                }
+                state.advance_token();
+                prop_assert_eq!(state.operator(), 0, "operator not reset by advance_token");
+            }
+            prop_assert_eq!(state.step_count(), expected, "step_count miscounted");
+        }
+
+        /// Property: advance_token drives Prefill -> Decode but is a fixed point
+        /// for every other phase (Decode stays Decode; chunked-prefill is
+        /// self-managed). Exercises the phase transition rule directly.
+        #[test]
+        fn advance_token_phase_rule(start in 0usize..3) {
+            let phases = phase_variants();
+            let mut state = TickState::new(0);
+            state.set_phase(phases[start]);
+            state.advance_token();
+            let expected = if matches!(phases[start], Phase::Prefill) {
+                Phase::Decode
+            } else {
+                phases[start]
+            };
+            prop_assert_eq!(state.phase(), expected);
+        }
+    }
+}
