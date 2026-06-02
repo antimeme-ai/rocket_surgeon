@@ -7,6 +7,8 @@ mod orchestrator_handle;
 mod perfetto_sink;
 mod server;
 mod session;
+#[cfg(test)]
+mod session_fsm_proptest;
 mod tensor_stats;
 mod tensor_store;
 mod trace_log;

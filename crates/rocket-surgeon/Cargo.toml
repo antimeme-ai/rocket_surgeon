@@ -35,6 +35,7 @@ flate2 = "1"
 [dev-dependencies]
 tempfile.workspace = true
 prost = "0.14"
+proptest.workspace = true
 
 [lints]
 workspace = true

@@ -1107,6 +1107,13 @@ impl Session {
     }
 
     pub fn advance_worldline_segment(&mut self, branch_tick: u64) {
+        // The very first segment is the *root* of the worldline tree, not a
+        // branch: it has no parent and no branch point. Previously this minted
+        // the root with `parent_segment: Some(0)` — a self-parented node, which
+        // is structurally invalid (a property test caught the minimal case
+        // `advance_worldline_segment` on a default `WorldlineState`). Every
+        // later segment branches from the current cursor.
+        let is_root = self.state.worldline.segments.is_empty();
         let current_idx = self.state.worldline.current_segment as usize;
         if current_idx < self.state.worldline.segments.len() {
             self.state.worldline.segments[current_idx].tick_range.1 = branch_tick;
@@ -1114,8 +1121,8 @@ impl Session {
         let new_id = self.state.worldline.segments.len() as u32;
         self.state.worldline.segments.push(WorldlineSegment {
             id: new_id,
-            parent_segment: Some(self.state.worldline.current_segment),
-            branch_tick: Some(branch_tick),
+            parent_segment: (!is_root).then_some(self.state.worldline.current_segment),
+            branch_tick: (!is_root).then_some(branch_tick),
             tick_range: (branch_tick, 0),
         });
         self.state.worldline.current_segment = new_id;
