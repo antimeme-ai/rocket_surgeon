@@ -57,7 +57,7 @@ def try_recv_notification(proc: subprocess.Popen, timeout: float = 2.0) -> dict 
         return msg
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     proc = spawn_daemon()
 
     try:

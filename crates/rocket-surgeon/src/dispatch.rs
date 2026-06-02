@@ -5,10 +5,10 @@ use rocket_surgeon_protocol::jsonrpc::{METHOD_NOT_FOUND, Request, RequestId, Res
 use rocket_surgeon_protocol::messages::{
     AttachRequest, CheckpointRequest, CreateCheckpointTier, DiscoverRequest, EventType,
     ExportRequest, ExportResponse, HostAttachResponse, HostCheckpointRequest, HostExportEnvRequest,
-    HostKvInterveneResponse, HostKvReadResponse, HostViewResponse, InitializeRequest,
-    InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest, KvInterveneResponse,
-    KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest, StepRequest,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
+    HostKvInterveneResponse, HostKvReadResponse, HostReplayResponse, HostViewResponse,
+    InitializeRequest, InspectRequest, InterveneRequest, InterveneResponse, KvInterveneRequest,
+    KvInterveneResponse, KvReadRequest, KvReadResponse, ProbeRequest, ProbeResponse, ReplayRequest,
+    StepRequest, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse,
     ViewDefineRequest, ViewRequest, ViewResponse, method,
 };
 use rocket_surgeon_protocol::types::{
@@ -98,7 +98,7 @@ pub fn recovery_hint_for(code: ErrorCode) -> &'static str {
 }
 
 /// Build `ErrorData` with the canonical `recovery_hint` already populated.
-fn error_with_hint(code: ErrorCode, suggestion: impl Into<String>) -> ErrorData {
+pub fn error_with_hint(code: ErrorCode, suggestion: impl Into<String>) -> ErrorData {
     let mut data = ErrorData::new(code, suggestion);
     data.recovery_hint = Some(recovery_hint_for(code).to_owned());
     data
@@ -145,9 +145,14 @@ const CANONICAL_COMPONENTS: &[&str] = &[
     "lm_head",
 ];
 
-/// The final dotted segment of a component path (`attn.o_proj` -> `o_proj`).
+/// The final dotted segment of a component path, stripped of any bracket
+/// index (`attn.o_proj[7]` -> `o_proj`, `o_proj` -> `o_proj`).
 fn component_leaf(component: &str) -> &str {
-    component.rsplit('.').next().unwrap_or(component)
+    let leaf = component.rsplit('.').next().unwrap_or(component);
+    match leaf.find('[') {
+        Some(pos) => &leaf[..pos],
+        None => leaf,
+    }
 }
 
 /// Levenshtein edit distance between two byte strings.
@@ -167,11 +172,16 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Extract the `component` field (index 3) from an inspect target string of
-/// the form `family:rank:layer:component:event`. Returns `None` when the
-/// target does not have enough colon-separated fields.
+/// Extract the `component` field from an inspect target string.
+/// Accepts both 4-part (`family:layer:component:event`) and
+/// 5+ part (`family:rank:layer:component:event[:call_index]`) forms.
 fn target_component(target: &str) -> Option<&str> {
-    target.split(':').nth(3).filter(|c| !c.is_empty())
+    let parts: Vec<&str> = target.split(':').collect();
+    let idx = match parts.len() {
+        4 => 2,
+        _ => 3,
+    };
+    parts.get(idx).copied().filter(|c| !c.is_empty())
 }
 
 /// Closest canonical components to `attempted`, ranked by edit distance.
@@ -276,7 +286,7 @@ pub fn dispatch(session: &mut Session, request: &Request) -> Response {
         method::KV_READ => handle_kv_read(session, request, None),
         method::KV_INTERVENE => handle_kv_intervene(session, request, None),
         method::INTERVENE => handle_intervene(session, request),
-        method::REPLAY => handle_replay(session, request),
+        method::REPLAY => handle_replay(session, request, None),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -1062,16 +1072,17 @@ pub fn handle_view_define(session: &mut Session, request: &Request) -> Response 
 /// (BEAD-0018, TCK `replay.feature`).
 ///
 /// Daemon orchestration tier: delegates to [`Session::replay`], which
-/// validates the checkpoint and synthesizes the replay result (honouring
-/// `stop_at` and the response `envelope`). Worker re-execution, intervention
-/// application, and divergence detection are a later tier.
-pub fn handle_replay(session: &mut Session, request: &Request) -> Response {
+pub fn handle_replay(
+    session: &mut Session,
+    request: &Request,
+    host_response: Option<&HostReplayResponse>,
+) -> Response {
     let req: ReplayRequest = match parse_params(request) {
         Ok(r) => r,
         Err(e) => return invalid_params_response(request.id.clone(), &e),
     };
 
-    match session.replay(&req) {
+    match session.replay(&req, host_response) {
         Ok(value) => serialize_envelope(request.id.clone(), value),
         Err(ref e) => session_error_to_response(request.id.clone(), e),
     }
@@ -1325,10 +1336,58 @@ pub fn handle_export(
         });
     }
 
+    let bookmarks: Vec<serde_json::Value> = session
+        .state()
+        .checkpoints
+        .iter()
+        .filter(|c| c.bookmark.is_some())
+        .map(|c| {
+            serde_json::json!({
+                "name": c.bookmark,
+                "tick_id": c.tick_id,
+                "layer": c.layer_idx,
+                "checkpoint_id": c.checkpoint_id,
+            })
+        })
+        .collect();
+    let bookmarks_json = serde_json::to_vec_pretty(&bookmarks).unwrap_or_default();
     artifacts.push(BundleArtifact {
         name: "bookmarks.json".into(),
-        data: b"[]".to_vec(),
+        data: bookmarks_json,
     });
+
+    let worldlines = serde_json::json!({
+        "current_segment": session.worldline().current_segment,
+        "segments": session.worldline().segments.iter().map(|s| serde_json::json!({
+            "id": s.id,
+            "parent_segment": s.parent_segment,
+            "branch_tick": s.branch_tick,
+            "tick_range": s.tick_range,
+        })).collect::<Vec<_>>(),
+    });
+    let worldlines_json = serde_json::to_vec_pretty(&worldlines).unwrap_or_default();
+    artifacts.push(BundleArtifact {
+        name: "worldlines.json".into(),
+        data: worldlines_json,
+    });
+
+    for cref in &session.state().checkpoints {
+        if cref.checkpoint_id.starts_with("auto-") || cref.checkpoint_id.starts_with("sub-") {
+            continue;
+        }
+        let meta = serde_json::json!({
+            "checkpoint_id": cref.checkpoint_id,
+            "tier": cref.tier,
+            "tick_id": cref.tick_id,
+            "layer_idx": cref.layer_idx,
+        });
+        let meta_json = serde_json::to_vec_pretty(&meta).unwrap_or_default();
+        let path = format!("checkpoints/{}/meta.json", cref.checkpoint_id);
+        artifacts.push(BundleArtifact {
+            name: path,
+            data: meta_json,
+        });
+    }
 
     let artifact_count = artifacts.len() as u32;
     match assemble_bundle(path, &artifacts) {
@@ -1591,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_step_backward_returns_capability_error() {
+    fn dispatch_step_backward_succeeds_without_orchestrator() {
         let mut session = Session::new();
         dispatch(&mut session, &make_request("initialize", init_params()));
         test_attach_dispatch(&mut session);
@@ -1605,7 +1664,7 @@ mod tests {
             }),
         );
         let resp = dispatch(&mut session, &req);
-        assert!(resp.error.is_some());
+        assert!(resp.error.is_none());
     }
 
     #[test]
@@ -3432,5 +3491,25 @@ mod tests {
         // `none` envelope: bare ReplayResponse, no SessionState wrapper.
         assert!(result.get("state").is_none());
         assert!(result["ticks_replayed"].is_number());
+    }
+
+    #[test]
+    fn target_component_5_segment() {
+        // family:rank:layer:component:event → index 3
+        assert_eq!(target_component("gpt2:0:5:q_proj:output"), Some("q_proj"));
+    }
+
+    #[test]
+    fn target_component_6_segment() {
+        // family:rank:layer:component:event:call_index → index 3
+        assert_eq!(
+            target_component("gpt2:0:5:attn.o_proj:output:0"),
+            Some("attn.o_proj")
+        );
+    }
+
+    #[test]
+    fn target_component_empty_returns_none() {
+        assert_eq!(target_component("gpt2"), None);
     }
 }

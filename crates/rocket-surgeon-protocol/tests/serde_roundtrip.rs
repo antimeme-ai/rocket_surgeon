@@ -1307,7 +1307,7 @@ fn replay_request_new_fields_skip_when_none() {
 }
 
 #[test]
-fn host_replay_request_roundtrip() {
+fn host_replay_request_roundtrip_basic() {
     let req = HostReplayRequest {
         model_handle: 7,
         checkpoint_id: "cp-42".to_owned(),
@@ -1325,7 +1325,7 @@ fn host_replay_request_roundtrip() {
 }
 
 #[test]
-fn host_replay_response_roundtrip() {
+fn host_replay_response_roundtrip_basic() {
     let resp = HostReplayResponse {
         ticks_replayed: 5,
         stopped_at: sample_tick_position(),
@@ -2426,4 +2426,102 @@ fn host_export_env_response_roundtrip() {
         prompt: Some(json!({"tokens": [1, 2, 3]})),
     };
     roundtrip(&resp);
+}
+
+#[test]
+fn host_replay_request_roundtrip() {
+    use rocket_surgeon_protocol::messages::{HostReplayRequest, ReplayStopAt};
+    let req = HostReplayRequest {
+        model_handle: 1,
+        checkpoint_id: "ckpt-origin".to_owned(),
+        stop_at: Some(ReplayStopAt {
+            layer: 5,
+            component: "attn.o_proj".to_owned(),
+        }),
+        interventions: vec![],
+        verify: true,
+        deterministic: false,
+        cosine_threshold: 0.999,
+        mre_threshold: 0.05,
+    };
+    roundtrip(&req);
+}
+
+#[test]
+fn host_replay_response_roundtrip() {
+    use rocket_surgeon_protocol::messages::{Divergence, HostReplayResponse};
+    use rocket_surgeon_protocol::types::{
+        Phase, StepDirection, TickClock, TickEvent, TickPosition,
+    };
+    let resp = HostReplayResponse {
+        ticks_replayed: 7,
+        stopped_at: TickPosition {
+            tick_id: 42,
+            direction: StepDirection::Forward,
+            rank: None,
+            layer: 5,
+            component: "attn.o_proj".to_owned(),
+            event: TickEvent::Output,
+            replay_of: Some(10),
+            phase: Phase::Decode,
+            token_position: None,
+            clock: Some(TickClock {
+                token: 0,
+                operator: 42,
+                wall_ns: 123_456,
+            }),
+        },
+        divergences: vec![Divergence {
+            tick_id: 15,
+            original_tick_id: 8,
+            probe_point: "llama:0:4:mlp:output".to_owned(),
+            cosine_similarity: 0.997,
+            max_relative_error: 0.08,
+            message: "Divergence at layer 4".to_owned(),
+        }],
+        verified: false,
+    };
+    roundtrip(&resp);
+}
+
+#[test]
+fn worldline_state_roundtrip() {
+    use rocket_surgeon_protocol::types::{WorldlineSegment, WorldlineState};
+    let state = WorldlineState {
+        current_segment: 1,
+        segments: vec![
+            WorldlineSegment {
+                id: 0,
+                parent_segment: None,
+                branch_tick: None,
+                tick_range: (0, 50),
+            },
+            WorldlineSegment {
+                id: 1,
+                parent_segment: Some(0),
+                branch_tick: Some(30),
+                tick_range: (30, 75),
+            },
+        ],
+    };
+    roundtrip(&state);
+}
+
+#[test]
+fn replay_request_optional_fields_skip_when_none() {
+    use rocket_surgeon_protocol::messages::ReplayRequest;
+    let req = ReplayRequest {
+        from_checkpoint: "cp-1".to_owned(),
+        interventions: None,
+        stop_at: None,
+        verify: true,
+        envelope: EnvelopeMode::default(),
+        deterministic: None,
+        cosine_threshold: None,
+        mre_threshold: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(!json.as_object().unwrap().contains_key("deterministic"));
+    assert!(!json.as_object().unwrap().contains_key("cosine_threshold"));
+    assert!(!json.as_object().unwrap().contains_key("mre_threshold"));
 }

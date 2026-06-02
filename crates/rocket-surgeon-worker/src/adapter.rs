@@ -533,7 +533,9 @@ pub fn resolve_with_containers(
                             layer_index,
                             call_index: 0,
                             mapping: mapping.clone(),
-                            probe_point: format!("model:{rank}:{layer}:{canonical}:0:fwd"),
+                            probe_point: format!(
+                                "{family_name}:{rank}:{layer}:{canonical}:0:output"
+                            ),
                         });
                         break;
                     }
@@ -558,7 +560,9 @@ pub fn resolve_with_containers(
                             mapping: ModuleMapping::Fused {
                                 components: resolved_fused,
                             },
-                            probe_point: format!("model:{rank}:{layer}:{fused_canonical}:0:fwd"),
+                            probe_point: format!(
+                                "{family_name}:{rank}:{layer}:{fused_canonical}:0:output"
+                            ),
                         });
                         break;
                     }
@@ -579,7 +583,7 @@ pub fn resolve_with_containers(
                 mapping: ModuleMapping::Direct {
                     canonical: format!("_raw.{}", module.path),
                 },
-                probe_point: format!("model:{rank}:{layer}:{canonical}:0:fwd"),
+                probe_point: format!("{family_name}:{rank}:{layer}:{canonical}:0:output"),
             });
         }
     }
@@ -1002,5 +1006,78 @@ mod tests {
         };
         let (_, containers) = resolve_with_containers(&modules, &config, 0).unwrap();
         assert!(containers.is_empty());
+    }
+
+    #[test]
+    fn probe_points_use_family_name_and_output_event() {
+        let modules = vec![RawModule {
+            path: "model.layers.0.self_attn.q_proj".into(),
+            type_name: "Linear".into(),
+            attr_name: "q_proj".into(),
+        }];
+        let config = ModelConfig {
+            model_type: "llama".into(),
+            num_layers: 1,
+            num_heads: 4,
+            hidden_size: 32,
+            num_kv_heads: Some(4),
+        };
+        let map = resolve(&modules, &config, 0).unwrap();
+        let q = map
+            .components
+            .iter()
+            .find(|c| c.canonical == "q_proj")
+            .unwrap();
+        assert!(
+            q.probe_point.starts_with("llama:"),
+            "probe_point should start with family name, got: {}",
+            q.probe_point,
+        );
+        assert!(
+            q.probe_point.ends_with(":output"),
+            "probe_point should end with :output, got: {}",
+            q.probe_point,
+        );
+        assert_eq!(q.probe_point, "llama:0:0:q_proj:0:output");
+    }
+
+    #[test]
+    fn gpt2_probe_points_use_family_name() {
+        let modules = vec![
+            RawModule {
+                path: "transformer.h.0".into(),
+                type_name: "GPT2Block".into(),
+                attr_name: "0".into(),
+            },
+            RawModule {
+                path: "transformer.h.0.mlp".into(),
+                type_name: "GPT2MLP".into(),
+                attr_name: "mlp".into(),
+            },
+            RawModule {
+                path: "transformer.h.0.mlp.c_proj".into(),
+                type_name: "Conv1D".into(),
+                attr_name: "c_proj".into(),
+            },
+        ];
+        let config = ModelConfig {
+            model_type: "gpt2".into(),
+            num_layers: 1,
+            num_heads: 12,
+            hidden_size: 768,
+            num_kv_heads: None,
+        };
+        let map = resolve(&modules, &config, 0).unwrap();
+        let down = map
+            .components
+            .iter()
+            .find(|c| c.canonical == "down_proj")
+            .unwrap();
+        assert!(
+            down.probe_point.starts_with("gpt2:"),
+            "probe_point should start with gpt2:, got: {}",
+            down.probe_point,
+        );
+        assert_eq!(down.probe_point, "gpt2:0:0:down_proj:0:output");
     }
 }

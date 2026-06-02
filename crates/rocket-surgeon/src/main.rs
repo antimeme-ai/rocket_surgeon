@@ -20,8 +20,9 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{
-    dispatch, handle_attach, handle_checkpoint, handle_export, handle_inspect, handle_kv_intervene,
-    handle_kv_read, handle_probe, handle_step, handle_subscribe, handle_unsubscribe, handle_view,
+    dispatch, error_with_hint, handle_attach, handle_checkpoint, handle_export, handle_inspect,
+    handle_kv_intervene, handle_kv_read, handle_probe, handle_replay, handle_step,
+    handle_subscribe, handle_unsubscribe, handle_view,
 };
 use crate::notifications::send_notification_filtered;
 use crate::orchestrator_handle::OrchestratorHandle;
@@ -33,8 +34,9 @@ use crate::trace_log::{Direction, TraceLog};
 use rocket_surgeon_probes::registry::ProbeRegistry;
 use rocket_surgeon_protocol::jsonrpc::{Response, RpcError};
 use rocket_surgeon_protocol::messages::{
-    AttachRequest, HostAttachRequest, HostUpdateProbesRequest, ProbeRequest, TickHeartbeatEvent,
-    TickStoppedEvent, event, method,
+    AttachRequest, HostAttachRequest, HostReplayRequest, HostReplayResponse,
+    HostUpdateProbesRequest, ProbeRequest, ReplayRequest, TickHeartbeatEvent, TickStoppedEvent,
+    event, method,
 };
 use rocket_surgeon_protocol::types::GranularityScope;
 
@@ -176,6 +178,93 @@ fn try_orchestrator_step(
         Ok(hr) => Some(hr),
         Err(e) => {
             warn!("orchestrator step failed: {e}");
+            None
+        }
+    }
+}
+
+fn try_orchestrator_replay(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    model_handle: Option<u64>,
+    request: &rocket_surgeon_protocol::jsonrpc::Request,
+) -> Option<HostReplayResponse> {
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+    let req: ReplayRequest = request
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p.clone()).ok())?;
+
+    let host_req = HostReplayRequest {
+        model_handle: mh,
+        checkpoint_id: req.from_checkpoint.clone(),
+        stop_at: req.stop_at.clone(),
+        interventions: req.interventions.clone().unwrap_or_default(),
+        verify: req.verify,
+        deterministic: req.deterministic.unwrap_or(false),
+        cosine_threshold: req.cosine_threshold.unwrap_or(0.999),
+        mre_threshold: req.mre_threshold.unwrap_or(0.05),
+    };
+    match orch.replay(&host_req) {
+        Ok(resp) => Some(resp),
+        Err(e) => {
+            warn!("orchestrator replay failed: {e}");
+            None
+        }
+    }
+}
+
+fn try_backward_step(
+    orchestrator: &mut Option<OrchestratorHandle>,
+    session: &mut Session,
+    model_handle: Option<u64>,
+) -> Option<rocket_surgeon_protocol::messages::HostStepResponse> {
+    let target_tick = session.state().tick_id.unwrap_or(0).saturating_sub(1);
+    let ckpt_id = session.find_checkpoint_before(target_tick + 1)?.to_owned();
+    let (orch, mh) = (orchestrator.as_mut()?, model_handle?);
+
+    // Eager sub-checkpoint: save current position for O(1) next backward step
+    if session.arena_utilization() < 0.6 {
+        let current_tick = session.state().tick_id.unwrap_or(0);
+        let sub_id = format!(
+            "sub-{}-{}",
+            session.worldline().current_segment,
+            current_tick
+        );
+        let sub_req = rocket_surgeon_protocol::messages::HostCheckpointRequest::Create {
+            model_handle: mh,
+            checkpoint_id: sub_id,
+            tier: rocket_surgeon_protocol::messages::CreateCheckpointTier::Activation,
+            tick_id: current_tick,
+            layer_idx: 0,
+        };
+        if let Ok(resp) = orch.checkpoint(&sub_req) {
+            session.update_arena_utilization(resp.bytes_captured);
+        }
+    }
+
+    let host_req = HostReplayRequest {
+        model_handle: mh,
+        checkpoint_id: ckpt_id,
+        stop_at: None,
+        interventions: session.interventions().to_vec(),
+        verify: false,
+        deterministic: false,
+        cosine_threshold: 0.999,
+        mre_threshold: 0.05,
+    };
+    match orch.replay(&host_req) {
+        Ok(hr) => {
+            session.advance_worldline_segment(target_tick);
+            Some(rocket_surgeon_protocol::messages::HostStepResponse {
+                position: hr.stopped_at,
+                forward_complete: false,
+                fired_interventions: Vec::new(),
+                events: Vec::new(),
+                events_truncated: false,
+            })
+        }
+        Err(e) => {
+            warn!("backward step replay failed: {e}");
             None
         }
     }
@@ -709,14 +798,37 @@ fn main() {
                 ),
             }
         } else if request.method == method::STEP {
-            step_host_response = try_orchestrator_step(
-                &mut orchestrator,
-                model_handle,
-                &request,
-                &granularity_scopes,
-                session.interventions(),
-            );
-            handle_step(&mut session, &request, step_host_response.as_ref())
+            let is_backward = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("direction"))
+                .and_then(|d| d.as_str())
+                == Some("backward");
+
+            if is_backward {
+                step_host_response =
+                    try_backward_step(&mut orchestrator, &mut session, model_handle);
+                if step_host_response.is_none() {
+                    Response::error(
+                        request.id.clone(),
+                        RpcError::from_error_data(error_with_hint(
+                            rocket_surgeon_protocol::errors::ErrorCode::CapabilityNotSupported,
+                            "No checkpoint available for backward step",
+                        )),
+                    )
+                } else {
+                    handle_step(&mut session, &request, step_host_response.as_ref())
+                }
+            } else {
+                step_host_response = try_orchestrator_step(
+                    &mut orchestrator,
+                    model_handle,
+                    &request,
+                    &granularity_scopes,
+                    session.interventions(),
+                );
+                handle_step(&mut session, &request, step_host_response.as_ref())
+            }
         } else if request.method == method::INSPECT {
             match try_orchestrator_inspect(&mut orchestrator, model_handle, &request) {
                 Ok(host_response) => handle_inspect(
@@ -781,6 +893,9 @@ fn main() {
             )
         } else if request.method == method::CHECKPOINT {
             handle_checkpoint(&mut session, &request, &mut orchestrator, model_handle)
+        } else if request.method == method::REPLAY {
+            let host_resp = try_orchestrator_replay(&mut orchestrator, model_handle, &request);
+            handle_replay(&mut session, &request, host_resp.as_ref())
         } else {
             dispatch(&mut session, &request)
         };

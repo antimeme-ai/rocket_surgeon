@@ -21,7 +21,7 @@ from e2e_harness import (
 )
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     build_binaries()
     proc = spawn_daemon()
 
@@ -75,7 +75,7 @@ def run_test() -> None:  # noqa: PLR0915
                     "recipe": {
                         "id": "iv-scale-all",
                         "type": "scale",
-                        "target": "*:*:*:*:fwd",
+                        "target": "*:*:*:*:output",
                         "params": {"factor": 0.001},
                         "priority": 0,
                     },

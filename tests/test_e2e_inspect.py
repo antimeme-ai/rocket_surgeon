@@ -25,7 +25,7 @@ from e2e_harness import (
 )
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     proc = spawn_daemon()
 
     try:
@@ -106,7 +106,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                     "detail": "summary",
                 },
                 req_id=4,
@@ -153,7 +153,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                     "detail": "slice",
                     "slices": [[0, 8]],
                 },
@@ -179,7 +179,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:0:nonexistent_component_xyz:0:fwd",
+                    "target": "*:0:0:nonexistent_component_xyz:0:output",
                     "detail": "summary",
                 },
                 req_id=6,
@@ -206,7 +206,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                     "detail": "slice",
                     "slices": [[0, 999999999]],
                 },
@@ -232,7 +232,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:*:*:*:fwd",
+                    "target": "*:0:*:*:*:output",
                 },
                 req_id=8,
             ),
@@ -289,7 +289,7 @@ def run_test() -> None:  # noqa: PLR0915
             make_request(
                 "rocket/inspect",
                 {
-                    "target": "model:0:0:q_proj:output",
+                    "target": "*:0:0:q_proj:output",
                     "detail": "summary",
                 },
                 req_id=301,

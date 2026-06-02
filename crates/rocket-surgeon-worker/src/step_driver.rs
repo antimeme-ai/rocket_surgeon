@@ -12,6 +12,12 @@ pub fn plan_step(count: u32, granularity: Option<TickGranularity>) -> StepPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainState {
+    Counting,
+    Draining,
+}
+
 pub fn is_layer_boundary(current_layer: Option<u32>, new_layer: u32) -> bool {
     match current_layer {
         None => false,

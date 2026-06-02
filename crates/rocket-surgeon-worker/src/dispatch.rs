@@ -14,9 +14,9 @@ use rocket_surgeon_protocol::messages::{
     CapturedTensor, CreateCheckpointTier, HostCheckpointRequest, HostCheckpointResponse,
     HostConfigureHooksRequest, HostConfigureHooksResponse, HostDetachRequest, HostDetachResponse,
     HostExportEnvRequest, HostExportEnvResponse, HostInspectRequest, HostInspectResponse,
-    HostKvInterveneRequest, HostKvReadRequest, HostStepRequest, HostStepResponse,
-    HostUpdateProbesRequest, HostUpdateProbesResponse, HostViewRequest, HostViewResponse,
-    ProbeFiredEvent,
+    HostKvInterveneRequest, HostKvReadRequest, HostReplayRequest, HostReplayResponse,
+    HostStepRequest, HostStepResponse, HostUpdateProbesRequest, HostUpdateProbesResponse,
+    HostViewRequest, HostViewResponse, ProbeFiredEvent,
 };
 use rocket_surgeon_protocol::messages::{HostAttachRequest, HostAttachResponse};
 use tracing::error;
@@ -45,6 +45,8 @@ pub struct WorkerState {
     pub model_handle: Option<u64>,
     pub rank: u32,
     pub num_layers: u32,
+    pub num_heads: u32,
+    pub hidden_dim: u32,
     pub tick_state: TickState,
     pub forward_pass: Option<ForwardPassState>,
     pub last_outputs: Option<pyo3::PyObject>,
@@ -68,6 +70,8 @@ impl WorkerState {
             model_handle: None,
             rank: 0,
             num_layers: 0,
+            num_heads: 0,
+            hidden_dim: 0,
             tick_state: TickState::new(0),
             forward_pass: None,
             last_outputs: None,
@@ -100,6 +104,7 @@ pub fn dispatch(state: &mut WorkerState, request: &Request) -> Response {
         internal::HOST_KV_INTERVENE => handle_host_kv_intervene(state, request),
         internal::HOST_EXPORT_ENV => handle_host_export_env(request),
         internal::HOST_CHECKPOINT => handle_host_checkpoint(state, request),
+        internal::HOST_REPLAY => handle_host_replay(state, request),
         _ => Response::error(
             request.id.clone(),
             RpcError {
@@ -220,6 +225,8 @@ fn handle_host_attach(state: &mut WorkerState, request: &Request) -> Response {
     state.container_paths = container_paths;
     state.model_handle = Some(info.handle);
     state.num_layers = info.num_layers;
+    state.num_heads = info.num_heads;
+    state.hidden_dim = info.hidden_dim;
     state.component_map = Some(component_map.clone());
     state.rank = req.rank;
     state.tick_state = TickState::new(req.rank);
@@ -423,7 +430,7 @@ fn build_tick_probe_point(
         layer: NumOrWild::Num(layer),
         component: ComponentOrWild::Path(vec![ComponentSeg::Named(canonical.to_owned())]),
         call_index: NumOrWild::Num(call_index),
-        event: NameOrWild::Name("fwd".to_owned()),
+        event: NameOrWild::Name("output".to_owned()),
     }
 }
 
@@ -594,6 +601,35 @@ fn handle_host_step(state: &mut WorkerState, request: &Request) -> Response {
     }
 }
 
+const ATTENTION_HEAD_COMPONENTS: &[&str] = &["o_proj", "q_proj", "k_proj", "v_proj"];
+
+fn extract_head_index(target: &str) -> Option<(String, u32)> {
+    let segments: Vec<&str> = target.split(':').collect();
+    if segments.len() != 5 {
+        return None;
+    }
+    let comp = segments[3];
+    let bracket_start = comp.find('[')?;
+    let base = &comp[..bracket_start];
+    let idx_str = &comp[bracket_start + 1..comp.len() - 1];
+    let idx = idx_str.parse::<u32>().ok()?;
+    let stripped = format!(
+        "{}:{}:{}:{}:{}",
+        segments[0], segments[1], segments[2], base, segments[4]
+    );
+    Some((stripped, idx))
+}
+
+fn build_head_slice(py: Python<'_>, start: u32, end: u32) -> anyhow::Result<Bound<'_, PyTuple>> {
+    let builtins = py.import("builtins")?;
+    let py_ellipsis = builtins.getattr("Ellipsis")?;
+    let py_slice = builtins.getattr("slice")?.call1((start, end))?;
+    Ok(PyTuple::new(
+        py,
+        [py_ellipsis.into_any(), py_slice.into_any()],
+    )?)
+}
+
 fn try_apply_interventions<'py>(
     py: Python<'py>,
     state: &WorkerState,
@@ -601,6 +637,7 @@ fn try_apply_interventions<'py>(
     tuple: &pyo3::Bound<'py, PyTuple>,
     layer: u32,
     canonical: &str,
+    handle: u64,
 ) -> anyhow::Result<Option<(Bound<'py, pyo3::PyAny>, Vec<String>)>> {
     if req.interventions.is_empty() || tuple.len() <= 2 {
         return Ok(None);
@@ -613,24 +650,84 @@ fn try_apply_interventions<'py>(
         .component_map
         .as_ref()
         .map_or("unknown", |m| m.model_family.as_str());
-    let recipes_json = serde_json::to_string(&req.interventions)?;
-    let (modified, fired) = crate::bridge::apply_interventions_at_point(
-        py,
-        &output,
-        &recipes_json,
-        family,
-        state.rank,
-        layer,
-        canonical,
-        "fwd",
-    )?;
-    if fired.is_empty() {
+
+    let mut head_recipes = Vec::new();
+    let mut regular_recipes = Vec::new();
+
+    for recipe in &req.interventions {
+        if let Some((stripped_target, head_idx)) = extract_head_index(&recipe.target) {
+            let base_comp = stripped_target.split(':').nth(3).unwrap_or("");
+            if ATTENTION_HEAD_COMPONENTS.contains(&base_comp) && base_comp == canonical {
+                let mut r = recipe.clone();
+                r.target = stripped_target;
+                head_recipes.push((r, head_idx));
+            }
+        } else {
+            regular_recipes.push(recipe.clone());
+        }
+    }
+
+    let mut all_fired = Vec::new();
+    let mut current_output = if head_recipes.is_empty() {
+        output.clone()
+    } else {
+        output.call_method0("clone")?
+    };
+
+    for (recipe, head_idx) in head_recipes {
+        let shape: Vec<i64> = current_output.getattr("shape")?.extract()?;
+        let hidden = *shape.last().unwrap() as u32;
+        let head_dim = hidden / state.num_heads;
+        let start = head_idx * head_dim;
+        let end = start + head_dim;
+
+        let index = build_head_slice(py, start, end)?;
+        let head_slice = current_output.call_method1("__getitem__", (index.clone(),))?;
+        let head_clone = head_slice.call_method0("clone")?;
+
+        let recipes_json = serde_json::to_string(&[&recipe])?;
+        let (modified_slice, fired) = crate::bridge::apply_interventions_at_point(
+            py,
+            &head_clone,
+            &recipes_json,
+            family,
+            state.rank,
+            layer,
+            canonical,
+            "output",
+            state.tick_state.tick_id(),
+            handle,
+        )?;
+        all_fired.extend(fired);
+        current_output.call_method1("__setitem__", (index, modified_slice))?;
+    }
+
+    if !regular_recipes.is_empty() {
+        let recipes_json = serde_json::to_string(&regular_recipes)?;
+        let (modified, fired) = crate::bridge::apply_interventions_at_point(
+            py,
+            &current_output,
+            &recipes_json,
+            family,
+            state.rank,
+            layer,
+            canonical,
+            "output",
+            state.tick_state.tick_id(),
+            handle,
+        )?;
+        all_fired.extend(fired);
+        current_output = modified;
+    }
+
+    if all_fired.is_empty() {
         Ok(None)
     } else {
-        Ok(Some((modified, fired)))
+        Ok(Some((current_output, all_fired)))
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_step_loop(
     py: Python<'_>,
     state: &mut WorkerState,
@@ -638,8 +735,21 @@ fn run_step_loop(
     req: &HostStepRequest,
 ) -> anyhow::Result<HostStepResponse> {
     let plan = step_driver::plan_step(req.count, req.granularity);
-    let resuming = state.forward_pass.is_some();
 
+    if state
+        .forward_pass
+        .as_ref()
+        .is_some_and(|fwd| fwd.forward_complete)
+    {
+        let fwd = state.forward_pass.take().unwrap();
+        let mut all_handles = fwd.sentinel_handles;
+        all_handles.extend(fwd.capture_handles);
+        all_handles.extend(fwd.passive_handles);
+        let _ = bridge::remove_hooks(py, &all_handles);
+        state.tick_state = TickState::new(state.rank);
+    }
+
+    let resuming = state.forward_pass.is_some();
     ensure_forward_pass(py, state, handle, req.input_ids.as_deref())?;
 
     let fwd = state
@@ -652,6 +762,7 @@ fn run_step_loop(
     let mut ticks_consumed = 0u32;
     let current_layer = state.tick_state.to_tick_position().layer;
     let mut tracking_layer = if resuming { Some(current_layer) } else { None };
+    let mut drain_state = step_driver::DrainState::Counting;
 
     if resuming {
         resume_mb.call_method1("put", (py.None(),))?;
@@ -712,19 +823,24 @@ fn run_step_loop(
         }
 
         let intervention_result =
-            try_apply_interventions(py, state, req, tuple, layer, &canonical)?;
+            try_apply_interventions(py, state, req, tuple, layer, &canonical, handle)?;
 
         if plan.granularity == rocket_surgeon_protocol::types::TickGranularity::Layer {
             if step_driver::is_layer_boundary(tracking_layer, layer) {
+                if drain_state == step_driver::DrainState::Draining {
+                    break;
+                }
                 ticks_consumed += 1;
+                if ticks_consumed >= plan.ticks_to_drain {
+                    drain_state = step_driver::DrainState::Draining;
+                }
             }
             tracking_layer = Some(layer);
         } else {
             ticks_consumed += 1;
-        }
-
-        if ticks_consumed >= plan.ticks_to_drain {
-            break;
+            if ticks_consumed >= plan.ticks_to_drain {
+                break;
+            }
         }
 
         if let Some((modified_tensor, fired)) = intervention_result {
@@ -827,7 +943,8 @@ fn handle_host_inspect(state: &mut WorkerState, request: &Request) -> Response {
         );
     }
 
-    let tensors = match collect_tensors(state, &matched_components) {
+    let head_index = extract_head_index(&req.target).map(|(_, idx)| idx);
+    let tensors = match collect_tensors(state, &matched_components, head_index) {
         Ok(t) => t,
         Err(e) => {
             return internal_error(request.id.clone(), format!("inspect failed: {e}"));
@@ -845,6 +962,7 @@ fn handle_host_inspect(state: &mut WorkerState, request: &Request) -> Response {
 fn collect_tensors(
     state: &mut WorkerState,
     matched_components: &[crate::adapter::MappedComponent],
+    head_index: Option<u32>,
 ) -> anyhow::Result<Vec<CapturedTensor>> {
     use base64::Engine;
 
@@ -868,10 +986,25 @@ fn collect_tensors(
             )?;
 
             if let Some(tensor_obj) = dict.get_item(&key)? {
-                let bytes_result = bridge::tensor_to_bytes(py, &tensor_obj)?;
-                let shape = bridge::get_tensor_shape(py, &tensor_obj)?;
-                let dtype = bridge::get_tensor_dtype(py, &tensor_obj)?;
-                let device = bridge::get_tensor_device(py, &tensor_obj)?;
+                let tensor_to_use = if let Some(hi) = head_index
+                    .filter(|_| ATTENTION_HEAD_COMPONENTS.contains(&comp.canonical.as_str()))
+                {
+                    let full_shape = bridge::get_tensor_shape(py, &tensor_obj)?;
+                    let hidden = *full_shape.last().unwrap() as u32;
+                    let head_dim = hidden / state.num_heads;
+                    let start = hi * head_dim;
+                    let end = start + head_dim;
+                    let slice_idx = build_head_slice(py, start, end)?;
+                    tensor_obj
+                        .call_method1("__getitem__", (slice_idx,))?
+                        .call_method0("contiguous")?
+                } else {
+                    tensor_obj.clone()
+                };
+                let bytes_result = bridge::tensor_to_bytes(py, &tensor_to_use)?;
+                let shape = bridge::get_tensor_shape(py, &tensor_to_use)?;
+                let dtype = bridge::get_tensor_dtype(py, &tensor_to_use)?;
+                let device = bridge::get_tensor_device(py, &tensor_to_use)?;
 
                 let tensor_id = blake3::hash(&bytes_result).to_hex().to_string();
 
@@ -978,6 +1111,7 @@ fn layer_index_from_path(path: &str) -> Option<u32> {
         .position(|&s| s == "layers")
         .and_then(|i| parts.get(i + 1))
         .and_then(|s| s.parse::<u32>().ok())
+        .or_else(|| parts.iter().find_map(|s| s.parse::<u32>().ok()))
 }
 
 fn build_layer_container_map(container_paths: &[String]) -> HashMap<u32, String> {
@@ -1064,11 +1198,18 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
             let snap = arena.snapshot();
             let mut total_bytes: u64 = 0;
 
+            let mut captured_layers: Vec<u32> = Vec::new();
             let result = Python::with_gil(|py| -> anyhow::Result<()> {
                 for &layer in &layers {
-                    let container_path = layer_containers.get(&layer).ok_or_else(|| {
-                        anyhow::anyhow!("no container path for checkpoint layer {layer}")
-                    })?;
+                    let Some(container_path) = layer_containers.get(&layer) else {
+                        continue;
+                    };
+
+                    let available =
+                        bridge::activation_available(py, last_outputs, container_path, 0)?;
+                    if !available {
+                        continue;
+                    }
 
                     let (slot_ptr, _) = arena.alloc_slot(&checkpoint_id, layer)?;
                     // SAFETY: slot_ptr from alloc_slot, advancing past header stays within slot.
@@ -1113,6 +1254,7 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                         arena.update_header(slot_ptr, &header);
                     }
                     total_bytes += byte_len;
+                    captured_layers.push(layer);
                 }
                 Ok(())
             });
@@ -1124,6 +1266,13 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
                     format!("checkpoint create failed: {e}"),
                 );
             }
+
+            tracing::debug!(
+                checkpoint_id = %checkpoint_id,
+                requested = layers.len(),
+                captured = captured_layers.len(),
+                "checkpoint layer capture complete"
+            );
 
             match bridge::capture_rng_state() {
                 Ok(rng_bytes) => {
@@ -1289,6 +1438,318 @@ fn handle_host_checkpoint(state: &WorkerState, request: &Request) -> Response {
             }
         }
     }
+}
+
+fn restore_checkpoint_for_replay(
+    state: &WorkerState,
+    checkpoint_id: &str,
+    slot_infos: &[(u32, usize, crate::checkpoint::SlotHeader)],
+    layer_containers: &HashMap<u32, String>,
+) -> anyhow::Result<()> {
+    Python::with_gil(|py| {
+        let arena = state.checkpoint_arena.as_ref().unwrap();
+        let last_outputs = state.last_outputs.as_ref().unwrap();
+
+        if let Some((rng_ptr, rng_hdr)) = arena.get_slot(checkpoint_id, u32::MAX) {
+            let rng_len = rng_hdr.byte_len as usize;
+            let mut rng_bytes = vec![0u8; rng_len];
+            // SAFETY: rng_ptr from get_slot, within arena mmap region.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    rng_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE),
+                    rng_bytes.as_mut_ptr(),
+                    rng_len,
+                );
+            }
+            bridge::restore_rng_state(&rng_bytes)?;
+        }
+
+        for (layer_idx, _, header) in slot_infos {
+            if *layer_idx == u32::MAX {
+                continue;
+            }
+            let container_path = layer_containers
+                .get(layer_idx)
+                .ok_or_else(|| anyhow::anyhow!("no container path for layer {layer_idx}"))?;
+            let Some((slot_ptr, _)) = arena.get_slot(checkpoint_id, *layer_idx) else {
+                continue;
+            };
+            // SAFETY: slot_ptr from get_slot, within arena mmap region.
+            let data_ptr = unsafe { slot_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE) } as usize;
+            let shape: Vec<i64> = header
+                .shape
+                .iter()
+                .take(header.ndim as usize)
+                .map(|&s| s as i64)
+                .collect();
+
+            bridge::restore_activation(
+                py,
+                last_outputs,
+                container_path,
+                0,
+                data_ptr,
+                header.byte_len as usize,
+                header.dtype.to_torch_str(),
+                &shape,
+            )?;
+        }
+        Ok(())
+    })
+}
+
+fn handle_host_replay(state: &mut WorkerState, request: &Request) -> Response {
+    let req: HostReplayRequest = match parse_params(request) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let Some(handle) = state.model_handle else {
+        return internal_error(request.id.clone(), "No model loaded".to_owned());
+    };
+    if req.model_handle != handle {
+        return internal_error(
+            request.id.clone(),
+            format!(
+                "model handle mismatch: expected {handle}, got {}",
+                req.model_handle
+            ),
+        );
+    }
+    let slot_infos = {
+        let Some(ref arena) = state.checkpoint_arena else {
+            return internal_error(request.id.clone(), "No checkpoint arena".to_owned());
+        };
+        arena.slot_info_for_checkpoint(&req.checkpoint_id)
+    };
+    if slot_infos.is_empty() {
+        return internal_error(
+            request.id.clone(),
+            format!("checkpoint {} not found in arena", req.checkpoint_id),
+        );
+    }
+    if state.last_outputs.is_none() {
+        return internal_error(request.id.clone(), "No captured activations".to_owned());
+    }
+
+    let mut replay_ctx = crate::replay::ReplayContext::from_request(&req);
+    let layer_containers = build_layer_container_map(&state.container_paths);
+
+    if let Err(e) =
+        restore_checkpoint_for_replay(state, &req.checkpoint_id, &slot_infos, &layer_containers)
+    {
+        return internal_error(
+            request.id.clone(),
+            format!("checkpoint restore for replay failed: {e}"),
+        );
+    }
+
+    let result = Python::with_gil(|py| -> anyhow::Result<HostReplayResponse> {
+        if replay_ctx.deterministic {
+            let torch = py.import("torch")?;
+            torch
+                .getattr("use_deterministic_algorithms")?
+                .call1((true,))?;
+        }
+
+        let response = run_replay_loop(py, state, handle, &mut replay_ctx)?;
+
+        if replay_ctx.deterministic {
+            let torch = py.import("torch")?;
+            torch
+                .getattr("use_deterministic_algorithms")?
+                .call1((false,))?;
+        }
+
+        Ok(response)
+    });
+
+    match result {
+        Ok(resp) => match serde_json::to_value(resp) {
+            Ok(value) => Response::success(request.id.clone(), value),
+            Err(e) => internal_error(request.id.clone(), format!("serialization failed: {e}")),
+        },
+        Err(e) => internal_error(request.id.clone(), format!("replay failed: {e}")),
+    }
+}
+
+fn check_divergence_at_boundary(
+    py: Python<'_>,
+    state: &WorkerState,
+    ctx: &mut crate::replay::ReplayContext,
+    layer: u32,
+    canonical: &str,
+    tuple: &Bound<'_, PyTuple>,
+    original_base_tick: u64,
+) -> anyhow::Result<()> {
+    let checkpoint_boundary_layers = rocket_surgeon_protocol::checkpoint_layers(state.num_layers);
+    if !checkpoint_boundary_layers.contains(&layer) {
+        return Ok(());
+    }
+    let Some(ref arena) = state.checkpoint_arena else {
+        return Ok(());
+    };
+    let Some((slot_ptr, header)) = arena.get_slot(&ctx.checkpoint_id, layer) else {
+        return Ok(());
+    };
+    let output = tuple.get_item(2)?;
+    if output.is_none() {
+        return Ok(());
+    }
+    // SAFETY: slot_ptr from get_slot, within arena mmap region.
+    let data_ptr = unsafe { slot_ptr.add(crate::checkpoint::SLOT_HEADER_SIZE) } as usize;
+    let shape: Vec<i64> = header
+        .shape
+        .iter()
+        .take(header.ndim as usize)
+        .map(|&s| s as i64)
+        .collect();
+    if let Some((cosine, mre)) = bridge::compare_activations_from_ptr(
+        py,
+        data_ptr,
+        header.byte_len as usize,
+        header.dtype.to_torch_str(),
+        &shape,
+        &output,
+        ctx.cosine_threshold,
+        ctx.mre_threshold,
+    )? {
+        let family = state
+            .component_map
+            .as_ref()
+            .map_or("unknown", |m| m.model_family.as_str());
+        let probe_point = format!("{family}:0:{layer}:{canonical}:output");
+        ctx.divergences
+            .push(rocket_surgeon_protocol::messages::Divergence {
+                tick_id: state.tick_state.tick_id(),
+                original_tick_id: original_base_tick,
+                probe_point,
+                cosine_similarity: cosine,
+                max_relative_error: mre,
+                message: format!("Divergence at layer {layer}: cosine={cosine:.6}, MRE={mre:.6}"),
+            });
+    }
+    Ok(())
+}
+
+fn run_replay_loop(
+    py: Python<'_>,
+    state: &mut WorkerState,
+    handle: u64,
+    ctx: &mut crate::replay::ReplayContext,
+) -> anyhow::Result<HostReplayResponse> {
+    let pre_replay_tick = state.tick_state.tick_id();
+
+    // Tear down existing forward pass to re-run from restored state
+    state.forward_pass = None;
+    ensure_forward_pass(py, state, handle, None)?;
+
+    let fwd = state
+        .forward_pass
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("forward pass not initialized"))?;
+    let result_mb = fwd.result_mailbox.bind(py);
+    let resume_mb = fwd.resume_mailbox.bind(py);
+
+    let mut ticks = 0u32;
+
+    loop {
+        let value = result_mb.call_method1("wait", (30.0,))?;
+        let tuple = value
+            .downcast::<PyTuple>()
+            .map_err(|e| anyhow::anyhow!("expected tuple from mailbox, got: {e}"))?;
+        let path: String = tuple.get_item(0)?.extract()?;
+        let call_index: u32 = tuple.get_item(1)?.extract()?;
+
+        stash_tensor_output(py, state.last_outputs.as_ref(), &path, call_index, tuple)?;
+        result_mb.call_method0("restore")?;
+
+        if path == FORWARD_COMPLETE_SENTINEL {
+            if let Some(fwd) = state.forward_pass.as_mut() {
+                fwd.forward_complete = true;
+            }
+            break;
+        }
+
+        let (canonical, layer) =
+            if let Some(&idx) = state.component_index.get(&(path.clone(), call_index)) {
+                let c = &state.component_map.as_ref().unwrap().components[idx];
+                (c.canonical.clone(), c.layer_index.unwrap_or(0))
+            } else {
+                (format!("_raw.{path}"), 0)
+            };
+
+        state.tick_state.advance(&canonical, layer, call_index);
+        ticks += 1;
+
+        // Divergence detection at √L checkpoint boundaries
+        if ctx.verify && tuple.len() > 2 {
+            check_divergence_at_boundary(
+                py,
+                state,
+                ctx,
+                layer,
+                &canonical,
+                tuple,
+                pre_replay_tick,
+            )?;
+        }
+
+        // Check stop_at condition
+        if ctx.should_stop(layer, &canonical) {
+            resume_mb.call_method1("put", (py.None(),))?;
+            break;
+        }
+
+        // Apply interventions if any match this point
+        let intervention_result = if !ctx.interventions.is_empty() && tuple.len() > 2 {
+            let output = tuple.get_item(2)?;
+            if output.is_none() {
+                None
+            } else {
+                let family = state
+                    .component_map
+                    .as_ref()
+                    .map_or("unknown", |m| m.model_family.as_str());
+                let recipes_json = serde_json::to_string(&ctx.interventions)?;
+                let (modified, fired) = crate::bridge::apply_interventions_at_point(
+                    py,
+                    &output,
+                    &recipes_json,
+                    family,
+                    state.rank,
+                    layer,
+                    &canonical,
+                    "output",
+                    state.tick_state.tick_id(),
+                    handle,
+                )?;
+                if fired.is_empty() {
+                    None
+                } else {
+                    Some(modified)
+                }
+            }
+        } else {
+            None
+        };
+
+        match intervention_result {
+            Some(modified_tensor) => resume_mb.call_method1("put", (modified_tensor,))?,
+            None => resume_mb.call_method1("put", (py.None(),))?,
+        };
+    }
+
+    ctx.ticks_replayed = ticks;
+    let mut stopped_at = state.tick_state.to_tick_position();
+    stopped_at.replay_of = Some(pre_replay_tick);
+
+    Ok(HostReplayResponse {
+        ticks_replayed: ticks,
+        stopped_at,
+        divergences: ctx.divergences.clone(),
+        verified: ctx.divergences.is_empty(),
+    })
 }
 
 fn handle_host_view(state: &WorkerState, request: &Request) -> Response {
@@ -1886,7 +2347,18 @@ mod tests {
         assert_eq!(layer_index_from_path("model.layers.5"), Some(5));
         assert_eq!(layer_index_from_path("model.layers.0.self_attn"), Some(0));
         assert_eq!(layer_index_from_path("embed_tokens"), None);
-        assert_eq!(layer_index_from_path("model.42.bias"), None);
+        // Numeric fallback: finds 42 as first numeric segment.
+        // Only called with adapter container paths, so this case is academic.
+        assert_eq!(layer_index_from_path("model.42.bias"), Some(42));
+    }
+
+    #[test]
+    fn layer_index_from_path_gpt2_convention() {
+        // GPT-2 uses "transformer.h.N" not "model.layers.N"
+        assert_eq!(layer_index_from_path("transformer.h.0"), Some(0));
+        assert_eq!(layer_index_from_path("transformer.h.3"), Some(3));
+        assert_eq!(layer_index_from_path("transformer.h.11.attn"), Some(11));
+        assert_eq!(layer_index_from_path("transformer.h.0.mlp"), Some(0));
     }
 
     #[test]

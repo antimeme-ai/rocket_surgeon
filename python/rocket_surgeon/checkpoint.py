@@ -16,6 +16,7 @@ import ctypes
 import struct
 from typing import Any
 
+import numpy as np
 import torch
 
 _ELEMENT_SIZES = {
@@ -24,6 +25,15 @@ _ELEMENT_SIZES = {
     torch.float32: 4,
     torch.float64: 8,
 }
+
+
+def activation_available(
+    last_outputs: dict[tuple[str, int], Any],
+    component_path: str,
+    call_index: int,
+) -> bool:
+    """Check whether an activation has been captured for this component."""
+    return (component_path, call_index) in last_outputs
 
 
 def capture_activation(
@@ -129,3 +139,15 @@ def restore_rng_state(state: bytes) -> None:
         offset += length
         t = torch.frombuffer(bytearray(rng_bytes), dtype=torch.uint8)
         torch.cuda.set_rng_state(t, device_id)
+
+
+def capture_cpu_rng_state() -> bytes:
+    """Capture CPU RNG state as raw bytes."""
+    state = torch.random.get_rng_state()
+    return bytes(state.numpy())
+
+
+def restore_cpu_rng_state(state_bytes: bytes) -> None:
+    """Restore CPU RNG state from bytes captured by capture_cpu_rng_state."""
+    state = torch.from_numpy(np.frombuffer(state_bytes, dtype=np.uint8).copy())
+    torch.random.set_rng_state(state)

@@ -6,6 +6,7 @@ mod capture;
 pub mod checkpoint;
 mod dispatch;
 mod kv;
+mod replay;
 mod step_driver;
 mod tick;
 
@@ -27,6 +28,11 @@ struct Cli {
 
 #[allow(clippy::significant_drop_tightening)]
 fn main() {
+    // SAFETY: called before any other thread starts; single-threaded at this point.
+    unsafe {
+        std::env::set_var("CUBLAS_WORKSPACE_CONFIG", ":4096:8");
+    }
+
     pyo3::prepare_freethreaded_python();
 
     let cli = Cli::parse();

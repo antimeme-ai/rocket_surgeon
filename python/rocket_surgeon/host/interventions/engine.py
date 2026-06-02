@@ -10,6 +10,11 @@ if TYPE_CHECKING:
 
 import torch
 
+from rocket_surgeon.host.interventions.callback import (
+    InterventionContext,
+    execute_callback,
+    resolve_callback,
+)
 from rocket_surgeon.host.interventions.composition import filter_recipes, sort_by_priority
 
 log = logging.getLogger(__name__)
@@ -25,6 +30,8 @@ def apply_interventions(
     component: str,
     event: str,
     tensor_store: Callable[[str], torch.Tensor | None] | None = None,
+    tick_id: int = 0,
+    model_handle: int = 0,
 ) -> tuple[torch.Tensor, list[str]]:
     """Apply matching intervention recipes to a tensor.
 
@@ -51,7 +58,16 @@ def apply_interventions(
         if recipe["mode"] == "replace":
             current = original.clone()
 
-        _apply_single(current, recipe, tensor_store)
+        current = _apply_single(
+            current,
+            recipe,
+            layer,
+            component,
+            event,
+            tensor_store,
+            tick_id,
+            model_handle,
+        )
         fired.append(recipe["id"])
 
     return current, fired
@@ -60,9 +76,14 @@ def apply_interventions(
 def _apply_single(
     tensor: torch.Tensor,
     recipe: dict[str, Any],
+    layer: int,
+    component: str,
+    event: str,
     tensor_store: Callable[[str], torch.Tensor | None] | None,
-) -> None:
-    """Apply a single recipe to tensor (in-place)."""
+    tick_id: int,
+    model_handle: int,
+) -> torch.Tensor:
+    """Apply a single recipe to tensor. Returns the (possibly new) tensor."""
     itype = recipe["intervention_type"]
     params = recipe["params"]
 
@@ -76,6 +97,10 @@ def _apply_single(
         _apply_patch(tensor, params, tensor_store)
     elif itype == "clamp":
         tensor.clamp_(min=params["min"], max=params["max"])
+    elif itype == "callback":
+        return _apply_callback(tensor, params, layer, component, event, tick_id, model_handle)
+
+    return tensor
 
 
 def _apply_ablate(tensor: torch.Tensor, params: dict[str, Any]) -> None:
@@ -130,3 +155,32 @@ def _apply_patch(
         log.warning("tensor_store returned None for id %s", source_id)
         return
     tensor.copy_(source)
+
+
+def _apply_callback(
+    tensor: torch.Tensor,
+    params: dict[str, Any],
+    layer: int,
+    component: str,
+    event: str,
+    tick_id: int,
+    model_handle: int,
+) -> torch.Tensor:
+    module_name = params["module"]
+    function_name = params["function"]
+    timeout_s = params.get("timeout_s", 5.0)
+    nan_check = params.get("nan_check", False)
+    fn = resolve_callback(module_name, function_name)
+    ctx = InterventionContext(
+        layer=layer,
+        component=component,
+        event=event,
+        tick_id=tick_id,
+        device=tensor.device,
+        model_handle=model_handle,
+    )
+    result, error = execute_callback(fn, tensor, ctx, timeout_s, nan_check)
+    if result is not None:
+        return result
+    log.warning("callback intervention failed: %s", error)
+    return tensor

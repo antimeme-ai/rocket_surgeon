@@ -27,7 +27,7 @@ from e2e_harness import (
 # ---------------------------------------------------------------------------
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     """Execute the full e2e lifecycle test."""
     proc = spawn_daemon()
 

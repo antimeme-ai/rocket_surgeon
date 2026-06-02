@@ -69,7 +69,7 @@ def find_latest_pftrace(session_id: str) -> Path | None:
     return max(traces, key=lambda p: p.stat().st_mtime)
 
 
-def run_test() -> None:  # noqa: PLR0915
+def run_test() -> None:
     build_binaries()
     proc = spawn_daemon()
 

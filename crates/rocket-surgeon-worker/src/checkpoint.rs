@@ -305,6 +305,27 @@ impl CheckpointArena {
         inner.checkpoint_order.first().cloned()
     }
 
+    pub fn oldest_evictable(&self, current_segment: u32) -> Option<String> {
+        let inner = self.inner.borrow();
+        for id in &inner.checkpoint_order {
+            if let Some(seg_str) = id.strip_prefix("sub-")
+                && let Some(seg) = seg_str
+                    .split('-')
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                && seg != current_segment
+            {
+                return Some(id.clone());
+            }
+        }
+        for id in &inner.checkpoint_order {
+            if id.starts_with("auto-") {
+                return Some(id.clone());
+            }
+        }
+        None
+    }
+
     pub fn slot_info_for_checkpoint(&self, checkpoint_id: &str) -> Vec<(u32, usize, SlotHeader)> {
         let inner = self.inner.borrow();
         let Some(slot_indices) = inner.checkpoint_slots.get(checkpoint_id) else {
