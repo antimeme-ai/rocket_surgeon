@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9efa2e9752404fd7057afbd6ceae7d28a7b4cf2d5ab7550ebc73191106c12978 # shrinks to seq = [AdvanceWorldline { branch_tick: 0 }]

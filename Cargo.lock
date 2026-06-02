@@ -1535,6 +1535,7 @@ dependencies = [
  "flate2",
  "half",
  "perfetto-writer",
+ "proptest",
  "prost",
  "rocket-surgeon-probes",
  "rocket-surgeon-protocol",
