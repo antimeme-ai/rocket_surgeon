@@ -11,6 +11,8 @@ mod session;
 mod session_fsm_proptest;
 mod tensor_stats;
 mod tensor_store;
+#[cfg(test)]
+mod tensor_store_proptest;
 mod trace_log;
 
 use std::io::{self, BufReader};
