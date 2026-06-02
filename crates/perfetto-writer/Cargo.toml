@@ -11,5 +11,8 @@ authors.workspace = true
 prost = "0.14"
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
