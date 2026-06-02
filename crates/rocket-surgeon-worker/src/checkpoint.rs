@@ -973,9 +973,10 @@ mod prop_tests {
     use proptest::prelude::*;
 
     use super::{
-        align_up, load_spilled_checkpoint, spill_checkpoint, CheckpointArena, DtypeTag, SlotHeader,
-        SpillIndexEntry, SLOT_HEADER_SIZE, SLOT_MAGIC, SPILL_INDEX_ENTRY_SIZE,
+        CheckpointArena, DtypeTag, SLOT_HEADER_SIZE, SLOT_MAGIC, SPILL_INDEX_ENTRY_SIZE,
+        SlotHeader, SpillIndexEntry, align_up, load_spilled_checkpoint, spill_checkpoint,
     };
+    use crate::tick::TickState;
 
     // ---- shared op alphabet --------------------------------------------------
     // Small alphabets force collisions, exhaustion, and re-use — the regimes
@@ -1142,6 +1143,8 @@ mod prop_tests {
         use proptest::strategy::{Strategy, ValueTree};
         use proptest::test_runner::TestRunner;
 
+        const SAMPLES: usize = 400;
+
         let mut runner = TestRunner::deterministic();
         let strat = (
             1usize..6,
@@ -1151,7 +1154,6 @@ mod prop_tests {
         let mut total = ArenaStats::default();
         let mut cases_with_exhaustion = 0usize;
         let mut cases_with_present_free = 0usize;
-        const SAMPLES: usize = 400;
 
         for _ in 0..SAMPLES {
             let tree = strat.new_tree(&mut runner).unwrap();
@@ -1176,8 +1178,7 @@ mod prop_tests {
              alloc_exhausted={} free_present={} free_absent={} \
              cases_hitting_exhaustion={cases_with_exhaustion} \
              cases_with_present_free={cases_with_present_free}",
-            total.ops, total.alloc_ok, total.alloc_exhausted, total.free_present,
-            total.free_absent,
+            total.ops, total.alloc_ok, total.alloc_exhausted, total.free_present, total.free_absent,
         );
 
         // Coverage floors: if these fail the generator has gone trivial.
@@ -1285,9 +1286,10 @@ mod prop_tests {
         /// trip; arbitrary strings never panic and yield None unless canonical.
         #[test]
         fn dtype_torch_str_roundtrip(s in "\\PC{0,16}") {
-            match DtypeTag::from_torch_str(&s) {
-                Some(tag) => prop_assert_eq!(tag.to_torch_str(), s.as_str()),
-                None => { /* non-canonical strings are correctly rejected */ }
+            // Valid strings round trip; non-canonical strings are correctly
+            // rejected (None) without panicking.
+            if let Some(tag) = DtypeTag::from_torch_str(&s) {
+                prop_assert_eq!(tag.to_torch_str(), s.as_str());
             }
         }
     }
@@ -1307,15 +1309,19 @@ mod prop_tests {
     // ---- SlotHeader binary roundtrip + exception (tier 4 + exception) --------
 
     fn slot_header_strategy() -> impl Strategy<Value = SlotHeader> {
-        (0u8..4, 0u8..=6, proptest::array::uniform6(0u64..100_000), any::<u64>()).prop_map(
-            |(dtype_byte, ndim, shape, byte_len)| SlotHeader {
+        (
+            0u8..4,
+            0u8..=6,
+            proptest::array::uniform6(0u64..100_000),
+            any::<u64>(),
+        )
+            .prop_map(|(dtype_byte, ndim, shape, byte_len)| SlotHeader {
                 magic: SLOT_MAGIC,
                 dtype: DtypeTag::from_u8(dtype_byte).unwrap(),
                 ndim,
                 shape,
                 byte_len,
-            },
-        )
+            })
     }
 
     proptest! {
@@ -1515,21 +1521,22 @@ mod prop_tests {
             // (outside the CRC'd payload) and the load legitimately succeeds with
             // the original payload intact. Both are correct; a silent wrong-data
             // load or a panic is not.
-            if let Ok(()) = result {
-                let (ptr, _) = arena.get_slot("restored", spec.layer).unwrap();
-                // SAFETY: live slot, reading payload.len() bytes.
-                let restored = unsafe {
-                    std::slice::from_raw_parts(ptr.add(SLOT_HEADER_SIZE), spec.payload.len())
-                };
-                prop_assert_eq!(
-                    restored, spec.payload.as_slice(),
-                    "load succeeded but payload differs — corruption went undetected"
-                );
-            } else {
-                prop_assert!(
-                    result.unwrap_err().to_string().contains("CRC32"),
+            match result {
+                Ok(()) => {
+                    let (ptr, _) = arena.get_slot("restored", spec.layer).unwrap();
+                    // SAFETY: live slot, reading payload.len() bytes.
+                    let restored = unsafe {
+                        std::slice::from_raw_parts(ptr.add(SLOT_HEADER_SIZE), spec.payload.len())
+                    };
+                    prop_assert_eq!(
+                        restored, spec.payload.as_slice(),
+                        "load succeeded but payload differs — corruption went undetected"
+                    );
+                }
+                Err(e) => prop_assert!(
+                    e.to_string().contains("CRC32"),
                     "expected a CRC32 error for in-payload corruption"
-                );
+                ),
             }
         }
 
@@ -1563,5 +1570,77 @@ mod prop_tests {
         let arena = CheckpointArena::new(SLOT_HEADER_SIZE + 16, 4).unwrap();
         let err = load_spilled_checkpoint(&arena, &path, "x").unwrap_err();
         assert!(err.to_string().contains("magic"), "got: {err}");
+    }
+
+    // ---- combined step / checkpoint op sequences (independence) --------------
+
+    #[derive(Clone, Debug)]
+    enum DriverOp {
+        Step { component: u8, layer: u32 },
+        NextToken,
+        Checkpoint { ckpt: u8, layer: u8 },
+        Free { ckpt: u8 },
+    }
+
+    fn driver_op_strategy() -> impl Strategy<Value = DriverOp> {
+        prop_oneof![
+            (0u8..4, 0u32..8).prop_map(|(component, layer)| DriverOp::Step { component, layer }),
+            Just(DriverOp::NextToken),
+            (0..N_CKPTS, 0..N_LAYERS)
+                .prop_map(|(ckpt, layer)| DriverOp::Checkpoint { ckpt, layer }),
+            (0..N_CKPTS).prop_map(|ckpt| DriverOp::Free { ckpt }),
+        ]
+    }
+
+    proptest! {
+        /// Stateful + metamorphic: the step-driver cursor and the checkpoint
+        /// arena are INDEPENDENT subsystems. Interleaving step/next-token with
+        /// checkpoint/free, a checkpoint op must never move the tick clocks and
+        /// a step op must never change the arena's free count. This guards
+        /// against future coupling of replay/checkpoint state. Oracle tier 6.
+        #[test]
+        fn step_and_checkpoint_are_independent(
+            ops in proptest::collection::vec(driver_op_strategy(), 0..60),
+            capacity in 1usize..6,
+        ) {
+            let mut tick = TickState::new(0);
+            let arena = CheckpointArena::new(SLOT_HEADER_SIZE, capacity).unwrap();
+
+            for op in &ops {
+                let tick_before = (tick.token(), tick.operator(), tick.step_count());
+                let arena_before = arena.available();
+                match *op {
+                    DriverOp::Step { component, layer } => {
+                        tick.advance(&format!("c{component}"), layer, 0);
+                        // tick advanced; arena untouched.
+                        prop_assert_eq!(arena.available(), arena_before, "step changed arena");
+                        prop_assert_eq!(tick.operator(), tick_before.1 + 1, "step did not advance");
+                    }
+                    DriverOp::NextToken => {
+                        tick.advance_token();
+                        prop_assert_eq!(arena.available(), arena_before, "next-token changed arena");
+                    }
+                    DriverOp::Checkpoint { ckpt, layer } => {
+                        let _ = arena.alloc_slot(&ckpt_id(ckpt), u32::from(layer));
+                        // checkpoint op; tick clocks untouched.
+                        prop_assert_eq!(
+                            (tick.token(), tick.operator(), tick.step_count()),
+                            tick_before,
+                            "checkpoint op moved the tick cursor"
+                        );
+                    }
+                    DriverOp::Free { ckpt } => {
+                        arena.free_checkpoint(&ckpt_id(ckpt));
+                        prop_assert_eq!(
+                            (tick.token(), tick.operator(), tick.step_count()),
+                            tick_before,
+                            "free op moved the tick cursor"
+                        );
+                    }
+                }
+                // Global arena invariant survives the whole interleaving.
+                prop_assert!(arena.available() <= capacity);
+            }
+        }
     }
 }
