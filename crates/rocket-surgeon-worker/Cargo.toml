@@ -29,5 +29,10 @@ rocket-surgeon-shm.workspace = true
 libc.workspace = true
 crc32fast.workspace = true
 
+[dev-dependencies]
+# Property-based / stateful-model testing (B002 platoon, BRAVO lane).
+proptest = "1"
+tempfile.workspace = true
+
 [lints]
 workspace = true
