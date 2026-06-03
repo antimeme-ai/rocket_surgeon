@@ -3,6 +3,7 @@
 //! Every event source — the terminal, and the daemon link — produces an
 //! [`Action`]; the loop drains a single channel of them.
 
+use rocket_surgeon_protocol::messages::ProbeFiredEvent;
 use rocket_surgeon_protocol::types::TickPosition;
 
 /// An event delivered to the application loop.
@@ -26,6 +27,12 @@ pub enum DaemonEvent {
     Disconnected,
     /// The daemon stopped at a tick (`tick.stopped` notification).
     TickStopped(TickPosition),
+    /// A probe fired (`probe.fired` notification). Consumed by `ProbeWatch`
+    /// to track per-probe fire counts and the most-recent point each probe
+    /// matched. Boxed because `ProbeFiredEvent` carries an inline
+    /// `TensorSummary` (`shape`/`histogram`/`top_k` vectors), making the
+    /// variant ~400 bytes and dwarfing the others.
+    ProbeFired(Box<ProbeFiredEvent>),
 }
 
 /// A command issued by the application toward the daemon link.
