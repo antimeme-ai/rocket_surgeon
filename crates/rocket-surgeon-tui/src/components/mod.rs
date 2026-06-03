@@ -13,6 +13,7 @@
 pub mod command_line;
 pub mod layer_stack;
 pub mod status_bar;
+pub mod tensor_detail;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

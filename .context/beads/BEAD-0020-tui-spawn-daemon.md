@@ -1,9 +1,11 @@
 ---
 id: BEAD-0020
 title: TUI daemon link — spawn `rocket-surgeon` as subprocess over stdio
-status: open
+status: closed
 priority: high
 created: 2026-05-22
+closed: 2026-06-02
+resolution: shipped 2026-05-22 via PR #33 (3c5c400). `daemon::run` uses `tokio::process::Command` with piped stdio + `kill_on_drop`; `main.rs` exposes `--daemon-bin` with sibling-of-current-exe default.
 ---
 
 ## Description

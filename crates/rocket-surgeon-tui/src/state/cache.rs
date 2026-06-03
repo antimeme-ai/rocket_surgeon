@@ -1,7 +1,7 @@
-// In-flight scaffolding: the LRU `TensorCache` is fully unit-tested but not
-// yet consumed by the `main.rs` render loop — wiring it to live daemon data
-// is tracked as separate work. Every item is exercised by the `#[cfg(test)]`
-// suite below, so the bin-only `dead_code` lint is a false positive here.
+// Wiring inspect-response → cache.insert is its own slice. The renderer
+// (`components::tensor_detail`) reads via `peek`; manual `insert` exercises
+// the render path in tests, and the LRU/promotion mechanics still only have
+// unit coverage until a daemon producer lands.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
@@ -14,6 +14,7 @@ pub struct CacheKey {
     pub probe_point: String,
 }
 
+#[derive(Debug)]
 pub struct TensorCache {
     entries: HashMap<CacheKey, TensorSummary>,
     order: VecDeque<CacheKey>,
@@ -36,6 +37,12 @@ impl TensorCache {
         } else {
             None
         }
+    }
+
+    /// Lookup without LRU promotion — for read-only consumers (e.g. immediate-
+    /// mode renderers) that must not mutate cache ordering each frame.
+    pub fn peek(&self, key: &CacheKey) -> Option<&TensorSummary> {
+        self.entries.get(key)
     }
 
     pub fn insert(&mut self, key: CacheKey, summary: TensorSummary) {
