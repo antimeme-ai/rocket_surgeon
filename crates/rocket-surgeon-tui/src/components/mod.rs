@@ -12,6 +12,7 @@
 
 pub mod command_line;
 pub mod layer_stack;
+pub mod probe_watch;
 pub mod status_bar;
 pub mod tensor_detail;
 

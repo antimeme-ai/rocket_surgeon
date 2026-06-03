@@ -11,6 +11,7 @@ use crate::action::{Action, DaemonEvent, Effect};
 use crate::components::Component;
 use crate::components::command_line::CommandLine;
 use crate::components::layer_stack::LayerStack;
+use crate::components::probe_watch::ProbeWatch;
 use crate::components::status_bar::StatusBar;
 use crate::components::tensor_detail::TensorDetail;
 use crate::input::events::InputEvent;
@@ -54,6 +55,7 @@ pub struct App {
     layout: Layout,
     layer_stack: LayerStack,
     tensor_detail: TensorDetail,
+    probe_watch: ProbeWatch,
     status_bar: StatusBar,
     command_line: CommandLine,
 }
@@ -68,6 +70,7 @@ impl App {
             layout: default_layout(),
             layer_stack: LayerStack,
             tensor_detail: TensorDetail,
+            probe_watch: ProbeWatch,
             status_bar: StatusBar,
             command_line: CommandLine,
         }
@@ -116,6 +119,20 @@ impl App {
                 self.state.session.status = Status::Stopped;
                 self.state.session.position = Some(position.clone());
             }
+            DaemonEvent::ProbeFired(fired) => {
+                let entry = self
+                    .state
+                    .probe_stats
+                    .entry(fired.probe_id.clone())
+                    .or_insert_with(|| crate::state::ProbeStats {
+                        fire_count: 0,
+                        last_tick_id: 0,
+                        last_point: String::new(),
+                    });
+                entry.fire_count = entry.fire_count.saturating_add(1);
+                entry.last_tick_id = fired.tick_id;
+                fired.point.clone_into(&mut entry.last_point);
+            }
         }
     }
 
@@ -138,6 +155,7 @@ impl App {
                 Some(ViewKind::TensorDetail) => {
                     self.tensor_detail.draw(frame, *rect, &self.state);
                 }
+                Some(ViewKind::ProbeWatch) => self.probe_watch.draw(frame, *rect, &self.state),
                 Some(ViewKind::StatusBar) => self.status_bar.draw(frame, *rect, &self.state),
                 Some(ViewKind::CommandLine) => self.command_line.draw(frame, *rect, &self.state),
                 _ => Self::draw_placeholder(frame, *rect, view_id),
@@ -146,8 +164,7 @@ impl App {
     }
 
     /// Render a bordered placeholder for a [`ViewKind`] that has no component
-    /// yet (`ProbeWatch`, `Timeline`, `KvCache`, `Worldline`, built per-panel
-    /// in slice 5).
+    /// yet (`Timeline`, `KvCache`, `Worldline`, built per-panel in slice 5).
     fn draw_placeholder(frame: &mut Frame<'_>, rect: Rect, view_id: &ViewId) {
         let block = Block::default()
             .title(format!("View {}", view_id.0))
@@ -344,11 +361,11 @@ mod tests {
 
     #[test]
     fn draw_renders_placeholder_for_unmapped_kind() {
-        // LayerStack and TensorDetail now have components; swap the main panel
-        // to a still-unmapped kind so the placeholder fallback path stays
-        // exercised.
+        // LayerStack, TensorDetail and ProbeWatch now have components; swap
+        // the main panel to a still-unmapped kind so the placeholder fallback
+        // path stays exercised.
         let mut app = App::new();
-        app.state.views[0].kind = ViewKind::ProbeWatch;
+        app.state.views[0].kind = ViewKind::Timeline;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -382,6 +399,69 @@ mod tests {
         assert!(
             !title.contains("View 0"),
             "TensorDetail must not fall through to the placeholder",
+        );
+    }
+
+    #[test]
+    fn probe_fired_event_increments_stats() {
+        // Slice 5c: `DaemonEvent::ProbeFired` accumulates into
+        // `UiState::probe_stats`; subsequent fires update the count and the
+        // most-recent fields.
+        use rocket_surgeon_protocol::messages::ProbeFiredEvent;
+        use rocket_surgeon_protocol::types::ProbeAction;
+
+        let mut app = App::new();
+        let evt = ProbeFiredEvent {
+            probe_id: "watch-1".to_owned(),
+            point: "L0::attn.q_proj:output".to_owned(),
+            tick_id: 5,
+            tensor_summary: None,
+            action: ProbeAction::Capture,
+            timestamp: "2026-06-02T00:00:00Z".to_owned(),
+            rank: 0,
+        };
+        app.update(&Action::Daemon(DaemonEvent::ProbeFired(Box::new(
+            evt.clone(),
+        ))));
+        app.update(&Action::Daemon(DaemonEvent::ProbeFired(Box::new(
+            ProbeFiredEvent {
+                tick_id: 12,
+                point: "L2::mlp.gate:output".to_owned(),
+                ..evt
+            },
+        ))));
+
+        let stats = app
+            .state
+            .probe_stats
+            .get("watch-1")
+            .expect("probe_stats entry was created");
+        assert_eq!(stats.fire_count, 2);
+        assert_eq!(stats.last_tick_id, 12);
+        assert_eq!(stats.last_point, "L2::mlp.gate:output");
+    }
+
+    #[test]
+    fn draw_routes_probe_watch_to_its_component() {
+        // Slice 5c: `ViewKind::ProbeWatch` resolves to the `ProbeWatch`
+        // component, not the placeholder fallback.
+        let mut app = App::new();
+        app.state.views[0].kind = ViewKind::ProbeWatch;
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let title: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            title.contains("Probes"),
+            "expected ProbeWatch's 'Probes' title in row 0, got: {title:?}",
+        );
+        assert!(
+            !title.contains("View 0"),
+            "ProbeWatch must not fall through to the placeholder",
         );
     }
 }

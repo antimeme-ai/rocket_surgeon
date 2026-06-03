@@ -227,6 +227,12 @@ fn map_notification(notification: &Notification) -> Option<Action> {
                 serde_json::from_value(params.get("position")?.clone()).ok()?;
             Some(Action::Daemon(DaemonEvent::TickStopped(position)))
         }
+        "probe.fired" => {
+            let params = notification.params.as_ref()?;
+            let event: rocket_surgeon_protocol::messages::ProbeFiredEvent =
+                serde_json::from_value(params.clone()).ok()?;
+            Some(Action::Daemon(DaemonEvent::ProbeFired(Box::new(event))))
+        }
         _ => None,
     }
 }
@@ -279,6 +285,44 @@ mod tests {
     #[test]
     fn tick_stopped_without_position_maps_to_none() {
         let notification = Notification::new("tick.stopped", serde_json::json!({}));
+        assert!(map_notification(&notification).is_none());
+    }
+
+    #[test]
+    fn maps_probe_fired_to_action() {
+        let notification = Notification::new(
+            "probe.fired",
+            serde_json::json!({
+                "probe_id": "attn-watch",
+                "point": "L7::attn.o_proj:output",
+                "tick_id": 42,
+                "tensor_summary": null,
+                "action": "capture",
+                "timestamp": "2026-06-02T00:00:00Z",
+                "rank": 0
+            }),
+        );
+        match map_notification(&notification) {
+            Some(Action::Daemon(DaemonEvent::ProbeFired(evt))) => {
+                assert_eq!(evt.probe_id, "attn-watch");
+                assert_eq!(evt.tick_id, 42);
+                assert_eq!(evt.point, "L7::attn.o_proj:output");
+            }
+            other => panic!("expected ProbeFired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_fired_with_missing_required_field_maps_to_none() {
+        // No `probe_id` — serde rejects the deserialize, the mapper falls
+        // through to `None` rather than panicking.
+        let notification = Notification::new(
+            "probe.fired",
+            serde_json::json!({
+                "point": "L0::attn:output",
+                "tick_id": 1
+            }),
+        );
         assert!(map_notification(&notification).is_none());
     }
 

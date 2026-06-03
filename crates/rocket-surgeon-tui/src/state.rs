@@ -1,7 +1,11 @@
 pub mod cache;
 pub mod reducer;
 
-use rocket_surgeon_protocol::types::{Capabilities, InterventionRecipe, Status, TickPosition};
+use std::collections::HashMap;
+
+use rocket_surgeon_protocol::types::{
+    Capabilities, InterventionRecipe, ProbeDefinition, Status, TickPosition,
+};
 
 use crate::input::mode::Mode;
 use crate::state::cache::TensorCache;
@@ -30,6 +34,21 @@ pub struct UiState {
     /// `(tick_id, probe_point)`. Populated by the inspect response path
     /// (separate slice); read by `TensorDetail`.
     pub tensor_cache: TensorCache,
+    /// Per-probe runtime stats accumulated from `probe.fired` notifications.
+    /// `ProbeWatch` reads this to render live counts and most-recent points;
+    /// the producer is `App::apply_daemon` on `DaemonEvent::ProbeFired`.
+    pub probe_stats: HashMap<String, ProbeStats>,
+}
+
+/// Aggregate runtime view of a single probe accumulated from daemon
+/// `probe.fired` notifications. The TUI does not have authoritative per-probe
+/// definitions until the define-probe response wiring lands — until then, a
+/// probe is "known" by virtue of having fired at least once.
+#[derive(Debug, Clone)]
+pub struct ProbeStats {
+    pub fire_count: u32,
+    pub last_tick_id: u64,
+    pub last_point: String,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +64,12 @@ pub struct SessionSnapshot {
     /// Daemon-populated; set from the `connected` handshake (slice 2).
     #[allow(dead_code)]
     pub protocol_version: String,
+    /// Last-known probe definitions, populated by the define-probe response
+    /// path (separate slice). `ProbeWatch` reads this to enrich the runtime
+    /// view from `UiState::probe_stats` with the `point` pattern and `action`
+    /// each probe was registered with.
+    #[allow(dead_code)]
+    pub defined_probes: Vec<ProbeDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,12 +97,15 @@ pub enum ViewKind {
     // in tests; the bin target still flags it dead until then.
     #[allow(dead_code)]
     TensorDetail,
+    // ProbeWatch is implemented (slice 5c) but not in the default layout —
+    // selectable once panel-swap commands land. The variant is constructed
+    // in tests; the bin target still flags it dead until then.
+    #[allow(dead_code)]
+    ProbeWatch,
     // In-flight scaffolding: view kinds for the planned panel set, built out
     // per-panel in BEAD-0015 slice 5. `StatusBar` and `CommandLine` are
     // backed by components and used in the default layout; the rest are not
     // yet constructed.
-    #[allow(dead_code)]
-    ProbeWatch,
     #[allow(dead_code)]
     Timeline,
     #[allow(dead_code)]
@@ -96,6 +124,7 @@ pub fn initial_ui_state() -> UiState {
             capabilities: None,
             active_interventions: Vec::new(),
             protocol_version: String::new(),
+            defined_probes: Vec::new(),
         },
         cursor: CursorState {
             layer: 0,
@@ -109,5 +138,6 @@ pub fn initial_ui_state() -> UiState {
         status_line: String::new(),
         command_buffer: String::new(),
         tensor_cache: TensorCache::new(DEFAULT_TENSOR_CACHE_CAPACITY),
+        probe_stats: HashMap::new(),
     }
 }
