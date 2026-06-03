@@ -1,9 +1,11 @@
 ---
 id: BEAD-0021
 title: Workspace lints duplication — worker/shm copy-paste the whole [lints] block to override `unsafe_code`
-status: open
+status: closed
 priority: medium
 created: 2026-05-25
+closed: 2026-05-25
+resolution: shipped via `eb21c16` (workspace lints dedup, per-crate `unsafe_code` attrs), `3d0b289` (xtask inherits), merge `f070918`.
 ---
 
 ## Description

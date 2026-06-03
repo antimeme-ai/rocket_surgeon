@@ -1199,12 +1199,11 @@ mod prop_tests {
     /// independently from the production parser. Oracle for the model test.
     fn model_oldest_evictable(order: &[String], current_segment: u32) -> Option<String> {
         for id in order {
-            if let Some(rest) = id.strip_prefix("sub-") {
-                if let Some(seg) = rest.split('-').next().and_then(|s| s.parse::<u32>().ok()) {
-                    if seg != current_segment {
-                        return Some(id.clone());
-                    }
-                }
+            if let Some(rest) = id.strip_prefix("sub-")
+                && let Some(seg) = rest.split('-').next().and_then(|s| s.parse::<u32>().ok())
+                && seg != current_segment
+            {
+                return Some(id.clone());
             }
         }
         order.iter().find(|id| id.starts_with("auto-")).cloned()

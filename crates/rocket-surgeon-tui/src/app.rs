@@ -12,6 +12,7 @@ use crate::components::Component;
 use crate::components::command_line::CommandLine;
 use crate::components::layer_stack::LayerStack;
 use crate::components::status_bar::StatusBar;
+use crate::components::tensor_detail::TensorDetail;
 use crate::input::events::InputEvent;
 use crate::input::terminal::decode;
 use crate::state::reducer::apply_input;
@@ -52,6 +53,7 @@ pub struct App {
     state: UiState,
     layout: Layout,
     layer_stack: LayerStack,
+    tensor_detail: TensorDetail,
     status_bar: StatusBar,
     command_line: CommandLine,
 }
@@ -65,6 +67,7 @@ impl App {
             state,
             layout: default_layout(),
             layer_stack: LayerStack,
+            tensor_detail: TensorDetail,
             status_bar: StatusBar,
             command_line: CommandLine,
         }
@@ -132,6 +135,9 @@ impl App {
                 .map(|v| &v.kind);
             match kind {
                 Some(ViewKind::LayerStack) => self.layer_stack.draw(frame, *rect, &self.state),
+                Some(ViewKind::TensorDetail) => {
+                    self.tensor_detail.draw(frame, *rect, &self.state);
+                }
                 Some(ViewKind::StatusBar) => self.status_bar.draw(frame, *rect, &self.state),
                 Some(ViewKind::CommandLine) => self.command_line.draw(frame, *rect, &self.state),
                 _ => Self::draw_placeholder(frame, *rect, view_id),
@@ -140,7 +146,8 @@ impl App {
     }
 
     /// Render a bordered placeholder for a [`ViewKind`] that has no component
-    /// yet (`LayerStack`, `TensorDetail`, …, built per-panel in slice 5).
+    /// yet (`ProbeWatch`, `Timeline`, `KvCache`, `Worldline`, built per-panel
+    /// in slice 5).
     fn draw_placeholder(frame: &mut Frame<'_>, rect: Rect, view_id: &ViewId) {
         let block = Block::default()
             .title(format!("View {}", view_id.0))
@@ -337,10 +344,11 @@ mod tests {
 
     #[test]
     fn draw_renders_placeholder_for_unmapped_kind() {
-        // LayerStack now has a component (slice 5a); swap the main panel to
-        // an unmapped kind so the placeholder path is still exercised.
+        // LayerStack and TensorDetail now have components; swap the main panel
+        // to a still-unmapped kind so the placeholder fallback path stays
+        // exercised.
         let mut app = App::new();
-        app.state.views[0].kind = ViewKind::TensorDetail;
+        app.state.views[0].kind = ViewKind::ProbeWatch;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -350,5 +358,30 @@ mod tests {
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("View 0"));
+    }
+
+    #[test]
+    fn draw_routes_tensor_detail_to_its_component() {
+        // Slice 5b: `ViewKind::TensorDetail` resolves to the `TensorDetail`
+        // component, not the placeholder fallback. Content correctness is
+        // covered by the component's own tests; here we verify routing.
+        let mut app = App::new();
+        app.state.views[0].kind = ViewKind::TensorDetail;
+        let backend = TestBackend::new(40, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let title: String = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            title.contains("Tensor"),
+            "expected TensorDetail's 'Tensor' title in row 0, got: {title:?}",
+        );
+        assert!(
+            !title.contains("View 0"),
+            "TensorDetail must not fall through to the placeholder",
+        );
     }
 }

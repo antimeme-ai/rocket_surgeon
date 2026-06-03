@@ -17,6 +17,9 @@ build/
 .venv/
 .venv
 venv/
+# uv lockfile — tracked-or-not is a project policy decision; keeping out
+# until that's made deliberately.
+uv.lock
 
 # Build artifacts / binaries
 *.so
